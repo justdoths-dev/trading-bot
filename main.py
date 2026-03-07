@@ -1,32 +1,11 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
 
-from src.ai.ai_service import AIService, AIServiceConfig
-from src.config.settings import settings
-from src.data.multi_timeframe_loader import MultiTimeframeLoader
-from src.execution.execution_engine import ExecutionEngine
-from src.exchange.binance_client import BinanceMarketDataClient
-from src.indicators.indicator_engine import IndicatorEngine
-from src.risk.risk_manager import RiskManager
-from src.storage.trade_analysis_logger import (
-    TradeAnalysisLogger,
-    TradeAnalysisLoggerConfig,
-)
-from src.strategy.strategy_engine import StrategyEngine
-from src.telegram.telegram_formatter import TelegramFormatter
-from src.telegram.telegram_sender import TelegramSender
-
-
-@dataclass
-class TimeframeConfig:
-    """Configuration for one timeframe data request."""
-    timeframe: str
-    limit: int
+from src.services.trading_pipeline import TradingPipeline, TradingPipelineConfig
 
 
 def print_timeframe_preview(
@@ -42,17 +21,6 @@ def print_timeframe_preview(
             continue
 
         print(df.tail(tail_size))
-
-
-def build_timeframe_configs() -> list[TimeframeConfig]:
-    return [
-        TimeframeConfig(timeframe="1m", limit=100),
-        TimeframeConfig(timeframe="5m", limit=100),
-        TimeframeConfig(timeframe="15m", limit=100),
-        TimeframeConfig(timeframe="1h", limit=100),
-        TimeframeConfig(timeframe="4h", limit=100),
-        TimeframeConfig(timeframe="1d", limit=100),
-    ]
 
 
 def print_strategy_result(result: dict[str, Any]) -> None:
@@ -135,109 +103,51 @@ def print_ai_result(result: dict[str, Any]) -> None:
     print(f"Reason : {analysis['stance_reason']}")
 
 
-def main() -> None:
-
-    symbol = "BTCUSDT"
-
-    if not settings.binance_api_key or not settings.binance_api_secret:
-        print("BINANCE API key missing (public data still works).")
-
-    client = BinanceMarketDataClient()
-    loader = MultiTimeframeLoader(client=client)
-
-    configs = build_timeframe_configs()
-
-    multi_timeframe_data = loader.load(
-        symbol=symbol,
-        configs=configs,
-    )
-
-    print_timeframe_preview("RAW DATA", multi_timeframe_data)
-
-    indicator_engine = IndicatorEngine()
-
-    enriched_data = indicator_engine.enrich(multi_timeframe_data)
-
-    print_timeframe_preview("ENRICHED DATA", enriched_data)
-
-    strategy_engine = StrategyEngine()
-    strategy_result = strategy_engine.evaluate(enriched_data)
-
-    print_strategy_result(strategy_result)
-
-    risk_manager = RiskManager()
-    risk_result = risk_manager.evaluate(strategy_result, enriched_data)
-
-    print_risk_result(risk_result)
-
-    execution_engine = ExecutionEngine(
-        symbol=symbol,
-        execution_mode="paper",
-    )
-
-    execution_result = execution_engine.create_plan(
-        strategy_result,
-        risk_result,
-    )
-
-    print_execution_result(execution_result)
-
-    ai_service = AIService(
-        config=AIServiceConfig(symbol=symbol)
-    )
-
-    ai_output = ai_service.run(
-        enriched_data=enriched_data,
-        strategy_result=strategy_result,
-        risk_result=risk_result,
-        execution_result=execution_result,
-    )
-
-    print_ai_payload(ai_output["payload"])
-    print_ai_prompt(ai_output["prompt"])
-    print_ai_result(ai_output["result"])
-
-    logger = TradeAnalysisLogger(
-        config=TradeAnalysisLoggerConfig()
-    )
-
-    log_record = logger.log(
-        symbol=symbol,
-        strategy_result=strategy_result,
-        risk_result=risk_result,
-        execution_result=execution_result,
-        ai_result=ai_output["result"],
-    )
-
+def print_log_result(record: dict[str, Any]) -> None:
     print("\n=== LOG RESULT ===")
-    print(json.dumps(log_record, indent=2, ensure_ascii=False))
+    print(f"Logged At             : {record['logged_at']}")
+    print(f"Symbol                : {record['symbol']}")
+    print(f"Rule Signal           : {record['rule_engine']['signal']}")
+    print(f"Execution Action      : {record['execution']['action']}")
+    print(f"AI Final Stance       : {record['ai']['final_stance']}")
+    print(f"Execution / AI Aligned: {record['alignment']['is_aligned']}")
 
-    # Telegram formatter
-    formatter = TelegramFormatter(
-        symbol=symbol,
-        strategy_result=strategy_result,
-        risk_result=risk_result,
-        execution_result=execution_result,
-        ai_result=ai_output["result"],
+
+def print_telegram_message_preview(message: str) -> None:
+    print("\n=== TELEGRAM MESSAGE PREVIEW ===")
+    print(message)
+
+
+def print_telegram_send_result(result: dict[str, Any]) -> None:
+    print("\n=== TELEGRAM SEND RESULT ===")
+    print(f"Sent   : {result['sent']}")
+    print(f"Reason : {result['reason']}")
+
+
+def main() -> None:
+    pipeline = TradingPipeline(
+        config=TradingPipelineConfig(
+            symbol="BTCUSDT",
+            send_telegram=True,
+        )
     )
 
-    telegram_message = formatter.format_message()
+    result = pipeline.run()
 
-    print("\n=== TELEGRAM MESSAGE PREVIEW ===")
-    print(telegram_message)
+    print_timeframe_preview("RAW DATA", result["raw_data"])
+    print_timeframe_preview("ENRICHED DATA", result["enriched_data"])
 
-    # Telegram sender
-    if settings.telegram_bot_token and settings.telegram_chat_id:
-        sender = TelegramSender(
-            bot_token=settings.telegram_bot_token,
-            chat_id=settings.telegram_chat_id,
-        )
+    print_strategy_result(result["strategy_result"])
+    print_risk_result(result["risk_result"])
+    print_execution_result(result["execution_result"])
 
-        sender.send_message(telegram_message)
+    print_ai_payload(result["ai_output"]["payload"])
+    print_ai_prompt(result["ai_output"]["prompt"])
+    print_ai_result(result["ai_output"]["result"])
 
-        print("\nTelegram message sent successfully.")
-    else:
-        print("\nTelegram credentials missing, message not sent.")
+    print_log_result(result["log_record"])
+    print_telegram_message_preview(result["telegram_message"])
+    print_telegram_send_result(result["telegram_send_result"])
 
 
 if __name__ == "__main__":
