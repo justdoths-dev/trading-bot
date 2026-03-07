@@ -5,6 +5,7 @@ from typing import Any
 
 import pandas as pd
 
+from src.config.settings import settings
 from src.services.trading_pipeline import TradingPipeline, TradingPipelineConfig
 
 
@@ -127,8 +128,8 @@ def print_telegram_send_result(result: dict[str, Any]) -> None:
 def main() -> None:
     pipeline = TradingPipeline(
         config=TradingPipelineConfig(
-            symbol="BTCUSDT",
-            send_telegram=True,
+            symbol=settings.pipeline.default_symbol,
+            send_telegram=settings.pipeline.send_telegram,
         )
     )
 

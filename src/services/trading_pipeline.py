@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import pandas as pd
-
 from src.ai.ai_service import AIService, AIServiceConfig
 from src.config.settings import settings
 from src.data.multi_timeframe_loader import MultiTimeframeLoader
@@ -31,30 +29,56 @@ class TimeframeConfig:
 @dataclass
 class TradingPipelineConfig:
     """Configuration for the trading pipeline."""
-    symbol: str = "BTCUSDT"
-    send_telegram: bool = True
+    symbol: str
+    send_telegram: bool
 
 
 class TradingPipeline:
     """Run the full trading analysis pipeline end-to-end."""
 
     def __init__(self, config: TradingPipelineConfig | None = None) -> None:
-        self.config = config or TradingPipelineConfig()
+        self.config = config or TradingPipelineConfig(
+            symbol=settings.pipeline.default_symbol,
+            send_telegram=settings.pipeline.send_telegram,
+        )
 
         self.client = BinanceMarketDataClient()
         self.loader = MultiTimeframeLoader(client=self.client)
 
-        self.indicator_engine = IndicatorEngine()
+        self.indicator_engine = IndicatorEngine(
+            rsi_period=settings.indicators.rsi_period,
+            ema_fast_period=settings.indicators.ema_fast_period,
+            ema_slow_period=settings.indicators.ema_slow_period,
+            macd_fast_period=settings.indicators.macd_fast_period,
+            macd_slow_period=settings.indicators.macd_slow_period,
+            macd_signal_period=settings.indicators.macd_signal_period,
+            atr_period=settings.indicators.atr_period,
+        )
+
         self.strategy_engine = StrategyEngine()
-        self.risk_manager = RiskManager()
+
+        self.risk_manager = RiskManager(
+            entry_timeframe=settings.risk.entry_timeframe,
+            atr_column=settings.risk.atr_column,
+            stop_atr_multiplier=settings.risk.stop_atr_multiplier,
+            take_profit_atr_multiplier=settings.risk.take_profit_atr_multiplier,
+            min_risk_reward_ratio=settings.risk.min_risk_reward_ratio,
+        )
 
         self.execution_engine = ExecutionEngine(
             symbol=self.config.symbol,
-            execution_mode="paper",
+            execution_mode=settings.ai.environment,
         )
 
         self.ai_service = AIService(
-            config=AIServiceConfig(symbol=self.config.symbol)
+            config=AIServiceConfig(
+                model=settings.ai.model,
+                timeout_seconds=settings.ai.timeout_seconds,
+                max_retries=settings.ai.max_retries,
+                retry_backoff_seconds=settings.ai.retry_backoff_seconds,
+                environment=settings.ai.environment,
+                symbol=self.config.symbol,
+            )
         )
 
         self.logger = TradeAnalysisLogger(
