@@ -13,6 +13,10 @@ from src.execution.execution_engine import ExecutionEngine
 from src.exchange.binance_client import BinanceMarketDataClient
 from src.indicators.indicator_engine import IndicatorEngine
 from src.risk.risk_manager import RiskManager
+from src.storage.trade_analysis_logger import (
+    TradeAnalysisLogger,
+    TradeAnalysisLoggerConfig,
+)
 from src.strategy.strategy_engine import StrategyEngine
 
 
@@ -137,7 +141,19 @@ def print_ai_result(result: dict[str, Any]) -> None:
         print(f"- {line}")
 
 
+def print_log_result(record: dict[str, Any]) -> None:
+    print("\n=== LOG RESULT ===")
+    print(f"Logged At             : {record['logged_at']}")
+    print(f"Symbol                : {record['symbol']}")
+    print(f"Rule Signal           : {record['rule_engine']['signal']}")
+    print(f"Execution Action      : {record['execution']['action']}")
+    print(f"AI Final Stance       : {record['ai']['final_stance']}")
+    print(f"Execution / AI Aligned: {record['alignment']['is_aligned']}")
+
+
 def main() -> None:
+    symbol = "BTCUSDT"
+
     api_key = settings.binance_api_key
     api_secret = settings.binance_api_secret
 
@@ -153,7 +169,7 @@ def main() -> None:
     configs = build_timeframe_configs()
 
     multi_timeframe_data = loader.load(
-        symbol="BTCUSDT",
+        symbol=symbol,
         configs=configs,
     )
 
@@ -190,7 +206,7 @@ def main() -> None:
     print_risk_result(risk_result)
 
     execution_engine = ExecutionEngine(
-        symbol="BTCUSDT",
+        symbol=symbol,
         execution_mode="paper",
     )
     execution_result = execution_engine.create_plan(strategy_result, risk_result)
@@ -204,7 +220,7 @@ def main() -> None:
             max_retries=2,
             retry_backoff_seconds=1.5,
             environment="paper",
-            symbol="BTCUSDT",
+            symbol=symbol,
         )
     )
 
@@ -218,6 +234,24 @@ def main() -> None:
     print_ai_payload(ai_output["payload"])
     print_ai_prompt(ai_output["prompt"])
     print_ai_result(ai_output["result"])
+
+    logger = TradeAnalysisLogger(
+        config=TradeAnalysisLoggerConfig(
+            log_dir="logs",
+            filename="trade_analysis.jsonl",
+            utc_timestamp=True,
+        )
+    )
+
+    log_record = logger.log(
+        symbol=symbol,
+        strategy_result=strategy_result,
+        risk_result=risk_result,
+        execution_result=execution_result,
+        ai_result=ai_output["result"],
+    )
+
+    print_log_result(log_record)
 
 
 if __name__ == "__main__":

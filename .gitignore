@@ -26,4 +26,4 @@ logs/
 # python build artifacts
 build/
 dist/
-*.egg-info/
+*.egg-info/logs/
