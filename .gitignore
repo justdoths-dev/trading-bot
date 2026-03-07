@@ -1,0 +1,29 @@
+# virtual environment
+venv/
+
+# python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# environment variables
+.env
+.env.*
+
+# logs
+*.log
+logs/
+
+# vscode settings
+.vscode/
+
+# system files
+.DS_Store
+
+# pytest
+.pytest_cache/
+
+# python build artifacts
+build/
+dist/
+*.egg-info/
