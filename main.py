@@ -19,6 +19,7 @@ from src.storage.trade_analysis_logger import (
 )
 from src.strategy.strategy_engine import StrategyEngine
 from src.telegram.telegram_formatter import TelegramFormatter
+from src.telegram.telegram_sender import TelegramSender
 
 
 @dataclass
@@ -110,10 +111,6 @@ def print_ai_prompt(prompt: str, max_chars: int = 3000) -> None:
 
 def print_ai_result(result: dict[str, Any]) -> None:
     print("\n=== AI RESULT ===")
-    print(f"Source      : {result['source']}")
-    print(f"Model       : {result['model']}")
-    print(f"Environment : {result['environment']}")
-    print(f"Generated At: {result['generated_at']}")
 
     analysis = result["analysis"]
 
@@ -137,37 +134,13 @@ def print_ai_result(result: dict[str, Any]) -> None:
     print(f"Stance : {analysis['final_stance']}")
     print(f"Reason : {analysis['stance_reason']}")
 
-    print("\n--- TELEGRAM BRIEFING ---")
-    for line in analysis["telegram_briefing"]:
-        print(f"- {line}")
-
-
-def print_log_result(record: dict[str, Any]) -> None:
-    print("\n=== LOG RESULT ===")
-    print(f"Logged At             : {record['logged_at']}")
-    print(f"Symbol                : {record['symbol']}")
-    print(f"Rule Signal           : {record['rule_engine']['signal']}")
-    print(f"Execution Action      : {record['execution']['action']}")
-    print(f"AI Final Stance       : {record['ai']['final_stance']}")
-    print(f"Execution / AI Aligned: {record['alignment']['is_aligned']}")
-
-
-def print_telegram_message_preview(message: str) -> None:
-    print("\n=== TELEGRAM MESSAGE PREVIEW ===")
-    print(message)
-
 
 def main() -> None:
+
     symbol = "BTCUSDT"
 
-    api_key = settings.binance_api_key
-    api_secret = settings.binance_api_secret
-
-    if not api_key or not api_secret:
-        print(
-            "BINANCE_API_KEY or BINANCE_API_SECRET is missing. "
-            "Public market data requests can still work."
-        )
+    if not settings.binance_api_key or not settings.binance_api_secret:
+        print("BINANCE API key missing (public data still works).")
 
     client = BinanceMarketDataClient()
     loader = MultiTimeframeLoader(client=client)
@@ -181,15 +154,7 @@ def main() -> None:
 
     print_timeframe_preview("RAW DATA", multi_timeframe_data)
 
-    indicator_engine = IndicatorEngine(
-        rsi_period=14,
-        ema_fast_period=20,
-        ema_slow_period=50,
-        macd_fast_period=12,
-        macd_slow_period=26,
-        macd_signal_period=9,
-        atr_period=14,
-    )
+    indicator_engine = IndicatorEngine()
 
     enriched_data = indicator_engine.enrich(multi_timeframe_data)
 
@@ -200,13 +165,7 @@ def main() -> None:
 
     print_strategy_result(strategy_result)
 
-    risk_manager = RiskManager(
-        entry_timeframe="5m",
-        atr_column="atr_14",
-        stop_atr_multiplier=1.5,
-        take_profit_atr_multiplier=2.0,
-        min_risk_reward_ratio=1.0,
-    )
+    risk_manager = RiskManager()
     risk_result = risk_manager.evaluate(strategy_result, enriched_data)
 
     print_risk_result(risk_result)
@@ -215,19 +174,16 @@ def main() -> None:
         symbol=symbol,
         execution_mode="paper",
     )
-    execution_result = execution_engine.create_plan(strategy_result, risk_result)
+
+    execution_result = execution_engine.create_plan(
+        strategy_result,
+        risk_result,
+    )
 
     print_execution_result(execution_result)
 
     ai_service = AIService(
-        config=AIServiceConfig(
-            model="gpt-4.1-mini",
-            timeout_seconds=30,
-            max_retries=2,
-            retry_backoff_seconds=1.5,
-            environment="paper",
-            symbol=symbol,
-        )
+        config=AIServiceConfig(symbol=symbol)
     )
 
     ai_output = ai_service.run(
@@ -242,11 +198,7 @@ def main() -> None:
     print_ai_result(ai_output["result"])
 
     logger = TradeAnalysisLogger(
-        config=TradeAnalysisLoggerConfig(
-            log_dir="logs",
-            filename="trade_analysis.jsonl",
-            utc_timestamp=True,
-        )
+        config=TradeAnalysisLoggerConfig()
     )
 
     log_record = logger.log(
@@ -257,9 +209,11 @@ def main() -> None:
         ai_result=ai_output["result"],
     )
 
-    print_log_result(log_record)
+    print("\n=== LOG RESULT ===")
+    print(json.dumps(log_record, indent=2, ensure_ascii=False))
 
-    telegram_formatter = TelegramFormatter(
+    # Telegram formatter
+    formatter = TelegramFormatter(
         symbol=symbol,
         strategy_result=strategy_result,
         risk_result=risk_result,
@@ -267,8 +221,23 @@ def main() -> None:
         ai_result=ai_output["result"],
     )
 
-    telegram_message = telegram_formatter.format_message()
-    print_telegram_message_preview(telegram_message)
+    telegram_message = formatter.format_message()
+
+    print("\n=== TELEGRAM MESSAGE PREVIEW ===")
+    print(telegram_message)
+
+    # Telegram sender
+    if settings.telegram_bot_token and settings.telegram_chat_id:
+        sender = TelegramSender(
+            bot_token=settings.telegram_bot_token,
+            chat_id=settings.telegram_chat_id,
+        )
+
+        sender.send_message(telegram_message)
+
+        print("\nTelegram message sent successfully.")
+    else:
+        print("\nTelegram credentials missing, message not sent.")
 
 
 if __name__ == "__main__":

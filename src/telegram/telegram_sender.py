@@ -8,7 +8,7 @@ import requests
 
 
 class TelegramSender:
-    """Send messages to a Telegram chat using Bot API."""
+    """Send messages to a Telegram chat using the Telegram Bot API."""
 
     MAX_MESSAGE_LENGTH = 4096
 
@@ -23,15 +23,19 @@ class TelegramSender:
         if not self.chat_id:
             raise ValueError("Telegram chat id is required.")
 
-        self._endpoint = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        self.endpoint = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
 
     def send_message(self, text: str) -> dict[str, Any]:
-        """Send a text message and return Telegram API response payload."""
+        """
+        Send a message to Telegram.
+
+        Returns Telegram API response payload.
+        """
 
         message = (text or "").strip()
 
         if not message:
-            raise ValueError("Message text cannot be empty.")
+            raise ValueError("Telegram message text cannot be empty.")
 
         message = self._truncate(message)
 
@@ -44,14 +48,14 @@ class TelegramSender:
 
         try:
             response = requests.post(
-                self._endpoint,
+                self.endpoint,
                 json=payload,
                 timeout=self.timeout_seconds,
             )
             response.raise_for_status()
 
         except requests.RequestException as exc:
-            raise RuntimeError(f"Failed to send Telegram message: {exc}") from exc
+            raise RuntimeError(f"Telegram API request failed: {exc}") from exc
 
         try:
             body = response.json()
@@ -65,7 +69,7 @@ class TelegramSender:
         return body
 
     def _truncate(self, message: str) -> str:
-        """Ensure message does not exceed Telegram limits."""
+        """Ensure message respects Telegram length limits."""
         if len(message) <= self.MAX_MESSAGE_LENGTH:
             return message
         return message[: self.MAX_MESSAGE_LENGTH - 3] + "..."
