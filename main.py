@@ -8,6 +8,7 @@ from src.config.settings import settings
 from src.data.multi_timeframe_loader import MultiTimeframeLoader
 from src.exchange.binance_client import BinanceMarketDataClient
 from src.indicators.indicator_engine import IndicatorEngine
+from src.risk.risk_manager import RiskManager
 from src.strategy.strategy_engine import StrategyEngine
 
 
@@ -59,6 +60,21 @@ def print_strategy_result(result: dict) -> None:
     print("Trigger Layer:", result["timeframe_summary"]["trigger_layer"]["reason"])
 
 
+def print_risk_result(result: dict) -> None:
+    """Print risk evaluation result."""
+    print("\n=== RISK RESULT ===")
+    print(f"Execution Allowed : {result['execution_allowed']}")
+    print(f"Entry Price       : {result['entry_price']}")
+    print(f"Stop Loss         : {result['stop_loss']}")
+    print(f"Take Profit       : {result['take_profit']}")
+    print(f"Risk Per Unit     : {result['risk_per_unit']}")
+    print(f"Reward Per Unit   : {result['reward_per_unit']}")
+    print(f"RR Ratio          : {result['risk_reward_ratio']}")
+    print(f"ATR Value         : {result['atr_value']}")
+    print(f"Volatility State  : {result['volatility_state']}")
+    print(f"Reason            : {result['reason']}")
+
+
 def main() -> None:
     api_key = settings.binance_api_key
     api_secret = settings.binance_api_secret
@@ -99,6 +115,17 @@ def main() -> None:
     strategy_result = strategy_engine.evaluate(enriched_data)
 
     print_strategy_result(strategy_result)
+
+    risk_manager = RiskManager(
+        entry_timeframe="5m",
+        atr_column="atr_14",
+        stop_atr_multiplier=1.5,
+        take_profit_atr_multiplier=2.0,
+        min_risk_reward_ratio=1.0,
+    )
+    risk_result = risk_manager.evaluate(strategy_result, enriched_data)
+
+    print_risk_result(risk_result)
 
 
 if __name__ == "__main__":
