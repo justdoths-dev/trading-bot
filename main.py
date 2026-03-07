@@ -6,6 +6,7 @@ import pandas as pd
 
 from src.config.settings import settings
 from src.data.multi_timeframe_loader import MultiTimeframeLoader
+from src.execution.execution_engine import ExecutionEngine
 from src.exchange.binance_client import BinanceMarketDataClient
 from src.indicators.indicator_engine import IndicatorEngine
 from src.risk.risk_manager import RiskManager
@@ -65,21 +66,31 @@ def print_strategy_result(result: dict) -> None:
     print("\n=== SETUP DEBUG ===")
     for timeframe in ("1h", "15m"):
         info = setup_details[timeframe]
-        print(f"[{timeframe}] RSI={info['rsi_14']:.2f}, "
-              f"HIST={info['macd_hist_12_26_9']:.6f}, "
-              f"PREV_HIST={info['macd_hist_prev']:.6f}")
-        print(f"  LONG  -> {info['long_check']}")
-        print(f"  SHORT -> {info['short_check']}")
+        print(
+            f"[{timeframe}] RSI={info['rsi_14']:.2f}, "
+            f"HIST={info['macd_hist_12_26_9']:.6f}, "
+            f"PREV_HIST={info['macd_hist_prev']:.6f}"
+        )
+        print(f"  LONG                -> {info['long_check']}")
+        print(f"  SHORT               -> {info['short_check']}")
+        print(f"  IMPROVING_LONG      -> {info['improving_long_check']}")
+        print(f"  IMPROVING_SHORT     -> {info['improving_short_check']}")
+        print(f"  EARLY_RECOVERY_LONG -> {info['early_recovery_long_check']}")
+        print(f"  EARLY_RECOVERY_SHORT-> {info['early_recovery_short_check']}")
 
     print("\n=== TRIGGER DEBUG ===")
     for timeframe in ("5m", "1m"):
         info = trigger_details[timeframe]
-        print(f"[{timeframe}] RSI={info['rsi_14']:.2f}, "
-              f"HIST={info['macd_hist_12_26_9']:.6f}, "
-              f"PREV_HIST={info['macd_hist_prev']:.6f}, "
-              f"ATR={info['atr_14']:.2f}")
-        print(f"  LONG  -> {info['long_check']}")
-        print(f"  SHORT -> {info['short_check']}")
+        print(
+            f"[{timeframe}] RSI={info['rsi_14']:.2f}, "
+            f"HIST={info['macd_hist_12_26_9']:.6f}, "
+            f"PREV_HIST={info['macd_hist_prev']:.6f}, "
+            f"ATR={info['atr_14']:.2f}"
+        )
+        print(f"  LONG            -> {info['long_check']}")
+        print(f"  SHORT           -> {info['short_check']}")
+        print(f"  IMPROVING_LONG  -> {info['improving_long_check']}")
+        print(f"  IMPROVING_SHORT -> {info['improving_short_check']}")
 
 
 def print_risk_result(result: dict) -> None:
@@ -94,6 +105,21 @@ def print_risk_result(result: dict) -> None:
     print(f"RR Ratio          : {result['risk_reward_ratio']}")
     print(f"ATR Value         : {result['atr_value']}")
     print(f"Volatility State  : {result['volatility_state']}")
+    print(f"Reason            : {result['reason']}")
+
+
+def print_execution_result(result: dict) -> None:
+    """Print execution plan result."""
+    print("\n=== EXECUTION RESULT ===")
+    print(f"Action            : {result['action']}")
+    print(f"Symbol            : {result['symbol']}")
+    print(f"Execution Mode    : {result['execution_mode']}")
+    print(f"Signal            : {result['signal']}")
+    print(f"Bias              : {result['bias']}")
+    print(f"Execution Allowed : {result['execution_allowed']}")
+    print(f"Entry Price       : {result['entry_price']}")
+    print(f"Stop Loss         : {result['stop_loss']}")
+    print(f"Take Profit       : {result['take_profit']}")
     print(f"Reason            : {result['reason']}")
 
 
@@ -148,6 +174,14 @@ def main() -> None:
     risk_result = risk_manager.evaluate(strategy_result, enriched_data)
 
     print_risk_result(risk_result)
+
+    execution_engine = ExecutionEngine(
+        symbol="BTCUSDT",
+        execution_mode="paper",
+    )
+    execution_result = execution_engine.create_plan(strategy_result, risk_result)
+
+    print_execution_result(execution_result)
 
 
 if __name__ == "__main__":

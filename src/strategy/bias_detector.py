@@ -24,7 +24,7 @@ class BiasDetector:
         elif daily_bias == "bearish" and four_hour_bias == "bearish":
             bias = "bearish"
         else:
-            bias = "neutral"
+            bias = "neutral_conflict"
 
         return {
             "bias": bias,
