@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from typing import Any
 
 import pandas as pd
 
+from src.ai.ai_service import AIService, AIServiceConfig
 from src.config.settings import settings
 from src.data.multi_timeframe_loader import MultiTimeframeLoader
 from src.execution.execution_engine import ExecutionEngine
@@ -25,7 +28,6 @@ def print_timeframe_preview(
     data: dict[str, pd.DataFrame],
     tail_size: int = 5,
 ) -> None:
-    """Print the last rows for each timeframe DataFrame."""
     for timeframe, df in data.items():
         print(f"\n=== {title} | {timeframe} ===")
 
@@ -37,7 +39,6 @@ def print_timeframe_preview(
 
 
 def build_timeframe_configs() -> list[TimeframeConfig]:
-    """Return the default multi-timeframe configuration set."""
     return [
         TimeframeConfig(timeframe="1m", limit=100),
         TimeframeConfig(timeframe="5m", limit=100),
@@ -48,8 +49,7 @@ def build_timeframe_configs() -> list[TimeframeConfig]:
     ]
 
 
-def print_strategy_result(result: dict) -> None:
-    """Print strategy evaluation result."""
+def print_strategy_result(result: dict[str, Any]) -> None:
     print("\n=== STRATEGY RESULT ===")
     print(f"Bias   : {result['bias']}")
     print(f"Signal : {result['signal']}")
@@ -60,41 +60,8 @@ def print_strategy_result(result: dict) -> None:
     print("Setup Layer  :", result["timeframe_summary"]["setup_layer"]["reason"])
     print("Trigger Layer:", result["timeframe_summary"]["trigger_layer"]["reason"])
 
-    setup_details = result["debug"]["setup_details"]
-    trigger_details = result["debug"]["trigger_details"]
 
-    print("\n=== SETUP DEBUG ===")
-    for timeframe in ("1h", "15m"):
-        info = setup_details[timeframe]
-        print(
-            f"[{timeframe}] RSI={info['rsi_14']:.2f}, "
-            f"HIST={info['macd_hist_12_26_9']:.6f}, "
-            f"PREV_HIST={info['macd_hist_prev']:.6f}"
-        )
-        print(f"  LONG                -> {info['long_check']}")
-        print(f"  SHORT               -> {info['short_check']}")
-        print(f"  IMPROVING_LONG      -> {info['improving_long_check']}")
-        print(f"  IMPROVING_SHORT     -> {info['improving_short_check']}")
-        print(f"  EARLY_RECOVERY_LONG -> {info['early_recovery_long_check']}")
-        print(f"  EARLY_RECOVERY_SHORT-> {info['early_recovery_short_check']}")
-
-    print("\n=== TRIGGER DEBUG ===")
-    for timeframe in ("5m", "1m"):
-        info = trigger_details[timeframe]
-        print(
-            f"[{timeframe}] RSI={info['rsi_14']:.2f}, "
-            f"HIST={info['macd_hist_12_26_9']:.6f}, "
-            f"PREV_HIST={info['macd_hist_prev']:.6f}, "
-            f"ATR={info['atr_14']:.2f}"
-        )
-        print(f"  LONG            -> {info['long_check']}")
-        print(f"  SHORT           -> {info['short_check']}")
-        print(f"  IMPROVING_LONG  -> {info['improving_long_check']}")
-        print(f"  IMPROVING_SHORT -> {info['improving_short_check']}")
-
-
-def print_risk_result(result: dict) -> None:
-    """Print risk evaluation result."""
+def print_risk_result(result: dict[str, Any]) -> None:
     print("\n=== RISK RESULT ===")
     print(f"Execution Allowed : {result['execution_allowed']}")
     print(f"Entry Price       : {result['entry_price']}")
@@ -108,8 +75,7 @@ def print_risk_result(result: dict) -> None:
     print(f"Reason            : {result['reason']}")
 
 
-def print_execution_result(result: dict) -> None:
-    """Print execution plan result."""
+def print_execution_result(result: dict[str, Any]) -> None:
     print("\n=== EXECUTION RESULT ===")
     print(f"Action            : {result['action']}")
     print(f"Symbol            : {result['symbol']}")
@@ -121,6 +87,54 @@ def print_execution_result(result: dict) -> None:
     print(f"Stop Loss         : {result['stop_loss']}")
     print(f"Take Profit       : {result['take_profit']}")
     print(f"Reason            : {result['reason']}")
+
+
+def print_ai_payload(payload: dict[str, Any]) -> None:
+    print("\n=== AI PAYLOAD ===")
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+def print_ai_prompt(prompt: str, max_chars: int = 3000) -> None:
+    print("\n=== AI PROMPT ===")
+    if len(prompt) <= max_chars:
+        print(prompt)
+    else:
+        print(prompt[:max_chars])
+        print("\n... [truncated for preview] ...")
+
+
+def print_ai_result(result: dict[str, Any]) -> None:
+    print("\n=== AI RESULT ===")
+    print(f"Source      : {result['source']}")
+    print(f"Model       : {result['model']}")
+    print(f"Environment : {result['environment']}")
+    print(f"Generated At: {result['generated_at']}")
+
+    analysis = result["analysis"]
+
+    print("\n--- MARKET STRUCTURE ---")
+    print(analysis["market_structure"])
+
+    print("\n--- RULE ENGINE ASSESSMENT ---")
+    print(analysis["rule_engine_assessment"])
+
+    print("\n--- KEY BOTTLENECKS ---")
+    for idx, item in enumerate(analysis["key_bottlenecks"], start=1):
+        print(f"{idx}. {item}")
+
+    print("\n--- LONG SCENARIO ---")
+    print(analysis["long_scenario"])
+
+    print("\n--- SHORT SCENARIO ---")
+    print(analysis["short_scenario"])
+
+    print("\n--- FINAL STANCE ---")
+    print(f"Stance : {analysis['final_stance']}")
+    print(f"Reason : {analysis['stance_reason']}")
+
+    print("\n--- TELEGRAM BRIEFING ---")
+    for line in analysis["telegram_briefing"]:
+        print(f"- {line}")
 
 
 def main() -> None:
@@ -182,6 +196,28 @@ def main() -> None:
     execution_result = execution_engine.create_plan(strategy_result, risk_result)
 
     print_execution_result(execution_result)
+
+    ai_service = AIService(
+        config=AIServiceConfig(
+            model="gpt-4.1-mini",
+            timeout_seconds=30,
+            max_retries=2,
+            retry_backoff_seconds=1.5,
+            environment="paper",
+            symbol="BTCUSDT",
+        )
+    )
+
+    ai_output = ai_service.run(
+        enriched_data=enriched_data,
+        strategy_result=strategy_result,
+        risk_result=risk_result,
+        execution_result=execution_result,
+    )
+
+    print_ai_payload(ai_output["payload"])
+    print_ai_prompt(ai_output["prompt"])
+    print_ai_result(ai_output["result"])
 
 
 if __name__ == "__main__":
