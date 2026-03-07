@@ -1,0 +1,26 @@
+[pipeline]
+default_symbol = "BTCUSDT"
+send_telegram = true
+
+[indicators]
+rsi_period = 14
+ema_fast_period = 20
+ema_slow_period = 50
+macd_fast_period = 12
+macd_slow_period = 26
+macd_signal_period = 9
+atr_period = 14
+
+[risk]
+entry_timeframe = "5m"
+atr_column = "atr_14"
+stop_atr_multiplier = 1.5
+take_profit_atr_multiplier = 2.0
+min_risk_reward_ratio = 1.0
+
+[ai]
+model = "gpt-4.1-mini"
+timeout_seconds = 30
+max_retries = 2
+retry_backoff_seconds = 1.5
+environment = "paper"
