@@ -18,6 +18,7 @@ from src.storage.trade_analysis_logger import (
     TradeAnalysisLoggerConfig,
 )
 from src.strategy.strategy_engine import StrategyEngine
+from src.telegram.telegram_formatter import TelegramFormatter
 
 
 @dataclass
@@ -151,6 +152,11 @@ def print_log_result(record: dict[str, Any]) -> None:
     print(f"Execution / AI Aligned: {record['alignment']['is_aligned']}")
 
 
+def print_telegram_message_preview(message: str) -> None:
+    print("\n=== TELEGRAM MESSAGE PREVIEW ===")
+    print(message)
+
+
 def main() -> None:
     symbol = "BTCUSDT"
 
@@ -252,6 +258,17 @@ def main() -> None:
     )
 
     print_log_result(log_record)
+
+    telegram_formatter = TelegramFormatter(
+        symbol=symbol,
+        strategy_result=strategy_result,
+        risk_result=risk_result,
+        execution_result=execution_result,
+        ai_result=ai_output["result"],
+    )
+
+    telegram_message = telegram_formatter.format_message()
+    print_telegram_message_preview(telegram_message)
 
 
 if __name__ == "__main__":
