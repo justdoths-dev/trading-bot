@@ -8,6 +8,7 @@ from src.config.settings import settings
 from src.data.multi_timeframe_loader import MultiTimeframeLoader
 from src.exchange.binance_client import BinanceMarketDataClient
 from src.indicators.indicator_engine import IndicatorEngine
+from src.strategy.strategy_engine import StrategyEngine
 
 
 @dataclass
@@ -45,6 +46,19 @@ def build_timeframe_configs() -> list[TimeframeConfig]:
     ]
 
 
+def print_strategy_result(result: dict) -> None:
+    """Print strategy evaluation result."""
+    print("\n=== STRATEGY RESULT ===")
+    print(f"Bias   : {result['bias']}")
+    print(f"Signal : {result['signal']}")
+    print(f"Reason : {result['reason']}")
+
+    print("\n=== STRATEGY LAYERS ===")
+    print("Bias Layer   :", result["timeframe_summary"]["bias_layer"]["reason"])
+    print("Setup Layer  :", result["timeframe_summary"]["setup_layer"]["reason"])
+    print("Trigger Layer:", result["timeframe_summary"]["trigger_layer"]["reason"])
+
+
 def main() -> None:
     api_key = settings.binance_api_key
     api_secret = settings.binance_api_secret
@@ -71,11 +85,20 @@ def main() -> None:
         rsi_period=14,
         ema_fast_period=20,
         ema_slow_period=50,
+        macd_fast_period=12,
+        macd_slow_period=26,
+        macd_signal_period=9,
+        atr_period=14,
     )
 
     enriched_data = indicator_engine.enrich(multi_timeframe_data)
 
     print_timeframe_preview("ENRICHED DATA", enriched_data)
+
+    strategy_engine = StrategyEngine()
+    strategy_result = strategy_engine.evaluate(enriched_data)
+
+    print_strategy_result(strategy_result)
 
 
 if __name__ == "__main__":
