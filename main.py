@@ -59,6 +59,28 @@ def print_strategy_result(result: dict) -> None:
     print("Setup Layer  :", result["timeframe_summary"]["setup_layer"]["reason"])
     print("Trigger Layer:", result["timeframe_summary"]["trigger_layer"]["reason"])
 
+    setup_details = result["debug"]["setup_details"]
+    trigger_details = result["debug"]["trigger_details"]
+
+    print("\n=== SETUP DEBUG ===")
+    for timeframe in ("1h", "15m"):
+        info = setup_details[timeframe]
+        print(f"[{timeframe}] RSI={info['rsi_14']:.2f}, "
+              f"HIST={info['macd_hist_12_26_9']:.6f}, "
+              f"PREV_HIST={info['macd_hist_prev']:.6f}")
+        print(f"  LONG  -> {info['long_check']}")
+        print(f"  SHORT -> {info['short_check']}")
+
+    print("\n=== TRIGGER DEBUG ===")
+    for timeframe in ("5m", "1m"):
+        info = trigger_details[timeframe]
+        print(f"[{timeframe}] RSI={info['rsi_14']:.2f}, "
+              f"HIST={info['macd_hist_12_26_9']:.6f}, "
+              f"PREV_HIST={info['macd_hist_prev']:.6f}, "
+              f"ATR={info['atr_14']:.2f}")
+        print(f"  LONG  -> {info['long_check']}")
+        print(f"  SHORT -> {info['short_check']}")
+
 
 def print_risk_result(result: dict) -> None:
     """Print risk evaluation result."""

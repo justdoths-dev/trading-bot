@@ -10,6 +10,10 @@ class SetupDetector:
 
     required_columns: tuple[str, ...] = ("rsi_14", "macd_hist_12_26_9")
 
+    def __init__(self, rsi_long_threshold: float = 50.0, rsi_short_threshold: float = 50.0) -> None:
+        self.rsi_long_threshold = rsi_long_threshold
+        self.rsi_short_threshold = rsi_short_threshold
+
     def detect(self, enriched_data: dict[str, pd.DataFrame]) -> dict[str, Any]:
         self._validate_timeframes(enriched_data, required_timeframes=("1h", "15m"))
 
@@ -19,11 +23,16 @@ class SetupDetector:
         one_hour_latest, one_hour_prev = self._latest_two_rows(one_hour_df, "1h")
         fifteen_latest, fifteen_prev = self._latest_two_rows(fifteen_min_df, "15m")
 
-        one_hour_long = self._is_long_setup(one_hour_latest, one_hour_prev)
-        fifteen_long = self._is_long_setup(fifteen_latest, fifteen_prev)
+        one_hour_long_result = self._evaluate_long_setup(one_hour_latest, one_hour_prev)
+        fifteen_long_result = self._evaluate_long_setup(fifteen_latest, fifteen_prev)
 
-        one_hour_short = self._is_short_setup(one_hour_latest, one_hour_prev)
-        fifteen_short = self._is_short_setup(fifteen_latest, fifteen_prev)
+        one_hour_short_result = self._evaluate_short_setup(one_hour_latest, one_hour_prev)
+        fifteen_short_result = self._evaluate_short_setup(fifteen_latest, fifteen_prev)
+
+        one_hour_long = one_hour_long_result["passed"]
+        fifteen_long = fifteen_long_result["passed"]
+        one_hour_short = one_hour_short_result["passed"]
+        fifteen_short = fifteen_short_result["passed"]
 
         if one_hour_long and fifteen_long:
             setup = "long"
@@ -43,26 +52,62 @@ class SetupDetector:
                     "rsi_14": float(one_hour_latest["rsi_14"]),
                     "macd_hist_12_26_9": float(one_hour_latest["macd_hist_12_26_9"]),
                     "macd_hist_prev": float(one_hour_prev["macd_hist_12_26_9"]),
+                    "long_check": one_hour_long_result,
+                    "short_check": one_hour_short_result,
                 },
                 "15m": {
                     "rsi_14": float(fifteen_latest["rsi_14"]),
                     "macd_hist_12_26_9": float(fifteen_latest["macd_hist_12_26_9"]),
                     "macd_hist_prev": float(fifteen_prev["macd_hist_12_26_9"]),
+                    "long_check": fifteen_long_result,
+                    "short_check": fifteen_short_result,
                 },
             },
         }
 
-    def _is_long_setup(self, latest: pd.Series, prev: pd.Series) -> bool:
-        return (
-            float(latest["rsi_14"]) > 50
-            and float(latest["macd_hist_12_26_9"]) > float(prev["macd_hist_12_26_9"])
-        )
+    def _evaluate_long_setup(self, latest: pd.Series, prev: pd.Series) -> dict[str, Any]:
+        rsi_value = float(latest["rsi_14"])
+        hist_latest = float(latest["macd_hist_12_26_9"])
+        hist_prev = float(prev["macd_hist_12_26_9"])
 
-    def _is_short_setup(self, latest: pd.Series, prev: pd.Series) -> bool:
-        return (
-            float(latest["rsi_14"]) < 50
-            and float(latest["macd_hist_12_26_9"]) < float(prev["macd_hist_12_26_9"])
-        )
+        rsi_pass = rsi_value > self.rsi_long_threshold
+        hist_rising_pass = hist_latest > hist_prev
+
+        return {
+            "passed": rsi_pass and hist_rising_pass,
+            "checks": {
+                "rsi_above_threshold": rsi_pass,
+                "macd_hist_rising": hist_rising_pass,
+            },
+            "values": {
+                "rsi_14": rsi_value,
+                "rsi_threshold": self.rsi_long_threshold,
+                "macd_hist_latest": hist_latest,
+                "macd_hist_prev": hist_prev,
+            },
+        }
+
+    def _evaluate_short_setup(self, latest: pd.Series, prev: pd.Series) -> dict[str, Any]:
+        rsi_value = float(latest["rsi_14"])
+        hist_latest = float(latest["macd_hist_12_26_9"])
+        hist_prev = float(prev["macd_hist_12_26_9"])
+
+        rsi_pass = rsi_value < self.rsi_short_threshold
+        hist_falling_pass = hist_latest < hist_prev
+
+        return {
+            "passed": rsi_pass and hist_falling_pass,
+            "checks": {
+                "rsi_below_threshold": rsi_pass,
+                "macd_hist_falling": hist_falling_pass,
+            },
+            "values": {
+                "rsi_14": rsi_value,
+                "rsi_threshold": self.rsi_short_threshold,
+                "macd_hist_latest": hist_latest,
+                "macd_hist_prev": hist_prev,
+            },
+        }
 
     def _validate_timeframes(
         self,
