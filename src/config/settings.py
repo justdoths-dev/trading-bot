@@ -8,7 +8,6 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-# Load environment variables from .env
 load_dotenv()
 
 
@@ -39,6 +38,7 @@ class AISettings:
     max_retries: int
     retry_backoff_seconds: float
     environment: str
+    run_every_n_cycles: int
 
 
 @dataclass(frozen=True)
@@ -48,22 +48,24 @@ class PipelineSettings:
 
 
 @dataclass(frozen=True)
+class SchedulerSettings:
+    interval_minutes: int
+
+
+@dataclass(frozen=True)
 class Settings:
     """Application configuration loaded from environment variables and TOML."""
 
-    # Binance
     binance_api_key: str | None
     binance_api_secret: str | None
-
-    # Telegram
     telegram_bot_token: str | None
     telegram_chat_id: str | None
 
-    # Structured app config
     pipeline: PipelineSettings
     indicators: IndicatorSettings
     risk: RiskSettings
     ai: AISettings
+    scheduler: SchedulerSettings
 
 
 def _project_root() -> Path:
@@ -89,6 +91,15 @@ def _build_settings() -> Settings:
     indicator_cfg = config.get("indicators", {})
     risk_cfg = config.get("risk", {})
     ai_cfg = config.get("ai", {})
+    scheduler_cfg = config.get("scheduler", {})
+
+    interval_minutes = int(scheduler_cfg.get("interval_minutes", 5))
+    if interval_minutes <= 0:
+        raise ValueError("scheduler.interval_minutes must be greater than 0")
+
+    run_every_n_cycles = int(ai_cfg.get("run_every_n_cycles", 3))
+    if run_every_n_cycles <= 0:
+        raise ValueError("ai.run_every_n_cycles must be greater than 0")
 
     return Settings(
         binance_api_key=os.getenv("BINANCE_API_KEY"),
@@ -125,6 +136,10 @@ def _build_settings() -> Settings:
             max_retries=int(ai_cfg.get("max_retries", 2)),
             retry_backoff_seconds=float(ai_cfg.get("retry_backoff_seconds", 1.5)),
             environment=str(ai_cfg.get("environment", "paper")),
+            run_every_n_cycles=run_every_n_cycles,
+        ),
+        scheduler=SchedulerSettings(
+            interval_minutes=interval_minutes,
         ),
     )
 

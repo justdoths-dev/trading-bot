@@ -18,8 +18,13 @@ class AIPayloadBuilder:
         risk_result: dict[str, Any],
         execution_result: dict[str, Any],
     ) -> dict[str, Any]:
+        selected_result = strategy_result.get("selected_result", {}) or {}
+        scalping_result = strategy_result.get("scalping_result", {}) or {}
+        intraday_result = strategy_result.get("intraday_result", {}) or {}
+        swing_result = strategy_result.get("swing_result", {}) or {}
+
         timeframe_summary = self._build_timeframe_summary(enriched_data)
-        key_bottlenecks = self._build_key_bottlenecks(strategy_result)
+        key_bottlenecks = self._build_key_bottlenecks(selected_result)
 
         return {
             "symbol": self.symbol,
@@ -27,14 +32,39 @@ class AIPayloadBuilder:
                 "timeframes": timeframe_summary,
                 "key_bottlenecks": key_bottlenecks,
             },
+            "strategy_overview": {
+                "selected_strategy": strategy_result.get("selected_strategy"),
+                "selected_result": {
+                    "strategy": selected_result.get("strategy"),
+                    "signal": selected_result.get("signal"),
+                    "confidence": selected_result.get("confidence"),
+                    "bias": selected_result.get("bias"),
+                    "reason": selected_result.get("reason"),
+                },
+                "scalping_result": {
+                    "strategy": scalping_result.get("strategy"),
+                    "signal": scalping_result.get("signal"),
+                    "confidence": scalping_result.get("confidence"),
+                },
+                "intraday_result": {
+                    "strategy": intraday_result.get("strategy"),
+                    "signal": intraday_result.get("signal"),
+                    "confidence": intraday_result.get("confidence"),
+                },
+                "swing_result": {
+                    "strategy": swing_result.get("strategy"),
+                    "signal": swing_result.get("signal"),
+                    "confidence": swing_result.get("confidence"),
+                },
+            },
             "rule_based_analysis": {
-                "bias": strategy_result.get("bias"),
-                "signal": strategy_result.get("signal"),
-                "reason": strategy_result.get("reason"),
+                "bias": selected_result.get("bias"),
+                "signal": selected_result.get("signal"),
+                "reason": selected_result.get("reason"),
                 "layers": {
-                    "bias_layer": strategy_result.get("timeframe_summary", {}).get("bias_layer", {}),
-                    "setup_layer": strategy_result.get("timeframe_summary", {}).get("setup_layer", {}),
-                    "trigger_layer": strategy_result.get("timeframe_summary", {}).get("trigger_layer", {}),
+                    "bias_layer": selected_result.get("timeframe_summary", {}).get("bias_layer", {}),
+                    "setup_layer": selected_result.get("timeframe_summary", {}).get("setup_layer", {}),
+                    "trigger_layer": selected_result.get("timeframe_summary", {}).get("trigger_layer", {}),
                 },
             },
             "risk_analysis": {
@@ -69,6 +99,7 @@ class AIPayloadBuilder:
                 "role": "higher_level_market_interpreter",
                 "objectives": [
                     "Summarize current market structure across timeframes.",
+                    "Compare scalping, intraday, and swing outputs before focusing on the selected strategy.",
                     "Explain whether long, short, or no-trade is most reasonable.",
                     "Explain whether the rule-based engine looks too strict or appropriate.",
                     "Describe what confirmation would be needed for a valid long or short.",
@@ -118,12 +149,13 @@ class AIPayloadBuilder:
 
         return summary
 
-    def _build_key_bottlenecks(self, strategy_result: dict[str, Any]) -> list[str]:
+    def _build_key_bottlenecks(self, selected_result: dict[str, Any]) -> list[str]:
         bottlenecks: list[str] = []
 
-        bias_layer = strategy_result.get("timeframe_summary", {}).get("bias_layer", {})
-        setup_layer = strategy_result.get("timeframe_summary", {}).get("setup_layer", {})
-        trigger_layer = strategy_result.get("timeframe_summary", {}).get("trigger_layer", {})
+        timeframe_summary = selected_result.get("timeframe_summary", {}) or {}
+        bias_layer = timeframe_summary.get("bias_layer", {})
+        setup_layer = timeframe_summary.get("setup_layer", {})
+        trigger_layer = timeframe_summary.get("trigger_layer", {})
 
         bias = bias_layer.get("bias")
         setup = setup_layer.get("setup")
@@ -138,8 +170,9 @@ class AIPayloadBuilder:
         if trigger == "neutral":
             bottlenecks.append("Lower-timeframe trigger is not aligned for execution timing.")
 
-        setup_details = strategy_result.get("debug", {}).get("setup_details", {})
-        trigger_details = strategy_result.get("debug", {}).get("trigger_details", {})
+        debug_data = selected_result.get("debug", {}) or {}
+        setup_details = debug_data.get("setup_details", {})
+        trigger_details = debug_data.get("trigger_details", {})
 
         one_hour = setup_details.get("1h", {})
         fifteen_min = setup_details.get("15m", {})

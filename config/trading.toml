@@ -24,3 +24,7 @@ timeout_seconds = 30
 max_retries = 2
 retry_backoff_seconds = 1.5
 environment = "paper"
+run_every_n_cycles = 3
+
+[scheduler]
+interval_minutes = 5

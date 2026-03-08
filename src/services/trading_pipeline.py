@@ -85,7 +85,11 @@ class TradingPipeline:
             config=TradeAnalysisLoggerConfig()
         )
 
-    def run(self) -> dict[str, Any]:
+    def run(
+        self,
+        run_ai: bool = True,
+        ai_result_override: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Execute the full pipeline and return all outputs."""
         symbol = self.config.symbol
 
@@ -102,18 +106,22 @@ class TradingPipeline:
         enriched_data = self.indicator_engine.enrich(raw_data)
 
         strategy_result = self.strategy_engine.evaluate(enriched_data)
-        risk_result = self.risk_manager.evaluate(strategy_result, enriched_data)
+        selected_result = strategy_result["selected_result"]
+
+        risk_result = self.risk_manager.evaluate(selected_result, enriched_data)
 
         execution_result = self.execution_engine.create_plan(
-            strategy_result,
+            selected_result,
             risk_result,
         )
 
-        ai_output = self.ai_service.run(
+        ai_output = self._build_ai_output(
             enriched_data=enriched_data,
             strategy_result=strategy_result,
             risk_result=risk_result,
             execution_result=execution_result,
+            run_ai=run_ai,
+            ai_result_override=ai_result_override,
         )
 
         log_record = self.logger.log(
@@ -126,20 +134,24 @@ class TradingPipeline:
 
         telegram_formatter = TelegramFormatter(
             symbol=symbol,
-            strategy_result=strategy_result,
+            strategy_result=selected_result,
             risk_result=risk_result,
             execution_result=execution_result,
             ai_result=ai_output["result"],
         )
         telegram_message = telegram_formatter.format_message()
 
-        telegram_send_result = self._send_telegram_if_enabled(telegram_message)
+        telegram_send_result = self._maybe_send_telegram(
+            execution_result=execution_result,
+            telegram_message=telegram_message,
+        )
 
         return {
             "symbol": symbol,
             "raw_data": raw_data,
             "enriched_data": enriched_data,
             "strategy_result": strategy_result,
+            "selected_result": selected_result,
             "risk_result": risk_result,
             "execution_result": execution_result,
             "ai_output": ai_output,
@@ -148,16 +160,57 @@ class TradingPipeline:
             "telegram_send_result": telegram_send_result,
         }
 
-    def _send_telegram_if_enabled(self, telegram_message: str) -> dict[str, Any]:
-        """
-        Send Telegram message if enabled and credentials are available.
+    def _build_ai_output(
+        self,
+        enriched_data: dict[str, Any],
+        strategy_result: dict[str, Any],
+        risk_result: dict[str, Any],
+        execution_result: dict[str, Any],
+        run_ai: bool,
+        ai_result_override: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if run_ai:
+            return self.ai_service.run(
+                enriched_data=enriched_data,
+                strategy_result=strategy_result,
+                risk_result=risk_result,
+                execution_result=execution_result,
+            )
 
-        Telegram failures should not break the full trading pipeline.
+        if ai_result_override is not None:
+            return {
+                "payload": {},
+                "prompt": "",
+                "result": ai_result_override,
+            }
+
+        return {
+            "payload": {},
+            "prompt": "",
+            "result": self._build_skipped_ai_result(),
+        }
+
+    def _maybe_send_telegram(
+        self,
+        execution_result: dict[str, Any],
+        telegram_message: str,
+    ) -> dict[str, Any]:
+        """
+        Send Telegram message only when execution is allowed.
+
+        Telegram failures should not break the trading pipeline.
         """
         if not self.config.send_telegram:
             return {
                 "sent": False,
                 "reason": "Telegram sending disabled by pipeline config.",
+            }
+
+        execution_allowed = execution_result.get("execution_allowed", False)
+        if execution_allowed is not True:
+            return {
+                "sent": False,
+                "reason": "Execution not allowed, Telegram skipped.",
             }
 
         if not settings.telegram_bot_token or not settings.telegram_chat_id:
@@ -182,6 +235,29 @@ class TradingPipeline:
                 "sent": False,
                 "reason": f"Telegram send failed: {exc}",
             }
+
+    @staticmethod
+    def _build_skipped_ai_result() -> dict[str, Any]:
+        return {
+            "source": "scheduler_cache",
+            "model": settings.ai.model,
+            "environment": settings.ai.environment,
+            "generated_at": 0,
+            "analysis": {
+                "market_structure": "AI analysis skipped for this cycle.",
+                "rule_engine_assessment": "Using scheduler cycle without new AI call.",
+                "key_bottlenecks": ["AI call skipped on this cycle."],
+                "long_scenario": "Unavailable on skipped AI cycle.",
+                "short_scenario": "Unavailable on skipped AI cycle.",
+                "final_stance": "hold",
+                "stance_reason": "AI was skipped for this cycle to reduce cost and token usage.",
+                "telegram_briefing": [
+                    "AI analysis skipped for this cycle.",
+                    "Rule engine and risk engine still executed normally.",
+                    "Telegram is only sent when execution is allowed.",
+                ],
+            },
+        }
 
     @staticmethod
     def _build_timeframe_configs() -> list[TimeframeConfig]:

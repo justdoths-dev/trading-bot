@@ -40,6 +40,15 @@ class TradeAnalysisLogger:
         """
         Build a normalized log record and append it to the JSONL file.
 
+        strategy_result must contain:
+        {
+            "selected_strategy": str,
+            "selected_result": dict,
+            "scalping_result": dict,
+            "intraday_result": dict,
+            "swing_result": dict
+        }
+
         Returns the saved record for optional debug printing.
         """
         record = self._build_record(
@@ -60,15 +69,40 @@ class TradeAnalysisLogger:
         execution_result: dict[str, Any],
         ai_result: dict[str, Any],
     ) -> dict[str, Any]:
-        analysis = ai_result.get("analysis", {})
+        analysis = ai_result.get("analysis", {}) or {}
+
+        selected_strategy = strategy_result.get("selected_strategy")
+        selected_result = strategy_result.get("selected_result", {}) or {}
+
+        scalping_result = strategy_result.get("scalping_result", {}) or {}
+        intraday_result = strategy_result.get("intraday_result", {}) or {}
+        swing_result = strategy_result.get("swing_result", {}) or {}
 
         record = {
             "logged_at": self._now_iso(),
             "symbol": symbol,
+            "selected_strategy": selected_strategy,
+            "scalping_result": {
+                "strategy": scalping_result.get("strategy"),
+                "signal": scalping_result.get("signal"),
+                "confidence": scalping_result.get("confidence"),
+            },
+            "intraday_result": {
+                "strategy": intraday_result.get("strategy"),
+                "signal": intraday_result.get("signal"),
+                "confidence": intraday_result.get("confidence"),
+            },
+            "swing_result": {
+                "strategy": swing_result.get("strategy"),
+                "signal": swing_result.get("signal"),
+                "confidence": swing_result.get("confidence"),
+            },
             "rule_engine": {
-                "bias": strategy_result.get("bias"),
-                "signal": strategy_result.get("signal"),
-                "reason": strategy_result.get("reason"),
+                "strategy": selected_result.get("strategy"),
+                "bias": selected_result.get("bias"),
+                "signal": selected_result.get("signal"),
+                "confidence": selected_result.get("confidence"),
+                "reason": selected_result.get("reason"),
             },
             "risk": {
                 "execution_allowed": risk_result.get("execution_allowed"),
