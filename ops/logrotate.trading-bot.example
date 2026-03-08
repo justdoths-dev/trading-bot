@@ -1,0 +1,10 @@
+/home/dev/workspace/bots/trading-bot/logs/trade_analysis.jsonl {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    create 0640 dev dev
+}

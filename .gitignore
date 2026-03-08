@@ -1,4 +1,5 @@
-# virtual environment
+# virtual environments
+.venv/
 venv/
 
 # python cache
@@ -9,10 +10,11 @@ __pycache__/
 # environment variables
 .env
 .env.*
+!.env.example
 
 # logs
-*.log
 logs/
+*.log
 
 # vscode settings
 .vscode/
@@ -26,4 +28,4 @@ logs/
 # python build artifacts
 build/
 dist/
-*.egg-info/logs/
+*.egg-info/

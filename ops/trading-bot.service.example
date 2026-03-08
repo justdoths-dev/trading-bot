@@ -1,0 +1,19 @@
+[Unit]
+Description=Python Crypto Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dev
+WorkingDirectory=/home/dev/workspace/bots/trading-bot
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/dev/workspace/bots/trading-bot/.env
+ExecStart=/home/dev/workspace/bots/trading-bot/.venv/bin/python /home/dev/workspace/bots/trading-bot/main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
