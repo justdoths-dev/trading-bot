@@ -78,10 +78,17 @@ class TradeAnalysisLogger:
         intraday_result = strategy_result.get("intraday_result", {}) or {}
         swing_result = strategy_result.get("swing_result", {}) or {}
 
+        rule_engine_bias = self._value_or_unknown(selected_result.get("bias"))
+        rule_engine_reason = self._value_or_unknown(selected_result.get("reason"))
+        timeframe_summary = self._build_timeframe_summary(strategy_result)
+
         record = {
             "logged_at": self._now_iso(),
             "symbol": symbol,
             "selected_strategy": selected_strategy,
+            "bias": rule_engine_bias,
+            "reason": rule_engine_reason,
+            "timeframe_summary": timeframe_summary,
             "scalping_result": {
                 "strategy": scalping_result.get("strategy"),
                 "signal": scalping_result.get("signal"),
@@ -170,6 +177,94 @@ class TradeAnalysisLogger:
             "normalized_execution_stance": normalized_execution_stance,
             "is_aligned": aligned,
         }
+
+    def _build_timeframe_summary(self, strategy_result: dict[str, Any]) -> str:
+        selected_result = strategy_result.get("selected_result", {}) or {}
+        timeframe_summary_raw = selected_result.get("timeframe_summary", {})
+
+        timeframe_bias = {
+            "5m": "unknown",
+            "15m": "unknown",
+            "1h": "unknown",
+            "4h": "unknown",
+        }
+
+        if isinstance(timeframe_summary_raw, dict):
+            for timeframe in timeframe_bias:
+                raw_value = timeframe_summary_raw.get(timeframe)
+                timeframe_bias[timeframe] = self._normalize_timeframe_bias(raw_value)
+
+        intraday_signal = (strategy_result.get("intraday_result", {}) or {}).get("signal")
+        scalping_signal = (strategy_result.get("scalping_result", {}) or {}).get("signal")
+        swing_signal = (strategy_result.get("swing_result", {}) or {}).get("signal")
+
+        if timeframe_bias["5m"] == "unknown":
+            timeframe_bias["5m"] = self._signal_to_bias(intraday_signal)
+            if timeframe_bias["5m"] == "unknown":
+                timeframe_bias["5m"] = self._signal_to_bias(scalping_signal)
+
+        if timeframe_bias["15m"] == "unknown":
+            timeframe_bias["15m"] = self._signal_to_bias(intraday_signal)
+
+        if timeframe_bias["1h"] == "unknown":
+            timeframe_bias["1h"] = self._signal_to_bias(intraday_signal)
+            if timeframe_bias["1h"] == "unknown":
+                timeframe_bias["1h"] = self._signal_to_bias(swing_signal)
+
+        if timeframe_bias["4h"] == "unknown":
+            timeframe_bias["4h"] = self._signal_to_bias(swing_signal)
+
+        return (
+            f"5m {timeframe_bias['5m']} / "
+            f"15m {timeframe_bias['15m']} / "
+            f"1h {timeframe_bias['1h']} / "
+            f"4h {timeframe_bias['4h']}"
+        )
+
+    def _normalize_timeframe_bias(self, raw_value: Any) -> str:
+        if isinstance(raw_value, dict):
+            for key in ("bias", "signal", "state", "trend"):
+                if key in raw_value:
+                    return self._normalize_timeframe_bias(raw_value.get(key))
+            return "unknown"
+
+        if raw_value is None:
+            return "unknown"
+
+        text = str(raw_value).strip().lower()
+        if not text:
+            return "unknown"
+
+        alias_map = {
+            "bullish": "bullish",
+            "bearish": "bearish",
+            "neutral": "neutral",
+            "long": "bullish",
+            "short": "bearish",
+            "hold": "neutral",
+        }
+        return alias_map.get(text, text)
+
+    def _signal_to_bias(self, signal: Any) -> str:
+        if signal is None:
+            return "unknown"
+
+        normalized = str(signal).strip().lower()
+        if normalized == "long":
+            return "bullish"
+        if normalized == "short":
+            return "bearish"
+        if normalized == "hold":
+            return "neutral"
+        return "unknown"
+
+    @staticmethod
+    def _value_or_unknown(value: Any) -> str:
+        if value is None:
+            return "unknown"
+
+        text = str(value).strip()
+        return text if text else "unknown"
 
     def _append_record(self, record: dict[str, Any]) -> None:
         with self.log_path.open("a", encoding="utf-8") as file:
