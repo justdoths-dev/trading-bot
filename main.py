@@ -6,6 +6,8 @@ import time
 from src.config.settings import settings
 from src.services.trading_scheduler import TradingScheduler
 
+STARTUP_STAGGER_SECONDS = 150
+
 
 def main() -> None:
     logging.basicConfig(
@@ -24,7 +26,16 @@ def main() -> None:
         for symbol in settings.pipeline.symbols
     ]
 
-    for scheduler in schedulers:
+    for index, scheduler in enumerate(schedulers):
+        if index > 0:
+            delay_seconds = STARTUP_STAGGER_SECONDS
+            logger.info(
+                "Waiting %s seconds before starting scheduler for symbol=%s",
+                delay_seconds,
+                scheduler.symbol,
+            )
+            time.sleep(delay_seconds)
+
         logger.info("Starting scheduler for symbol=%s", scheduler.symbol)
         scheduler.start()
 
