@@ -43,8 +43,13 @@ class AISettings:
 
 @dataclass(frozen=True)
 class PipelineSettings:
-    default_symbol: str
+    symbols: tuple[str, ...]
     send_telegram: bool
+
+    @property
+    def default_symbol(self) -> str:
+        """Backward-compatible primary symbol accessor."""
+        return self.symbols[0]
 
 
 @dataclass(frozen=True)
@@ -84,6 +89,26 @@ def _load_toml_config() -> dict[str, Any]:
         return tomllib.load(file)
 
 
+def _parse_pipeline_symbols(pipeline_cfg: dict[str, Any]) -> tuple[str, ...]:
+    raw_symbols = pipeline_cfg.get("symbols")
+
+    if raw_symbols is None:
+        default_symbol = str(pipeline_cfg.get("default_symbol", "BTCUSDT")).strip()
+        symbols = [default_symbol]
+    elif isinstance(raw_symbols, list):
+        symbols = [str(item).strip() for item in raw_symbols]
+    elif isinstance(raw_symbols, str):
+        symbols = [item.strip() for item in raw_symbols.split(",")]
+    else:
+        raise ValueError("pipeline.symbols must be a list[str] or comma-separated string")
+
+    cleaned = tuple(symbol for symbol in symbols if symbol)
+    if not cleaned:
+        raise ValueError("pipeline.symbols must include at least one symbol")
+
+    return cleaned
+
+
 def _build_settings() -> Settings:
     config = _load_toml_config()
 
@@ -107,7 +132,7 @@ def _build_settings() -> Settings:
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN"),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID"),
         pipeline=PipelineSettings(
-            default_symbol=str(pipeline_cfg.get("default_symbol", "BTCUSDT")),
+            symbols=_parse_pipeline_symbols(pipeline_cfg),
             send_telegram=bool(pipeline_cfg.get("send_telegram", True)),
         ),
         indicators=IndicatorSettings(

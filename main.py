@@ -13,21 +13,29 @@ def main() -> None:
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
 
-    scheduler = TradingScheduler(
-        symbol=settings.pipeline.default_symbol,
-        interval_minutes=settings.scheduler.interval_minutes,
-        send_telegram=settings.pipeline.send_telegram,
-    )
+    logger = logging.getLogger(__name__)
 
-    scheduler.start()
+    schedulers = [
+        TradingScheduler(
+            symbol=symbol,
+            interval_minutes=settings.scheduler.interval_minutes,
+            send_telegram=settings.pipeline.send_telegram,
+        )
+        for symbol in settings.pipeline.symbols
+    ]
+
+    for scheduler in schedulers:
+        logger.info("Starting scheduler for symbol=%s", scheduler.symbol)
+        scheduler.start()
 
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        logging.getLogger(__name__).info("Shutdown signal received.")
+        logger.info("Shutdown signal received.")
     finally:
-        scheduler.shutdown()
+        for scheduler in reversed(schedulers):
+            scheduler.shutdown()
 
 
 if __name__ == "__main__":
