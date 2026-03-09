@@ -1,5 +1,5 @@
 [pipeline]
-default_symbol = "BTCUSDT"
+symbols = ["BTCUSDT", "ETHUSDT"]
 send_telegram = true
 
 [indicators]
