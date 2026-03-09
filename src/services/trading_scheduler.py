@@ -8,7 +8,7 @@ from typing import Any
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from src.config.settings import settings
-from src.services.trading_pipeline import TradingPipeline, TradingPipelineConfig
+from src.services.trading_pipeline_service import TradingPipelineService
 
 logger = logging.getLogger(__name__)
 
@@ -31,16 +31,10 @@ class TradingScheduler:
         self.interval_minutes = interval_minutes
         self.send_telegram = send_telegram
 
-        self._pipeline = TradingPipeline(
-            config=TradingPipelineConfig(
-                symbol=self.symbol,
-                send_telegram=self.send_telegram,
-            )
-        )
+        self._pipeline_service = TradingPipelineService()
         self._scheduler = BackgroundScheduler()
         self._job_id = f"trading_pipeline_{self.symbol.lower()}"
         self._run_counter = 0
-        self._last_ai_result: dict[str, Any] | None = None
 
     def start(self) -> None:
         """Start periodic trading pipeline execution."""
@@ -96,13 +90,11 @@ class TradingScheduler:
         )
 
         try:
-            result: dict[str, Any] = self._pipeline.run(
+            result: dict[str, Any] = self._pipeline_service.run(
+                symbol=self.symbol,
                 run_ai=run_ai,
-                ai_result_override=self._last_ai_result,
+                send_telegram=self.send_telegram,
             )
-
-            if run_ai:
-                self._last_ai_result = result.get("ai_output", {}).get("result")
 
             strategy_result = result.get("strategy_result", {})
             execution_result = result.get("execution_result", {})
