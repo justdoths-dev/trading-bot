@@ -7,6 +7,27 @@ from pathlib import Path
 from typing import Any
 
 from src.research.research_metrics import HORIZONS, calculate_research_metrics
+from src.research.strategy_lab.comparison_report import (
+    compare_by_ai_execution_state,
+    compare_by_alignment_state,
+    compare_by_strategy,
+    compare_by_symbol,
+)
+from src.research.strategy_lab.dataset_builder import build_dataset
+from src.research.strategy_lab.edge_detector import (
+    detect_ai_execution_state_edges,
+    detect_alignment_state_edges,
+    detect_strategy_edges,
+    detect_symbol_edges,
+)
+from src.research.strategy_lab.performance_report import generate_performance_report
+from src.research.strategy_lab.ranking_report import (
+    rank_by_ai_execution_state,
+    rank_by_alignment_state,
+    rank_by_strategy,
+    rank_by_symbol,
+)
+from src.research.strategy_lab.segment_report import build_segment_reports
 
 
 def load_jsonl_records(input_path: Path) -> list[dict[str, Any]]:
@@ -62,9 +83,129 @@ def write_summary_files(
 def run_research_analyzer(input_path: Path, output_dir: Path) -> dict[str, Any]:
     """Run full analyzer flow: load records, calculate metrics, and write reports."""
     records = load_jsonl_records(input_path)
-    metrics = calculate_research_metrics(records)
-    write_summary_files(metrics, output_dir)
-    return metrics
+
+    base_metrics = calculate_research_metrics(records)
+    strategy_lab_metrics = _build_strategy_lab_metrics(input_path)
+
+    final_metrics = dict(base_metrics)
+    final_metrics["strategy_lab"] = strategy_lab_metrics
+
+    write_summary_files(final_metrics, output_dir)
+    return final_metrics
+
+
+def _build_strategy_lab_metrics(input_path: Path) -> dict[str, Any]:
+    """Build full Strategy Research Lab metrics bundle."""
+    dataset_rows = build_dataset(input_path)
+
+    performance: dict[str, Any] = {}
+    comparison: dict[str, Any] = {}
+    ranking: dict[str, Any] = {}
+    edge: dict[str, Any] = {}
+
+    for horizon in HORIZONS:
+        performance[horizon] = generate_performance_report(
+            horizon=horizon,
+            dataset_path=input_path,
+        )
+
+        comparison[horizon] = {
+            "by_symbol": compare_by_symbol(
+                horizon=horizon,
+                dataset_path=input_path,
+            ),
+            "by_strategy": compare_by_strategy(
+                horizon=horizon,
+                dataset_path=input_path,
+            ),
+            "by_alignment_state": compare_by_alignment_state(
+                horizon=horizon,
+                dataset_path=input_path,
+            ),
+            "by_ai_execution_state": compare_by_ai_execution_state(
+                horizon=horizon,
+                dataset_path=input_path,
+            ),
+        }
+
+        ranking[horizon] = {
+            "by_symbol": rank_by_symbol(
+                horizon=horizon,
+                dataset_path=input_path,
+            ),
+            "by_strategy": rank_by_strategy(
+                horizon=horizon,
+                dataset_path=input_path,
+            ),
+            "by_alignment_state": rank_by_alignment_state(
+                horizon=horizon,
+                dataset_path=input_path,
+            ),
+            "by_ai_execution_state": rank_by_ai_execution_state(
+                horizon=horizon,
+                dataset_path=input_path,
+            ),
+        }
+
+        symbol_rankings = _extract_ranking_items(ranking[horizon]["by_symbol"])
+        strategy_rankings = _extract_ranking_items(ranking[horizon]["by_strategy"])
+        alignment_rankings = _extract_ranking_items(ranking[horizon]["by_alignment_state"])
+        ai_execution_rankings = _extract_ranking_items(
+            ranking[horizon]["by_ai_execution_state"]
+        )
+
+        edge[horizon] = {
+            "by_symbol": detect_symbol_edges(
+                symbol_rankings,
+                horizon=horizon,
+            ),
+            "by_strategy": detect_strategy_edges(
+                strategy_rankings,
+                horizon=horizon,
+            ),
+            "by_alignment_state": detect_alignment_state_edges(
+                alignment_rankings,
+                horizon=horizon,
+            ),
+            "by_ai_execution_state": detect_ai_execution_state_edges(
+                ai_execution_rankings,
+                horizon=horizon,
+            ),
+        }
+
+    segment = build_segment_reports(
+        dataset_rows,
+        horizons=tuple(HORIZONS),
+        min_samples=10,
+    )
+
+    return {
+        "dataset_rows": len(dataset_rows),
+        "performance": performance,
+        "comparison": comparison,
+        "ranking": ranking,
+        "edge": edge,
+        "segment": segment,
+    }
+
+
+def _extract_ranking_items(report: Any) -> list[dict[str, Any]]:
+    """Extract ranking rows from ranking report wrapper."""
+    if isinstance(report, list):
+        return [item for item in report if isinstance(item, dict)]
+
+    if not isinstance(report, dict):
+        return []
+
+    items = report.get("rankings")
+    if isinstance(items, list):
+        return [item for item in items if isinstance(item, dict)]
+
+    items = report.get("results")
+    if isinstance(items, list):
+        return [item for item in items if isinstance(item, dict)]
+
+    return []
 
 
 def _build_markdown(metrics: dict[str, Any]) -> str:
@@ -72,6 +213,7 @@ def _build_markdown(metrics: dict[str, Any]) -> str:
     horizons = metrics.get("horizon_summary", {}) or {}
     by_symbol = metrics.get("by_symbol", {}) or {}
     by_strategy = metrics.get("by_strategy", {}) or {}
+    strategy_lab = metrics.get("strategy_lab", {}) or {}
 
     lines: list[str] = []
     lines.append("# Research Summary")
@@ -94,14 +236,24 @@ def _build_markdown(metrics: dict[str, Any]) -> str:
     lines.append(f"- date_range.end: {date_range.get('end', 'unknown')}")
     lines.append("")
 
-    lines.extend(_markdown_distribution("symbols_distribution", overview.get("symbols_distribution", {})))
+    lines.extend(
+        _markdown_distribution(
+            "symbols_distribution",
+            overview.get("symbols_distribution", {}),
+        )
+    )
     lines.extend(
         _markdown_distribution(
             "selected_strategies_distribution",
             overview.get("selected_strategies_distribution", {}),
         )
     )
-    lines.extend(_markdown_distribution("bias_distribution", overview.get("bias_distribution", {})))
+    lines.extend(
+        _markdown_distribution(
+            "bias_distribution",
+            overview.get("bias_distribution", {}),
+        )
+    )
     lines.extend(
         _markdown_distribution(
             "ai_execution_distribution",
@@ -118,7 +270,13 @@ def _build_markdown(metrics: dict[str, Any]) -> str:
     lines.append("## Horizon Summary")
     lines.append("")
     for horizon in HORIZONS:
-        lines.extend(_markdown_horizon_block(horizon, horizons.get(horizon, {}) or {}, heading_level=3))
+        lines.extend(
+            _markdown_horizon_block(
+                horizon,
+                horizons.get(horizon, {}) or {},
+                heading_level=3,
+            )
+        )
 
     lines.append("## By Symbol")
     lines.append("")
@@ -174,7 +332,128 @@ def _build_markdown(metrics: dict[str, Any]) -> str:
         lines.append("No strategy groups available.")
         lines.append("")
 
+    lines.extend(_markdown_strategy_lab_block(strategy_lab))
+
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _markdown_strategy_lab_block(strategy_lab: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+
+    lines.append("## Strategy Research Lab")
+    lines.append("")
+    lines.append(f"- dataset_rows: {strategy_lab.get('dataset_rows', 0)}")
+    lines.append("")
+
+    performance = strategy_lab.get("performance", {}) or {}
+    ranking = strategy_lab.get("ranking", {}) or {}
+    edge = strategy_lab.get("edge", {}) or {}
+    segment = strategy_lab.get("segment", {}) or {}
+
+    lines.append("### Performance")
+    lines.append("")
+    if performance:
+        for horizon in HORIZONS:
+            report = performance.get(horizon, {}) or {}
+            lines.append(f"#### {horizon}")
+            lines.append(f"- sample_count: {report.get('sample_count', 0)}")
+            lines.append(f"- labeled_count: {report.get('labeled_count', 0)}")
+            lines.append(f"- coverage_pct: {_fmt_metric(report.get('coverage_pct'))}")
+            lines.append(f"- signal_match_rate: {_fmt_metric(report.get('signal_match_rate'))}")
+            lines.append(f"- bias_match_rate: {_fmt_metric(report.get('bias_match_rate'))}")
+            lines.append(f"- avg_future_return_pct: {_fmt_metric(report.get('avg_future_return_pct'))}")
+            lines.append(f"- median_future_return_pct: {_fmt_metric(report.get('median_future_return_pct'))}")
+            lines.append("")
+    else:
+        lines.append("No performance report available.")
+        lines.append("")
+
+    lines.append("### Ranking Highlights")
+    lines.append("")
+    if ranking:
+        for horizon in HORIZONS:
+            lines.append(f"#### {horizon}")
+            horizon_rank = ranking.get(horizon, {}) or {}
+
+            top_symbol = _extract_top_ranked_group(horizon_rank.get("by_symbol"))
+            top_strategy = _extract_top_ranked_group(horizon_rank.get("by_strategy"))
+            top_alignment = _extract_top_ranked_group(horizon_rank.get("by_alignment_state"))
+            top_ai_execution = _extract_top_ranked_group(horizon_rank.get("by_ai_execution_state"))
+
+            lines.append(f"- top_symbol: {top_symbol}")
+            lines.append(f"- top_strategy: {top_strategy}")
+            lines.append(f"- top_alignment_state: {top_alignment}")
+            lines.append(f"- top_ai_execution_state: {top_ai_execution}")
+            lines.append("")
+    else:
+        lines.append("No ranking report available.")
+        lines.append("")
+
+    lines.append("### Edge Highlights")
+    lines.append("")
+    if edge:
+        for horizon in HORIZONS:
+            lines.append(f"#### {horizon}")
+            horizon_edge = edge.get(horizon, {}) or {}
+
+            lines.append(f"- symbol_edges: {_count_edge_findings(horizon_edge.get('by_symbol'))}")
+            lines.append(f"- strategy_edges: {_count_edge_findings(horizon_edge.get('by_strategy'))}")
+            lines.append(
+                f"- alignment_state_edges: {_count_edge_findings(horizon_edge.get('by_alignment_state'))}"
+            )
+            lines.append(
+                f"- ai_execution_state_edges: {_count_edge_findings(horizon_edge.get('by_ai_execution_state'))}"
+            )
+            lines.append("")
+    else:
+        lines.append("No edge report available.")
+        lines.append("")
+
+    lines.append("### Segment Highlights")
+    lines.append("")
+    if segment:
+        segment_reports = segment.get("reports", {}) or {}
+        for horizon in HORIZONS:
+            lines.append(f"#### {horizon}")
+            horizon_segments = segment_reports.get(horizon, {}) or {}
+
+            hour_count = (horizon_segments.get("hour_of_day", {}) or {}).get("qualified_segments", 0)
+            day_count = (horizon_segments.get("day_of_week", {}) or {}).get("qualified_segments", 0)
+            week_part_count = (horizon_segments.get("week_part", {}) or {}).get("qualified_segments", 0)
+
+            lines.append(f"- hour_of_day qualified_segments: {hour_count}")
+            lines.append(f"- day_of_week qualified_segments: {day_count}")
+            lines.append(f"- week_part qualified_segments: {week_part_count}")
+            lines.append("")
+    else:
+        lines.append("No segment report available.")
+        lines.append("")
+
+    return lines
+
+
+def _extract_top_ranked_group(report: Any) -> str:
+    if not isinstance(report, dict):
+        return "n/a"
+
+    items = report.get("rankings") or report.get("results") or []
+    if not isinstance(items, list) or not items:
+        return "n/a"
+
+    first = items[0]
+    if not isinstance(first, dict):
+        return "n/a"
+
+    return str(first.get("group", "n/a"))
+
+
+def _count_edge_findings(report: Any) -> int:
+    if not isinstance(report, dict):
+        return 0
+    findings = report.get("edge_findings", [])
+    if not isinstance(findings, list):
+        return 0
+    return len(findings)
 
 
 def _markdown_horizon_block(
@@ -279,6 +558,7 @@ def main() -> None:
     metrics = run_research_analyzer(input_path=args.input, output_dir=args.output_dir)
 
     print(f"Records analyzed: {metrics.get('dataset_overview', {}).get('total_records', 0)}")
+    print(f"Strategy lab dataset rows: {metrics.get('strategy_lab', {}).get('dataset_rows', 0)}")
     print(f"Summary JSON: {(args.output_dir / 'summary.json').resolve()}")
     print(f"Summary MD: {(args.output_dir / 'summary.md').resolve()}")
 
