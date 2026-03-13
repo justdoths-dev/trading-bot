@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from src.notifications.alert_notifier import AlertNotifier
 from src.notifications.research_notifier import ResearchNotifier
 from src.research.research_metrics import HORIZONS, calculate_research_metrics
 from src.research.schema_validator import validate_record
@@ -32,6 +31,7 @@ from src.research.strategy_lab.ranking_report import (
     rank_by_symbol,
 )
 from src.research.strategy_lab.segment_report import build_segment_reports
+from src.services.cron_health import CronHealthReporter
 
 LOGGER = logging.getLogger(__name__)
 
@@ -679,7 +679,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    alert_notifier = AlertNotifier()
+    reporter = CronHealthReporter("research_analyzer")
 
     try:
         metrics = run_research_analyzer(
@@ -702,20 +702,28 @@ def main() -> None:
         except Exception:
             LOGGER.exception("ResearchNotifier failed to send summary.")
 
+        reporter.success(
+            {
+                "records_analyzed": metrics.get("dataset_overview", {}).get(
+                    "total_records", 0
+                ),
+                "valid_records": metrics.get("schema_validation", {}).get(
+                    "valid_records", 0
+                ),
+                "invalid_records": metrics.get("schema_validation", {}).get(
+                    "invalid_records", 0
+                ),
+                "strategy_lab_dataset_rows": metrics.get("strategy_lab", {}).get(
+                    "dataset_rows", 0
+                ),
+            }
+        )
+
     except Exception as exc:
-        LOGGER.exception("Research analyzer failed.")
-
-        try:
-            alert_notifier.send_error_alert(
-                source="research_analyzer",
-                message="Research analyzer failed",
-                details=str(exc),
-            )
-        except Exception:
-            LOGGER.exception(
-                "AlertNotifier failed while reporting research analyzer error."
-            )
-
+        reporter.failure(
+            error=exc,
+            message="Research analyzer failed",
+        )
         raise
 
 
