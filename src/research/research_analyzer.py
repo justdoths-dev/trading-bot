@@ -7,8 +7,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from src.notifications.alert_notifier import AlertNotifier
 from src.notifications.research_notifier import ResearchNotifier
 from src.research.research_metrics import HORIZONS, calculate_research_metrics
+from src.research.schema_validator import validate_jsonl_file
 from src.research.strategy_lab.comparison_report import (
     compare_by_ai_execution_state,
     compare_by_alignment_state,
@@ -85,13 +87,24 @@ def write_summary_files(
 
 
 def run_research_analyzer(input_path: Path, output_dir: Path) -> dict[str, Any]:
-    """Run full analyzer flow: load records, calculate metrics, and write reports."""
+    """Run full analyzer flow: validate schema, load records, calculate metrics, and write reports."""
+    validation_summary = validate_jsonl_file(input_path)
+
+    invalid_records = int(validation_summary.get("invalid_records", 0))
+    if invalid_records > 0:
+        invalid_examples = validation_summary.get("invalid_examples", [])
+        raise ValueError(
+            "Schema validation failed before research analysis. "
+            f"invalid_records={invalid_records}, invalid_examples={invalid_examples}"
+        )
+
     records = load_jsonl_records(input_path)
 
     base_metrics = calculate_research_metrics(records)
     strategy_lab_metrics = _build_strategy_lab_metrics(input_path)
 
     final_metrics = dict(base_metrics)
+    final_metrics["schema_validation"] = validation_summary
     final_metrics["strategy_lab"] = strategy_lab_metrics
 
     write_summary_files(final_metrics, output_dir)
@@ -218,11 +231,21 @@ def _build_markdown(metrics: dict[str, Any]) -> str:
     by_symbol = metrics.get("by_symbol", {}) or {}
     by_strategy = metrics.get("by_strategy", {}) or {}
     strategy_lab = metrics.get("strategy_lab", {}) or {}
+    schema_validation = metrics.get("schema_validation", {}) or {}
 
     lines: list[str] = []
     lines.append("# Research Summary")
     lines.append("")
     lines.append(f"Generated at: {datetime.now(UTC).isoformat()}")
+    lines.append("")
+
+    lines.append("## Schema Validation")
+    lines.append("")
+    lines.append(f"- total_records: {schema_validation.get('total_records', 0)}")
+    lines.append(f"- valid_records: {schema_validation.get('valid_records', 0)}")
+    lines.append(f"- invalid_records: {schema_validation.get('invalid_records', 0)}")
+    lines.append(f"- error_count: {schema_validation.get('error_count', 0)}")
+    lines.append(f"- warning_count: {schema_validation.get('warning_count', 0)}")
     lines.append("")
 
     lines.append("## Dataset Overview")
@@ -559,26 +582,42 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-
-    metrics = run_research_analyzer(
-        input_path=args.input,
-        output_dir=args.output_dir,
-    )
-
-    print(
-        f"Records analyzed: {metrics.get('dataset_overview', {}).get('total_records', 0)}"
-    )
-    print(
-        f"Strategy lab dataset rows: {metrics.get('strategy_lab', {}).get('dataset_rows', 0)}"
-    )
-    print(f"Summary JSON: {(args.output_dir / 'summary.json').resolve()}")
-    print(f"Summary MD: {(args.output_dir / 'summary.md').resolve()}")
+    alert_notifier = AlertNotifier()
 
     try:
-        notifier = ResearchNotifier()
-        notifier.send_latest_summary()
-    except Exception:
-        LOGGER.exception("ResearchNotifier failed to send summary.")
+        metrics = run_research_analyzer(
+            input_path=args.input,
+            output_dir=args.output_dir,
+        )
+
+        print(
+            f"Records analyzed: {metrics.get('dataset_overview', {}).get('total_records', 0)}"
+        )
+        print(
+            f"Strategy lab dataset rows: {metrics.get('strategy_lab', {}).get('dataset_rows', 0)}"
+        )
+        print(f"Summary JSON: {(args.output_dir / 'summary.json').resolve()}")
+        print(f"Summary MD: {(args.output_dir / 'summary.md').resolve()}")
+
+        try:
+            notifier = ResearchNotifier()
+            notifier.send_latest_summary()
+        except Exception:
+            LOGGER.exception("ResearchNotifier failed to send summary.")
+
+    except Exception as exc:
+        LOGGER.exception("Research analyzer failed.")
+
+        try:
+            alert_notifier.send_error_alert(
+                source="research_analyzer",
+                message="Research analyzer failed",
+                details=str(exc),
+            )
+        except Exception:
+            LOGGER.exception("AlertNotifier failed while reporting research analyzer error.")
+
+        raise
 
 
 if __name__ == "__main__":
