@@ -78,8 +78,8 @@ class ResearchNotifier:
             return self._fallback_markdown_message(markdown_text)
 
         schema_validation = payload.get("schema_validation", {}) or {}
-        dataset_overview = payload.get("dataset_overview", {}) or {}
         top_highlights = payload.get("top_highlights", {}) or {}
+        edge_candidates_preview = payload.get("edge_candidates_preview", {}) or {}
 
         lines: list[str] = ["*Research Summary*"]
         lines.append(
@@ -96,16 +96,13 @@ class ResearchNotifier:
             f"{self._safe(top_highlights.get('strategy_lab_dataset_rows', 0))}"
         )
 
-        date_range = dataset_overview.get("date_range", {}) or {}
-        start = date_range.get("start")
-        end = date_range.get("end")
-        if start or end:
-            lines.append(
-                f"- Date Range: {self._safe(start or 'unknown')} -> {self._safe(end or 'unknown')}"
-            )
-
         lines.append("*Top Highlights*")
         lines.extend(self._highlight_lines(top_highlights))
+
+        edge_lines = self._edge_preview_lines(edge_candidates_preview)
+        if edge_lines:
+            lines.append("*Edge Preview*")
+            lines.extend(edge_lines[:3])
 
         return "\n".join(lines)
 
@@ -143,6 +140,79 @@ class ResearchNotifier:
             lines.append(f"- {self._safe(horizon)}: " + ", ".join(candidate_parts))
 
         return lines
+
+    def _edge_preview_lines(self, edge_candidates_preview: dict[str, Any]) -> list[str]:
+        by_horizon = edge_candidates_preview.get("by_horizon", {}) or {}
+        lines: list[str] = []
+
+        for horizon in ("15m", "1h", "4h"):
+            horizon_data = by_horizon.get(horizon, {}) or {}
+            candidate = self._select_best_edge_candidate(horizon_data)
+            if candidate is None:
+                continue
+
+            lines.append(
+                f"- {self._safe(horizon)}: "
+                f"{self._safe(candidate['label'])}={self._safe(candidate['group'])} "
+                f"({self._safe(candidate['candidate_strength'])}, n={self._safe(candidate['sample_count'])})"
+            )
+
+        return lines
+
+    def _select_best_edge_candidate(
+        self,
+        horizon_data: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        candidates = [
+            ("strategy", horizon_data.get("top_strategy")),
+            ("symbol", horizon_data.get("top_symbol")),
+            ("alignment", horizon_data.get("top_alignment_state")),
+        ]
+
+        best: dict[str, Any] | None = None
+        best_score: tuple[int, float, float, int] | None = None
+
+        for label, candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            if candidate.get("candidate_strength") == "insufficient_data":
+                continue
+
+            score = self._candidate_sort_score(candidate)
+
+            if best is None or best_score is None or score > best_score:
+                best = {
+                    "label": label,
+                    "group": candidate.get("group", "n/a"),
+                    "sample_count": candidate.get("sample_count", 0),
+                    "candidate_strength": candidate.get(
+                        "candidate_strength", "insufficient_data"
+                    ),
+                    "median_future_return_pct": candidate.get(
+                        "median_future_return_pct"
+                    ),
+                    "positive_rate_pct": candidate.get("positive_rate_pct"),
+                }
+                best_score = score
+
+        return best
+
+    def _candidate_sort_score(
+        self,
+        candidate: dict[str, Any],
+    ) -> tuple[int, float, float, int]:
+        strength_rank = {
+            "strong": 3,
+            "moderate": 2,
+            "weak": 1,
+            "insufficient_data": 0,
+        }
+        return (
+            strength_rank.get(str(candidate.get("candidate_strength")), 0),
+            float(candidate.get("median_future_return_pct") or 0.0),
+            float(candidate.get("positive_rate_pct") or 0.0),
+            int(candidate.get("sample_count") or 0),
+        )
 
     def _fallback_markdown_message(self, markdown_text: str | None) -> str:
         lines = ["*Research Summary*"]

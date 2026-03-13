@@ -34,6 +34,7 @@ from src.research.strategy_lab.segment_report import build_segment_reports
 from src.services.cron_health import CronHealthReporter
 
 LOGGER = logging.getLogger(__name__)
+MIN_EDGE_CANDIDATE_SAMPLE_COUNT = 30
 
 
 def load_jsonl_records(input_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -137,6 +138,9 @@ def run_research_analyzer(input_path: Path, output_dir: Path) -> dict[str, Any]:
     final_metrics["strategy_lab"] = strategy_lab_metrics
     final_metrics["top_highlights"] = _build_top_highlights(
         schema_validation=validation_summary,
+        strategy_lab=strategy_lab_metrics,
+    )
+    final_metrics["edge_candidates_preview"] = _build_edge_candidates_preview(
         strategy_lab=strategy_lab_metrics,
     )
 
@@ -282,26 +286,124 @@ def _build_top_highlights(
 
 def _extract_ranking_items(report: Any) -> list[dict[str, Any]]:
     """Extract ranking rows from ranking report wrapper."""
+    return _extract_ranked_groups(report)
+
+
+def _extract_ranked_groups(report: Any) -> list[dict[str, Any]]:
     if isinstance(report, list):
         return [item for item in report if isinstance(item, dict)]
 
     if not isinstance(report, dict):
         return []
 
-    items = report.get("rankings")
-    if isinstance(items, list):
-        return [item for item in items if isinstance(item, dict)]
-
-    items = report.get("results")
-    if isinstance(items, list):
-        return [item for item in items if isinstance(item, dict)]
+    for key in ("ranked_groups", "rankings", "results"):
+        items = report.get(key)
+        if isinstance(items, list):
+            return [item for item in items if isinstance(item, dict)]
 
     return []
+
+
+def _build_edge_candidates_preview(strategy_lab: dict[str, Any]) -> dict[str, Any]:
+    ranking = strategy_lab.get("ranking", {}) or {}
+    by_horizon: dict[str, dict[str, Any]] = {}
+
+    for horizon in HORIZONS:
+        horizon_rank = ranking.get(horizon, {}) or {}
+
+        top_strategy = _extract_edge_candidate(horizon_rank.get("by_strategy"))
+        top_symbol = _extract_edge_candidate(horizon_rank.get("by_symbol"))
+        top_alignment_state = _extract_edge_candidate(
+            horizon_rank.get("by_alignment_state")
+        )
+
+        visible_strengths = [
+            candidate["candidate_strength"]
+            for candidate in (top_strategy, top_symbol, top_alignment_state)
+            if candidate["candidate_strength"] != "insufficient_data"
+        ]
+
+        by_horizon[horizon] = {
+            "top_strategy": top_strategy,
+            "top_symbol": top_symbol,
+            "top_alignment_state": top_alignment_state,
+            "sample_gate": "passed" if visible_strengths else "insufficient_data",
+            "candidate_strength": _max_candidate_strength(visible_strengths),
+        }
+
+    return {
+        "minimum_sample_count": MIN_EDGE_CANDIDATE_SAMPLE_COUNT,
+        "by_horizon": by_horizon,
+    }
+
+
+def _extract_edge_candidate(report: Any) -> dict[str, Any]:
+    ranked_groups = _extract_ranked_groups(report)
+
+    for entry in ranked_groups:
+        metrics = entry.get("metrics", {}) or {}
+        sample_count = _to_float(metrics.get("sample_count"))
+        median_future_return_pct = _to_float(metrics.get("median_future_return_pct"))
+        positive_rate_pct = _to_float(
+            metrics.get("positive_rate_pct", metrics.get("up_rate_pct"))
+        )
+
+        if sample_count is None or sample_count < MIN_EDGE_CANDIDATE_SAMPLE_COUNT:
+            continue
+        if median_future_return_pct is None or median_future_return_pct <= 0:
+            continue
+        if positive_rate_pct is None or positive_rate_pct < 50:
+            continue
+
+        return {
+            "group": str(entry.get("group", "n/a")),
+            "sample_count": int(sample_count),
+            "median_future_return_pct": median_future_return_pct,
+            "positive_rate_pct": positive_rate_pct,
+            "candidate_strength": _score_candidate_strength(
+                sample_count=sample_count,
+                median_future_return_pct=median_future_return_pct,
+                positive_rate_pct=positive_rate_pct,
+            ),
+        }
+
+    return {
+        "group": "insufficient_data",
+        "sample_count": 0,
+        "median_future_return_pct": None,
+        "positive_rate_pct": None,
+        "candidate_strength": "insufficient_data",
+    }
+
+
+def _score_candidate_strength(
+    sample_count: float,
+    median_future_return_pct: float,
+    positive_rate_pct: float,
+) -> str:
+    if sample_count >= 60 and median_future_return_pct >= 0.75 and positive_rate_pct >= 60:
+        return "strong"
+    if sample_count >= 45 and median_future_return_pct >= 0.30 and positive_rate_pct >= 55:
+        return "moderate"
+    return "weak"
+
+
+def _max_candidate_strength(strengths: list[str]) -> str:
+    if not strengths:
+        return "insufficient_data"
+    if "strong" in strengths:
+        return "strong"
+    if "moderate" in strengths:
+        return "moderate"
+    if "weak" in strengths:
+        return "weak"
+    return "insufficient_data"
 
 
 def _build_markdown(metrics: dict[str, Any]) -> str:
     overview = metrics.get("dataset_overview", {}) or {}
     top_highlights = metrics.get("top_highlights", {}) or {}
+    edge_candidates_preview = metrics.get("edge_candidates_preview", {}) or {}
     horizons = metrics.get("horizon_summary", {}) or {}
     by_symbol = metrics.get("by_symbol", {}) or {}
     by_strategy = metrics.get("by_strategy", {}) or {}
@@ -315,6 +417,7 @@ def _build_markdown(metrics: dict[str, Any]) -> str:
     lines.append("")
 
     lines.extend(_markdown_top_highlights(top_highlights))
+    lines.extend(_markdown_edge_candidates_preview(edge_candidates_preview))
 
     lines.append("## Schema Validation")
     lines.append("")
@@ -478,6 +581,54 @@ def _markdown_top_highlights(top_highlights: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _markdown_edge_candidates_preview(edge_candidates_preview: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    by_horizon = edge_candidates_preview.get("by_horizon", {}) or {}
+
+    lines.append("## Edge Candidate Preview")
+    lines.append("")
+    lines.append(
+        "- minimum_sample_count: "
+        f"{edge_candidates_preview.get('minimum_sample_count', MIN_EDGE_CANDIDATE_SAMPLE_COUNT)}"
+    )
+    lines.append("")
+
+    for horizon in HORIZONS:
+        horizon_data = by_horizon.get(horizon, {}) or {}
+        lines.append(f"### {horizon}")
+        lines.append(f"- sample_gate: {horizon_data.get('sample_gate', 'insufficient_data')}")
+        lines.append(
+            f"- candidate_strength: {horizon_data.get('candidate_strength', 'insufficient_data')}"
+        )
+        lines.append(
+            f"- top_strategy: {_format_edge_candidate_markdown(horizon_data.get('top_strategy'))}"
+        )
+        lines.append(
+            f"- top_symbol: {_format_edge_candidate_markdown(horizon_data.get('top_symbol'))}"
+        )
+        lines.append(
+            "- top_alignment_state: "
+            f"{_format_edge_candidate_markdown(horizon_data.get('top_alignment_state'))}"
+        )
+        lines.append("")
+
+    return lines
+
+
+def _format_edge_candidate_markdown(candidate: Any) -> str:
+    if not isinstance(candidate, dict):
+        return "insufficient_data"
+    if candidate.get("candidate_strength") == "insufficient_data":
+        return "insufficient_data"
+    return (
+        f"{candidate.get('group', 'n/a')} "
+        f"(sample={candidate.get('sample_count', 0)}, "
+        f"median={_fmt_metric(candidate.get('median_future_return_pct'))}, "
+        f"positive_rate={_fmt_metric(candidate.get('positive_rate_pct'))}, "
+        f"strength={candidate.get('candidate_strength', 'insufficient_data')})"
+    )
+
+
 def _markdown_strategy_lab_block(strategy_lab: dict[str, Any]) -> list[str]:
     lines: list[str] = []
 
@@ -606,17 +757,11 @@ def _markdown_strategy_lab_block(strategy_lab: dict[str, Any]) -> list[str]:
 
 
 def _extract_top_ranked_group(report: Any) -> str:
-    if not isinstance(report, dict):
-        return "n/a"
-
-    items = report.get("rankings") or report.get("results") or []
-    if not isinstance(items, list) or not items:
+    items = _extract_ranked_groups(report)
+    if not items:
         return "n/a"
 
     first = items[0]
-    if not isinstance(first, dict):
-        return "n/a"
-
     return str(first.get("group", "n/a"))
 
 
@@ -693,6 +838,15 @@ def _fmt_metric(value: Any) -> str:
         return "n/a"
 
     return str(value)
+
+
+def _to_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _markdown_distribution(title: str, values: dict[str, Any]) -> list[str]:
@@ -796,3 +950,5 @@ if __name__ == "__main__":
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
     main()
+
+
