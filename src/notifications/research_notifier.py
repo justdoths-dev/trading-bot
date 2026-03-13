@@ -79,148 +79,82 @@ class ResearchNotifier:
 
         schema_validation = payload.get("schema_validation", {}) or {}
         dataset_overview = payload.get("dataset_overview", {}) or {}
-        strategy_lab = payload.get("strategy_lab", {}) or {}
+        top_highlights = payload.get("top_highlights", {}) or {}
 
         lines: list[str] = ["*Research Summary*"]
-
-        total_records = dataset_overview.get("total_records", 0)
-        valid_records = schema_validation.get("valid_records", total_records)
-        invalid_records = schema_validation.get("invalid_records", 0)
-        warning_count = schema_validation.get("warning_count", 0)
-
         lines.append(
-            f"- Dataset: {self._safe(total_records)} records"
+            "- Dataset: "
+            f"{self._safe(schema_validation.get('valid_records', 0))} valid analysis records"
         )
         lines.append(
-            "- Schema: "
-            f"valid={self._safe(valid_records)} / "
-            f"invalid={self._safe(invalid_records)} / "
-            f"warnings={self._safe(warning_count)}"
+            "- Validation: "
+            f"invalid={self._safe(top_highlights.get('invalid_record_count', 0))}, "
+            f"warnings={self._safe(schema_validation.get('warning_count', 0))}"
         )
-
-        symbols_distribution = dataset_overview.get("symbols_distribution", {}) or {}
-        if symbols_distribution:
-            lines.append(
-                f"- Symbols: {self._format_distribution(symbols_distribution, limit=3)}"
-            )
-
-        strategy_distribution = dataset_overview.get("selected_strategies_distribution", {}) or {}
-        if strategy_distribution:
-            lines.append(
-                f"- Strategies: {self._format_distribution(strategy_distribution, limit=3)}"
-            )
-
-        bias_distribution = dataset_overview.get("bias_distribution", {}) or {}
-        if bias_distribution:
-            lines.append(
-                f"- Bias: {self._format_distribution(bias_distribution, limit=3)}"
-            )
-
-        alignment_distribution = dataset_overview.get("alignment_distribution", {}) or {}
-        if alignment_distribution:
-            lines.append(
-                f"- Alignment: {self._format_distribution(alignment_distribution, limit=3)}"
-            )
-
-        ai_execution_distribution = dataset_overview.get("ai_execution_distribution", {}) or {}
-        if ai_execution_distribution:
-            lines.append(
-                f"- AI Exec: {self._format_distribution(ai_execution_distribution, limit=3)}"
-            )
-
-        horizon_summary = payload.get("horizon_summary", {}) or {}
         lines.append(
-            "- Labels: "
-            f"15m={self._labeled_count(horizon_summary, '15m')} / "
-            f"1h={self._labeled_count(horizon_summary, '1h')} / "
-            f"4h={self._labeled_count(horizon_summary, '4h')}"
+            "- Strategy Lab Rows: "
+            f"{self._safe(top_highlights.get('strategy_lab_dataset_rows', 0))}"
         )
 
-        dataset_rows = strategy_lab.get("dataset_rows")
-        if dataset_rows is not None:
-            lines.append(f"- Lab Rows: {self._safe(dataset_rows)}")
+        date_range = dataset_overview.get("date_range", {}) or {}
+        start = date_range.get("start")
+        end = date_range.get("end")
+        if start or end:
+            lines.append(
+                f"- Date Range: {self._safe(start or 'unknown')} -> {self._safe(end or 'unknown')}"
+            )
 
-        top_strategy_summary = self._top_strategy_summary(strategy_lab)
-        if top_strategy_summary:
-            lines.append(f"- Top Strategy: {top_strategy_summary}")
-
-        edge_summary = self._edge_summary(strategy_lab)
-        if edge_summary:
-            lines.append(f"- Edge Findings: {edge_summary}")
+        lines.append("*Top Highlights*")
+        lines.extend(self._highlight_lines(top_highlights))
 
         return "\n".join(lines)
 
+    def _highlight_lines(self, top_highlights: dict[str, Any]) -> list[str]:
+        by_horizon = top_highlights.get("by_horizon", {}) or {}
+        lines: list[str] = []
+
+        for horizon in ("15m", "1h", "4h"):
+            horizon_data = by_horizon.get(horizon, {}) or {}
+
+            top_symbol = self._safe(horizon_data.get("top_symbol", "n/a"))
+            top_strategy = self._safe(horizon_data.get("top_strategy", "n/a"))
+            best_alignment = self._safe(
+                horizon_data.get("best_alignment_state", "n/a")
+            )
+            best_ai_execution = self._safe(
+                horizon_data.get("best_ai_execution_state", "n/a")
+            )
+
+            if (
+                top_symbol == "n/a"
+                and top_strategy == "n/a"
+                and best_alignment == "n/a"
+                and best_ai_execution == "n/a"
+            ):
+                lines.append(f"- {self._safe(horizon)}: no ranking highlights available")
+                continue
+
+            candidate_parts = [
+                f"symbol={top_symbol}",
+                f"strategy={top_strategy}",
+                f"align={best_alignment}",
+                f"ai={best_ai_execution}",
+            ]
+            lines.append(f"- {self._safe(horizon)}: " + ", ".join(candidate_parts))
+
+        return lines
+
     def _fallback_markdown_message(self, markdown_text: str | None) -> str:
         lines = ["*Research Summary*"]
+
         if markdown_text:
             preview = markdown_text.strip().splitlines()
             preview_line = preview[0] if preview else "summary generated"
             lines.append(f"- {self._safe(preview_line)}")
         else:
             lines.append("- Summary generated.")
+
         return "\n".join(lines)
-
-    def _format_distribution(self, data: dict[str, Any], limit: int = 3) -> str:
-        items = list(data.items())[:limit]
-        formatted = []
-        for key, value in items:
-            formatted.append(f"{self._safe(key)} {self._safe(value)}")
-        return ", ".join(formatted) if formatted else "n/a"
-
-    def _labeled_count(self, horizon_summary: dict[str, Any], horizon: str) -> str:
-        horizon_data = horizon_summary.get(horizon, {}) or {}
-        return self._safe(horizon_data.get("labeled_records", 0))
-
-    def _top_strategy_summary(self, strategy_lab: dict[str, Any]) -> str:
-        ranking = strategy_lab.get("ranking", {}) or {}
-        parts: list[str] = []
-
-        for horizon in ("15m", "1h", "4h"):
-            horizon_rank = ranking.get(horizon, {}) or {}
-            by_strategy = horizon_rank.get("by_strategy", {}) or {}
-            top_group = self._extract_top_ranked_group(by_strategy)
-            if top_group != "n/a":
-                parts.append(f"{horizon}:{self._safe(top_group)}")
-
-        return ", ".join(parts) if parts else ""
-
-    def _edge_summary(self, strategy_lab: dict[str, Any]) -> str:
-        edge = strategy_lab.get("edge", {}) or {}
-        parts: list[str] = []
-
-        for horizon in ("15m", "1h", "4h"):
-            horizon_edge = edge.get(horizon, {}) or {}
-            total_findings = (
-                self._count_edge_findings(horizon_edge.get("by_symbol"))
-                + self._count_edge_findings(horizon_edge.get("by_strategy"))
-                + self._count_edge_findings(horizon_edge.get("by_alignment_state"))
-                + self._count_edge_findings(horizon_edge.get("by_ai_execution_state"))
-            )
-            parts.append(f"{horizon}:{total_findings}")
-
-        return ", ".join(parts) if parts else ""
-
-    def _extract_top_ranked_group(self, report: Any) -> str:
-        if not isinstance(report, dict):
-            return "n/a"
-
-        items = report.get("rankings") or report.get("results") or []
-        if not isinstance(items, list) or not items:
-            return "n/a"
-
-        first = items[0]
-        if not isinstance(first, dict):
-            return "n/a"
-
-        return str(first.get("group", "n/a"))
-
-    def _count_edge_findings(self, report: Any) -> int:
-        if not isinstance(report, dict):
-            return 0
-        findings = report.get("edge_findings", [])
-        if not isinstance(findings, list):
-            return 0
-        return len(findings)
 
     @staticmethod
     def _default_report_dir() -> Path:

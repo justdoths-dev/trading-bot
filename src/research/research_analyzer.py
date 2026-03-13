@@ -127,9 +127,6 @@ def run_research_analyzer(input_path: Path, output_dir: Path) -> dict[str, Any]:
 
     base_metrics = calculate_research_metrics(records)
 
-    # Strategy Lab은 완전히 유효한 데이터셋에서만 실행한다.
-    # 일부 invalid record가 섞인 경우에는 Research Summary까지만 생성하고,
-    # Strategy Lab 결과는 빈 payload로 둔다.
     if records and int(validation_summary.get("invalid_records", 0)) == 0:
         strategy_lab_metrics = _build_strategy_lab_metrics(input_path)
     else:
@@ -138,6 +135,10 @@ def run_research_analyzer(input_path: Path, output_dir: Path) -> dict[str, Any]:
     final_metrics = dict(base_metrics)
     final_metrics["schema_validation"] = validation_summary
     final_metrics["strategy_lab"] = strategy_lab_metrics
+    final_metrics["top_highlights"] = _build_top_highlights(
+        schema_validation=validation_summary,
+        strategy_lab=strategy_lab_metrics,
+    )
 
     write_summary_files(final_metrics, output_dir)
     return final_metrics
@@ -252,6 +253,33 @@ def _build_strategy_lab_metrics(input_path: Path) -> dict[str, Any]:
     }
 
 
+def _build_top_highlights(
+    schema_validation: dict[str, Any],
+    strategy_lab: dict[str, Any],
+) -> dict[str, Any]:
+    ranking = strategy_lab.get("ranking", {}) or {}
+    by_horizon: dict[str, dict[str, str]] = {}
+
+    for horizon in HORIZONS:
+        horizon_rank = ranking.get(horizon, {}) or {}
+        by_horizon[horizon] = {
+            "top_symbol": _extract_top_ranked_group(horizon_rank.get("by_symbol")),
+            "top_strategy": _extract_top_ranked_group(horizon_rank.get("by_strategy")),
+            "best_alignment_state": _extract_top_ranked_group(
+                horizon_rank.get("by_alignment_state")
+            ),
+            "best_ai_execution_state": _extract_top_ranked_group(
+                horizon_rank.get("by_ai_execution_state")
+            ),
+        }
+
+    return {
+        "invalid_record_count": int(schema_validation.get("invalid_records", 0)),
+        "strategy_lab_dataset_rows": int(strategy_lab.get("dataset_rows", 0) or 0),
+        "by_horizon": by_horizon,
+    }
+
+
 def _extract_ranking_items(report: Any) -> list[dict[str, Any]]:
     """Extract ranking rows from ranking report wrapper."""
     if isinstance(report, list):
@@ -273,6 +301,7 @@ def _extract_ranking_items(report: Any) -> list[dict[str, Any]]:
 
 def _build_markdown(metrics: dict[str, Any]) -> str:
     overview = metrics.get("dataset_overview", {}) or {}
+    top_highlights = metrics.get("top_highlights", {}) or {}
     horizons = metrics.get("horizon_summary", {}) or {}
     by_symbol = metrics.get("by_symbol", {}) or {}
     by_strategy = metrics.get("by_strategy", {}) or {}
@@ -284,6 +313,8 @@ def _build_markdown(metrics: dict[str, Any]) -> str:
     lines.append("")
     lines.append(f"Generated at: {datetime.now(UTC).isoformat()}")
     lines.append("")
+
+    lines.extend(_markdown_top_highlights(top_highlights))
 
     lines.append("## Schema Validation")
     lines.append("")
@@ -413,6 +444,38 @@ def _build_markdown(metrics: dict[str, Any]) -> str:
     lines.extend(_markdown_strategy_lab_block(strategy_lab))
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _markdown_top_highlights(top_highlights: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    by_horizon = top_highlights.get("by_horizon", {}) or {}
+
+    lines.append("## Top Highlights")
+    lines.append("")
+    lines.append(
+        f"- invalid_record_count: {top_highlights.get('invalid_record_count', 0)}"
+    )
+    lines.append(
+        "- strategy_lab_dataset_rows: "
+        f"{top_highlights.get('strategy_lab_dataset_rows', 0)}"
+    )
+    lines.append("")
+
+    for horizon in HORIZONS:
+        horizon_data = by_horizon.get(horizon, {}) or {}
+        lines.append(f"### {horizon}")
+        lines.append(f"- top_symbol: {horizon_data.get('top_symbol', 'n/a')}")
+        lines.append(f"- top_strategy: {horizon_data.get('top_strategy', 'n/a')}")
+        lines.append(
+            f"- best_alignment_state: {horizon_data.get('best_alignment_state', 'n/a')}"
+        )
+        lines.append(
+            "- best_ai_execution_state: "
+            f"{horizon_data.get('best_ai_execution_state', 'n/a')}"
+        )
+        lines.append("")
+
+    return lines
 
 
 def _markdown_strategy_lab_block(strategy_lab: dict[str, Any]) -> list[str]:
@@ -733,4 +796,3 @@ if __name__ == "__main__":
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
     main()
-
