@@ -20,24 +20,28 @@ from src.strategy.strategy_engine import StrategyEngine
 
 @dataclass
 class TimeframeConfig:
+    """Configuration for one timeframe data request."""
+
     timeframe: str
     limit: int
 
 
 @dataclass
 class TradingPipelineConfig:
+    """Configuration for the trading pipeline."""
+
     symbol: str
     send_telegram: bool
 
 
 class TradingPipeline:
+    """Run the full trading analysis pipeline end-to-end."""
 
     def __init__(
         self,
         config: TradingPipelineConfig | None = None,
         trading_notifier: TradingNotifier | None = None,
     ) -> None:
-
         self.config = config or TradingPipelineConfig(
             symbol=settings.pipeline.default_symbol,
             send_telegram=settings.pipeline.send_telegram,
@@ -93,8 +97,11 @@ class TradingPipeline:
         run_ai: bool = True,
         ai_result_override: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-
+        """Execute the full pipeline and return all outputs."""
         symbol = self.config.symbol
+
+        if not settings.binance_api_key or not settings.binance_api_secret:
+            print("BINANCE API key missing (public data still works).")
 
         timeframe_configs = self._build_timeframe_configs()
 
@@ -153,6 +160,36 @@ class TradingPipeline:
             "telegram_send_result": telegram_send_result,
         }
 
+    def _build_ai_output(
+        self,
+        enriched_data: dict[str, Any],
+        strategy_result: dict[str, Any],
+        risk_result: dict[str, Any],
+        execution_result: dict[str, Any],
+        run_ai: bool,
+        ai_result_override: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if run_ai:
+            return self.ai_service.run(
+                enriched_data=enriched_data,
+                strategy_result=strategy_result,
+                risk_result=risk_result,
+                execution_result=execution_result,
+            )
+
+        if ai_result_override is not None:
+            return {
+                "payload": {},
+                "prompt": "",
+                "result": ai_result_override,
+            }
+
+        return {
+            "payload": {},
+            "prompt": "",
+            "result": self._build_skipped_ai_result(),
+        }
+
     def _maybe_send_telegram(
         self,
         symbol: str,
@@ -161,7 +198,11 @@ class TradingPipeline:
         execution_result: dict[str, Any],
         ai_result: dict[str, Any],
     ) -> dict[str, Any]:
+        """
+        Send trading alert only when execution is allowed.
 
+        Trading alert failures should not break the trading pipeline.
+        """
         if not self.config.send_telegram:
             return {
                 "sent": False,
@@ -169,7 +210,6 @@ class TradingPipeline:
             }
 
         execution_allowed = execution_result.get("execution_allowed", False)
-
         if execution_allowed is not True:
             return {
                 "sent": False,
@@ -185,8 +225,31 @@ class TradingPipeline:
         )
 
     @staticmethod
-    def _build_timeframe_configs() -> list[TimeframeConfig]:
+    def _build_skipped_ai_result() -> dict[str, Any]:
+        return {
+            "source": "scheduler_cache",
+            "model": settings.ai.model,
+            "environment": settings.ai.environment,
+            "generated_at": 0,
+            "analysis": {
+                "market_structure": "AI analysis skipped for this cycle.",
+                "rule_engine_assessment": "Using scheduler cycle without new AI call.",
+                "key_bottlenecks": ["AI call skipped on this cycle."],
+                "long_scenario": "Unavailable on skipped AI cycle.",
+                "short_scenario": "Unavailable on skipped AI cycle.",
+                "final_stance": "hold",
+                "stance_reason": "AI was skipped for this cycle to reduce cost and token usage.",
+                "telegram_briefing": [
+                    "AI analysis skipped for this cycle.",
+                    "Rule engine and risk engine still executed normally.",
+                    "Telegram is only sent when execution is allowed.",
+                ],
+            },
+        }
 
+    @staticmethod
+    def _build_timeframe_configs() -> list[TimeframeConfig]:
+        """Return the default multi-timeframe configuration set."""
         return [
             TimeframeConfig(timeframe="1m", limit=100),
             TimeframeConfig(timeframe="5m", limit=100),
