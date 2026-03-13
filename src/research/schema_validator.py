@@ -31,7 +31,6 @@ MAX_INVALID_EXAMPLES = 5
 
 
 def validate_record(record: dict[str, Any], line_number: int | None = None) -> dict[str, Any]:
-    """Validate a single trade analysis record."""
     errors: list[str] = []
     warnings: list[str] = []
     prefix = _line_prefix(line_number)
@@ -80,22 +79,24 @@ def validate_record(record: dict[str, Any], line_number: int | None = None) -> d
             continue
 
         value = record.get(field)
+
         if value is None:
             continue
 
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            warnings.append(f"{prefix}{field} should be an int or float when present")
+            errors.append(f"{prefix}{field} must be an int or float when present")
 
     for field in FUTURE_LABEL_FIELDS:
         if field not in record:
             continue
 
         value = record.get(field)
+
         if value is None:
             continue
 
         if not isinstance(value, str) or value.strip().lower() not in VALID_FUTURE_LABELS:
-            warnings.append(f"{prefix}{field} should be one of: up, down, flat")
+            errors.append(f"{prefix}{field} must be one of: up, down, flat")
 
     return {
         "is_valid": not errors,
@@ -105,7 +106,6 @@ def validate_record(record: dict[str, Any], line_number: int | None = None) -> d
 
 
 def validate_jsonl_file(input_path: Path) -> dict[str, Any]:
-    """Load and validate a JSONL file containing trade analysis records."""
     summary = {
         "input_path": str(input_path),
         "total_records": 0,
@@ -133,6 +133,7 @@ def validate_jsonl_file(input_path: Path) -> dict[str, Any]:
                 error_message = f"Line {line_number}: malformed JSON - {exc.msg}"
                 summary["invalid_records"] += 1
                 summary["error_count"] += 1
+
                 _append_invalid_example(
                     summary["invalid_examples"],
                     {
@@ -141,6 +142,7 @@ def validate_jsonl_file(input_path: Path) -> dict[str, Any]:
                         "warnings": [],
                     },
                 )
+
                 continue
 
             if not isinstance(parsed, dict):
@@ -149,6 +151,7 @@ def validate_jsonl_file(input_path: Path) -> dict[str, Any]:
                 )
                 summary["invalid_records"] += 1
                 summary["error_count"] += 1
+
                 _append_invalid_example(
                     summary["invalid_examples"],
                     {
@@ -157,9 +160,11 @@ def validate_jsonl_file(input_path: Path) -> dict[str, Any]:
                         "warnings": [],
                     },
                 )
+
                 continue
 
             result = validate_record(parsed, line_number=line_number)
+
             summary["error_count"] += len(result["errors"])
             summary["warning_count"] += len(result["warnings"])
 
@@ -167,6 +172,7 @@ def validate_jsonl_file(input_path: Path) -> dict[str, Any]:
                 summary["valid_records"] += 1
             else:
                 summary["invalid_records"] += 1
+
                 _append_invalid_example(
                     summary["invalid_examples"],
                     {
@@ -186,6 +192,7 @@ def _validate_required_string(
     prefix: str,
 ) -> None:
     value = _get_nested_value(record, path)
+
     if value is _MISSING:
         errors.append(f"{prefix}Missing required field: {path}")
         return
@@ -196,10 +203,13 @@ def _validate_required_string(
 
 def _get_nested_value(record: dict[str, Any], path: str) -> Any:
     current: Any = record
+
     for part in path.split("."):
         if not isinstance(current, dict) or part not in current:
             return _MISSING
+
         current = current[part]
+
     return current
 
 
@@ -208,6 +218,7 @@ def _is_parseable_datetime(value: Any) -> bool:
         return False
 
     candidate = value.strip()
+
     if candidate.endswith("Z"):
         candidate = candidate[:-1] + "+00:00"
 
@@ -225,12 +236,14 @@ def _is_non_empty_string(value: Any) -> bool:
 def _append_invalid_example(examples: list[dict[str, Any]], example: dict[str, Any]) -> None:
     if len(examples) >= MAX_INVALID_EXAMPLES:
         return
+
     examples.append(example)
 
 
 def _line_prefix(line_number: int | None) -> str:
     if line_number is None:
         return ""
+
     return f"Line {line_number}: "
 
 
@@ -242,18 +255,22 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Validate logs/trade_analysis.jsonl before research analysis runs"
     )
+
     parser.add_argument(
         "--input",
         type=Path,
         default=_default_input_path(),
         help="Path to the trade analysis JSONL file",
     )
+
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+
     summary = validate_jsonl_file(args.input)
+
     print(json.dumps(summary, indent=2))
 
 

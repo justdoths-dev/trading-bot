@@ -10,7 +10,7 @@ from typing import Any
 from src.notifications.alert_notifier import AlertNotifier
 from src.notifications.research_notifier import ResearchNotifier
 from src.research.research_metrics import HORIZONS, calculate_research_metrics
-from src.research.schema_validator import validate_jsonl_file
+from src.research.schema_validator import validate_record
 from src.research.strategy_lab.comparison_report import (
     compare_by_ai_execution_state,
     compare_by_alignment_state,
@@ -36,18 +36,29 @@ from src.research.strategy_lab.segment_report import build_segment_reports
 LOGGER = logging.getLogger(__name__)
 
 
-def load_jsonl_records(input_path: Path) -> list[dict[str, Any]]:
-    """Load JSONL records while ignoring blank lines and validating JSON."""
+def load_jsonl_records(input_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Load JSONL records, keeping only schema-valid objects for analysis."""
     if not input_path.exists():
         raise FileNotFoundError(f"Input file does not exist: {input_path}")
 
     records: list[dict[str, Any]] = []
+    validation_summary = {
+        "input_path": str(input_path),
+        "total_records": 0,
+        "valid_records": 0,
+        "invalid_records": 0,
+        "error_count": 0,
+        "warning_count": 0,
+        "invalid_examples": [],
+    }
 
     with input_path.open("r", encoding="utf-8") as file:
         for line_number, line in enumerate(file, start=1):
             content = line.strip()
             if not content:
                 continue
+
+            validation_summary["total_records"] += 1
 
             try:
                 parsed = json.loads(content)
@@ -58,12 +69,37 @@ def load_jsonl_records(input_path: Path) -> list[dict[str, Any]]:
 
             if not isinstance(parsed, dict):
                 raise ValueError(
-                    f"Expected JSON object in {input_path} at line {line_number}, got {type(parsed).__name__}"
+                    f"Expected JSON object in {input_path} at line {line_number}, "
+                    f"got {type(parsed).__name__}"
                 )
 
-            records.append(parsed)
+            result = validate_record(parsed, line_number=line_number)
+            validation_summary["error_count"] += len(result["errors"])
+            validation_summary["warning_count"] += len(result["warnings"])
 
-    return records
+            if result["is_valid"]:
+                validation_summary["valid_records"] += 1
+                records.append(parsed)
+                continue
+
+            validation_summary["invalid_records"] += 1
+
+            if len(validation_summary["invalid_examples"]) < 5:
+                validation_summary["invalid_examples"].append(
+                    {
+                        "line_number": line_number,
+                        "errors": result["errors"],
+                        "warnings": result["warnings"],
+                    }
+                )
+
+            LOGGER.warning(
+                "Skipping invalid research record at line %s: %s",
+                line_number,
+                "; ".join(result["errors"]),
+            )
+
+    return records, validation_summary
 
 
 def write_summary_files(
@@ -80,28 +116,24 @@ def write_summary_files(
         json.dumps(metrics, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-
     summary_md_path.write_text(_build_markdown(metrics), encoding="utf-8")
 
     return summary_json_path, summary_md_path
 
 
 def run_research_analyzer(input_path: Path, output_dir: Path) -> dict[str, Any]:
-    """Run full analyzer flow: validate schema, load records, calculate metrics, and write reports."""
-    validation_summary = validate_jsonl_file(input_path)
-
-    invalid_records = int(validation_summary.get("invalid_records", 0))
-    if invalid_records > 0:
-        invalid_examples = validation_summary.get("invalid_examples", [])
-        raise ValueError(
-            "Schema validation failed before research analysis. "
-            f"invalid_records={invalid_records}, invalid_examples={invalid_examples}"
-        )
-
-    records = load_jsonl_records(input_path)
+    """Run full analyzer flow: load valid records, calculate metrics, and write reports."""
+    records, validation_summary = load_jsonl_records(input_path)
 
     base_metrics = calculate_research_metrics(records)
-    strategy_lab_metrics = _build_strategy_lab_metrics(input_path)
+
+    # Strategy Lab은 완전히 유효한 데이터셋에서만 실행한다.
+    # 일부 invalid record가 섞인 경우에는 Research Summary까지만 생성하고,
+    # Strategy Lab 결과는 빈 payload로 둔다.
+    if records and int(validation_summary.get("invalid_records", 0)) == 0:
+        strategy_lab_metrics = _build_strategy_lab_metrics(input_path)
+    else:
+        strategy_lab_metrics = _empty_strategy_lab_metrics()
 
     final_metrics = dict(base_metrics)
     final_metrics["schema_validation"] = validation_summary
@@ -111,9 +143,21 @@ def run_research_analyzer(input_path: Path, output_dir: Path) -> dict[str, Any]:
     return final_metrics
 
 
+def _empty_strategy_lab_metrics() -> dict[str, Any]:
+    """Return a safe empty strategy-lab payload for empty or mixed-invalid datasets."""
+    return {
+        "dataset_rows": 0,
+        "performance": {},
+        "comparison": {},
+        "ranking": {},
+        "edge": {},
+        "segment": {},
+    }
+
+
 def _build_strategy_lab_metrics(input_path: Path) -> dict[str, Any]:
     """Build full Strategy Research Lab metrics bundle."""
-    dataset_rows = build_dataset(input_path)
+    dataset = build_dataset(input_path)
 
     performance: dict[str, Any] = {}
     comparison: dict[str, Any] = {}
@@ -166,7 +210,9 @@ def _build_strategy_lab_metrics(input_path: Path) -> dict[str, Any]:
 
         symbol_rankings = _extract_ranking_items(ranking[horizon]["by_symbol"])
         strategy_rankings = _extract_ranking_items(ranking[horizon]["by_strategy"])
-        alignment_rankings = _extract_ranking_items(ranking[horizon]["by_alignment_state"])
+        alignment_rankings = _extract_ranking_items(
+            ranking[horizon]["by_alignment_state"]
+        )
         ai_execution_rankings = _extract_ranking_items(
             ranking[horizon]["by_ai_execution_state"]
         )
@@ -191,13 +237,13 @@ def _build_strategy_lab_metrics(input_path: Path) -> dict[str, Any]:
         }
 
     segment = build_segment_reports(
-        dataset_rows,
+        dataset,
         horizons=tuple(HORIZONS),
         min_samples=10,
     )
 
     return {
-        "dataset_rows": len(dataset_rows),
+        "dataset_rows": len(dataset),
         "performance": performance,
         "comparison": comparison,
         "ranking": ranking,
@@ -255,7 +301,8 @@ def _build_markdown(metrics: dict[str, Any]) -> str:
         f"- records_with_any_future_label: {overview.get('records_with_any_future_label', 0)}"
     )
     lines.append(
-        f"- label_coverage_any_horizon_pct: {_fmt_metric(overview.get('label_coverage_any_horizon_pct'))}"
+        "- label_coverage_any_horizon_pct: "
+        f"{_fmt_metric(overview.get('label_coverage_any_horizon_pct'))}"
     )
 
     date_range = overview.get("date_range", {}) or {}
@@ -312,10 +359,12 @@ def _build_markdown(metrics: dict[str, Any]) -> str:
             lines.append(f"### {symbol}")
             lines.append(f"- total_records: {data.get('total_records', 0)}")
             lines.append(
-                f"- records_with_any_future_label: {data.get('records_with_any_future_label', 0)}"
+                "- records_with_any_future_label: "
+                f"{data.get('records_with_any_future_label', 0)}"
             )
             lines.append(
-                f"- label_coverage_any_horizon_pct: {_fmt_metric(data.get('label_coverage_any_horizon_pct'))}"
+                "- label_coverage_any_horizon_pct: "
+                f"{_fmt_metric(data.get('label_coverage_any_horizon_pct'))}"
             )
             lines.append("")
 
@@ -339,10 +388,12 @@ def _build_markdown(metrics: dict[str, Any]) -> str:
             lines.append(f"### {strategy}")
             lines.append(f"- total_records: {data.get('total_records', 0)}")
             lines.append(
-                f"- records_with_any_future_label: {data.get('records_with_any_future_label', 0)}"
+                "- records_with_any_future_label: "
+                f"{data.get('records_with_any_future_label', 0)}"
             )
             lines.append(
-                f"- label_coverage_any_horizon_pct: {_fmt_metric(data.get('label_coverage_any_horizon_pct'))}"
+                "- label_coverage_any_horizon_pct: "
+                f"{_fmt_metric(data.get('label_coverage_any_horizon_pct'))}"
             )
             lines.append("")
 
@@ -386,10 +437,20 @@ def _markdown_strategy_lab_block(strategy_lab: dict[str, Any]) -> list[str]:
             lines.append(f"- sample_count: {report.get('sample_count', 0)}")
             lines.append(f"- labeled_count: {report.get('labeled_count', 0)}")
             lines.append(f"- coverage_pct: {_fmt_metric(report.get('coverage_pct'))}")
-            lines.append(f"- signal_match_rate: {_fmt_metric(report.get('signal_match_rate'))}")
-            lines.append(f"- bias_match_rate: {_fmt_metric(report.get('bias_match_rate'))}")
-            lines.append(f"- avg_future_return_pct: {_fmt_metric(report.get('avg_future_return_pct'))}")
-            lines.append(f"- median_future_return_pct: {_fmt_metric(report.get('median_future_return_pct'))}")
+            lines.append(
+                f"- signal_match_rate: {_fmt_metric(report.get('signal_match_rate'))}"
+            )
+            lines.append(
+                f"- bias_match_rate: {_fmt_metric(report.get('bias_match_rate'))}"
+            )
+            lines.append(
+                "- avg_future_return_pct: "
+                f"{_fmt_metric(report.get('avg_future_return_pct'))}"
+            )
+            lines.append(
+                "- median_future_return_pct: "
+                f"{_fmt_metric(report.get('median_future_return_pct'))}"
+            )
             lines.append("")
     else:
         lines.append("No performance report available.")
@@ -404,8 +465,12 @@ def _markdown_strategy_lab_block(strategy_lab: dict[str, Any]) -> list[str]:
 
             top_symbol = _extract_top_ranked_group(horizon_rank.get("by_symbol"))
             top_strategy = _extract_top_ranked_group(horizon_rank.get("by_strategy"))
-            top_alignment = _extract_top_ranked_group(horizon_rank.get("by_alignment_state"))
-            top_ai_execution = _extract_top_ranked_group(horizon_rank.get("by_ai_execution_state"))
+            top_alignment = _extract_top_ranked_group(
+                horizon_rank.get("by_alignment_state")
+            )
+            top_ai_execution = _extract_top_ranked_group(
+                horizon_rank.get("by_ai_execution_state")
+            )
 
             lines.append(f"- top_symbol: {top_symbol}")
             lines.append(f"- top_strategy: {top_strategy}")
@@ -423,13 +488,19 @@ def _markdown_strategy_lab_block(strategy_lab: dict[str, Any]) -> list[str]:
             lines.append(f"#### {horizon}")
             horizon_edge = edge.get(horizon, {}) or {}
 
-            lines.append(f"- symbol_edges: {_count_edge_findings(horizon_edge.get('by_symbol'))}")
-            lines.append(f"- strategy_edges: {_count_edge_findings(horizon_edge.get('by_strategy'))}")
             lines.append(
-                f"- alignment_state_edges: {_count_edge_findings(horizon_edge.get('by_alignment_state'))}"
+                f"- symbol_edges: {_count_edge_findings(horizon_edge.get('by_symbol'))}"
             )
             lines.append(
-                f"- ai_execution_state_edges: {_count_edge_findings(horizon_edge.get('by_ai_execution_state'))}"
+                f"- strategy_edges: {_count_edge_findings(horizon_edge.get('by_strategy'))}"
+            )
+            lines.append(
+                "- alignment_state_edges: "
+                f"{_count_edge_findings(horizon_edge.get('by_alignment_state'))}"
+            )
+            lines.append(
+                "- ai_execution_state_edges: "
+                f"{_count_edge_findings(horizon_edge.get('by_ai_execution_state'))}"
             )
             lines.append("")
     else:
@@ -444,9 +515,21 @@ def _markdown_strategy_lab_block(strategy_lab: dict[str, Any]) -> list[str]:
             lines.append(f"#### {horizon}")
             horizon_segments = segment_reports.get(horizon, {}) or {}
 
-            hour_count = (horizon_segments.get("hour_of_day", {}) or {}).get("qualified_segments", 0)
-            day_count = (horizon_segments.get("day_of_week", {}) or {}).get("qualified_segments", 0)
-            week_part_count = (horizon_segments.get("week_part", {}) or {}).get("qualified_segments", 0)
+            hour_count = (
+                (horizon_segments.get("hour_of_day", {}) or {}).get(
+                    "qualified_segments", 0
+                )
+            )
+            day_count = (
+                (horizon_segments.get("day_of_week", {}) or {}).get(
+                    "qualified_segments", 0
+                )
+            )
+            week_part_count = (
+                (horizon_segments.get("week_part", {}) or {}).get(
+                    "qualified_segments", 0
+                )
+            )
 
             lines.append(f"- hour_of_day qualified_segments: {hour_count}")
             lines.append(f"- day_of_week qualified_segments: {day_count}")
@@ -477,9 +560,11 @@ def _extract_top_ranked_group(report: Any) -> str:
 def _count_edge_findings(report: Any) -> int:
     if not isinstance(report, dict):
         return 0
+
     findings = report.get("edge_findings", [])
     if not isinstance(findings, list):
         return 0
+
     return len(findings)
 
 
@@ -490,6 +575,7 @@ def _markdown_horizon_block(
 ) -> list[str]:
     heading = "#" * heading_level
     lines: list[str] = []
+
     lines.append(f"{heading} {horizon}")
     lines.append("")
     lines.append(f"- labeled_records: {horizon_data.get('labeled_records', 0)}")
@@ -502,12 +588,19 @@ def _markdown_horizon_block(
         f"flat={label_dist.get('flat', 0)}"
     )
 
-    lines.append(f"- avg_future_return_pct: {_fmt_metric(horizon_data.get('avg_future_return_pct'))}")
     lines.append(
-        f"- median_future_return_pct: {_fmt_metric(horizon_data.get('median_future_return_pct'))}"
+        f"- avg_future_return_pct: {_fmt_metric(horizon_data.get('avg_future_return_pct'))}"
     )
-    lines.append(f"- positive_rate_pct: {_fmt_metric(horizon_data.get('positive_rate_pct'))}")
-    lines.append(f"- negative_rate_pct: {_fmt_metric(horizon_data.get('negative_rate_pct'))}")
+    lines.append(
+        "- median_future_return_pct: "
+        f"{_fmt_metric(horizon_data.get('median_future_return_pct'))}"
+    )
+    lines.append(
+        f"- positive_rate_pct: {_fmt_metric(horizon_data.get('positive_rate_pct'))}"
+    )
+    lines.append(
+        f"- negative_rate_pct: {_fmt_metric(horizon_data.get('negative_rate_pct'))}"
+    )
     lines.append(f"- flat_rate_pct: {_fmt_metric(horizon_data.get('flat_rate_pct'))}")
 
     bias_vs_label = horizon_data.get("bias_vs_label", {}) or {}
@@ -535,11 +628,13 @@ def _markdown_horizon_block(
 def _fmt_metric(value: Any) -> str:
     if value is None:
         return "n/a"
+
     return str(value)
 
 
 def _markdown_distribution(title: str, values: dict[str, Any]) -> list[str]:
     lines: list[str] = []
+
     lines.append(f"### {title}")
     lines.append("")
 
@@ -564,7 +659,9 @@ def _default_output_dir() -> Path:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Analyze trade_analysis.jsonl research metrics")
+    parser = argparse.ArgumentParser(
+        description="Analyze trade_analysis.jsonl research metrics"
+    )
     parser.add_argument(
         "--input",
         type=Path,
@@ -615,7 +712,9 @@ def main() -> None:
                 details=str(exc),
             )
         except Exception:
-            LOGGER.exception("AlertNotifier failed while reporting research analyzer error.")
+            LOGGER.exception(
+                "AlertNotifier failed while reporting research analyzer error."
+            )
 
         raise
 
@@ -626,3 +725,4 @@ if __name__ == "__main__":
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
     main()
+
