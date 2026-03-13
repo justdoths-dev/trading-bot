@@ -8,6 +8,8 @@ from typing import Any
 
 import ccxt
 
+from src.notifications.alert_notifier import AlertNotifier
+
 LOGGER = logging.getLogger(__name__)
 
 HORIZONS: dict[str, timedelta] = {
@@ -18,66 +20,96 @@ HORIZONS: dict[str, timedelta] = {
 
 
 def label_dataset() -> None:
-    """Add future return labels to unlabeled records in logs/trade_analysis.jsonl."""
-    log_path = Path(__file__).resolve().parents[2] / "logs" / "trade_analysis.jsonl"
 
-    if not log_path.exists():
-        LOGGER.info("Log file not found: %s", log_path)
-        return
+    alert = AlertNotifier()
 
-    exchange = ccxt.binance({"enableRateLimit": True})
+    try:
 
-    lines = log_path.read_text(encoding="utf-8").splitlines()
-    updated_lines: list[str] = []
+        log_path = Path(__file__).resolve().parents[2] / "logs" / "trade_analysis.jsonl"
 
-    total_records = 0
-    updated_records = 0
+        if not log_path.exists():
+            LOGGER.info("Log file not found: %s", log_path)
+            return
 
-    for line in lines:
-        if not line.strip():
-            continue
+        exchange = ccxt.binance({"enableRateLimit": True})
 
-        total_records += 1
-        record = json.loads(line)
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        updated_lines: list[str] = []
 
-        if _is_fully_labeled(record):
+        total_records = 0
+        updated_records = 0
+
+        for line in lines:
+
+            if not line.strip():
+                continue
+
+            total_records += 1
+            record = json.loads(line)
+
+            if _is_fully_labeled(record):
+                updated_lines.append(json.dumps(record, ensure_ascii=False))
+                continue
+
+            symbol = _normalize_symbol(record.get("symbol"))
+            logged_at = _parse_logged_at(record.get("logged_at"))
+            entry_price = _extract_entry_price(record)
+
+            if not symbol or logged_at is None or entry_price is None or entry_price <= 0:
+                updated_lines.append(json.dumps(record, ensure_ascii=False))
+                continue
+
+            horizon_prices = _fetch_horizon_prices(
+                exchange=exchange,
+                symbol=symbol,
+                logged_at=logged_at,
+            )
+
+            if horizon_prices is None:
+                updated_lines.append(json.dumps(record, ensure_ascii=False))
+                continue
+
+            for horizon, future_price in horizon_prices.items():
+
+                future_return = ((future_price - entry_price) / entry_price) * 100
+
+                record[f"future_return_{horizon}"] = round(future_return, 6)
+                record[f"future_label_{horizon}"] = _to_label(future_return)
+
+            updated_records += 1
             updated_lines.append(json.dumps(record, ensure_ascii=False))
-            continue
 
-        symbol = _normalize_symbol(record.get("symbol"))
-        logged_at = _parse_logged_at(record.get("logged_at"))
-        entry_price = _extract_entry_price(record)
+        tmp_path = log_path.with_suffix(".jsonl.tmp")
 
-        if not symbol or logged_at is None or entry_price is None or entry_price <= 0:
-            updated_lines.append(json.dumps(record, ensure_ascii=False))
-            continue
-
-        horizon_prices = _fetch_horizon_prices(
-            exchange=exchange,
-            symbol=symbol,
-            logged_at=logged_at,
+        tmp_path.write_text(
+            "\n".join(updated_lines) + ("\n" if updated_lines else ""),
+            encoding="utf-8",
         )
 
-        if horizon_prices is None:
-            updated_lines.append(json.dumps(record, ensure_ascii=False))
-            continue
+        tmp_path.replace(log_path)
 
-        for horizon, future_price in horizon_prices.items():
-            future_return = ((future_price - entry_price) / entry_price) * 100
-            record[f"future_return_{horizon}"] = round(future_return, 6)
-            record[f"future_label_{horizon}"] = _to_label(future_return)
+        LOGGER.info(
+            "Labeling complete: total=%s updated=%s",
+            total_records,
+            updated_records,
+        )
 
-        updated_records += 1
-        updated_lines.append(json.dumps(record, ensure_ascii=False))
+    except Exception as e:
 
-    tmp_path = log_path.with_suffix(".jsonl.tmp")
-    tmp_path.write_text("\n".join(updated_lines) + ("\n" if updated_lines else ""), encoding="utf-8")
-    tmp_path.replace(log_path)
+        LOGGER.exception("Future return labeler failed")
 
-    LOGGER.info("Labeling complete: total=%s updated=%s", total_records, updated_records)
+        try:
+            alert.send_error_alert(
+                source="future_return_labeler",
+                message="Future return labeling failed",
+                details=str(e),
+            )
+        except Exception:
+            LOGGER.exception("AlertNotifier failed")
 
 
 def _is_fully_labeled(record: dict[str, Any]) -> bool:
+
     required_keys = (
         "future_return_15m",
         "future_return_1h",
@@ -86,14 +118,17 @@ def _is_fully_labeled(record: dict[str, Any]) -> bool:
         "future_label_1h",
         "future_label_4h",
     )
+
     return all(key in record for key in required_keys)
 
 
 def _normalize_symbol(raw_symbol: Any) -> str | None:
+
     if raw_symbol is None:
         return None
 
     symbol = str(raw_symbol).strip().upper()
+
     if not symbol:
         return None
 
@@ -108,10 +143,12 @@ def _normalize_symbol(raw_symbol: Any) -> str | None:
 
 
 def _parse_logged_at(raw_logged_at: Any) -> datetime | None:
+
     if raw_logged_at is None:
         return None
 
     text = str(raw_logged_at).strip()
+
     if not text:
         return None
 
@@ -130,6 +167,7 @@ def _parse_logged_at(raw_logged_at: Any) -> datetime | None:
 
 
 def _extract_entry_price(record: dict[str, Any]) -> float | None:
+
     candidate_values = [
         record.get("entry_price"),
         (record.get("execution") or {}).get("entry_price"),
@@ -137,11 +175,13 @@ def _extract_entry_price(record: dict[str, Any]) -> float | None:
     ]
 
     for value in candidate_values:
+
         if value is None:
             continue
 
         try:
             return float(value)
+
         except (TypeError, ValueError):
             continue
 
@@ -153,10 +193,12 @@ def _fetch_horizon_prices(
     symbol: str,
     logged_at: datetime,
 ) -> dict[str, float] | None:
+
     now_utc = datetime.now(UTC)
     prices: dict[str, float] = {}
 
     for horizon, delta in HORIZONS.items():
+
         target_dt = logged_at + delta
 
         if target_dt > now_utc:
@@ -166,8 +208,16 @@ def _fetch_horizon_prices(
 
         try:
             candles = exchange.fetch_ohlcv(symbol, timeframe="1m", since=since_ms, limit=1)
+
         except Exception as exc:
-            LOGGER.warning("Failed to fetch OHLCV for %s horizon=%s: %s", symbol, horizon, exc)
+
+            LOGGER.warning(
+                "Failed to fetch OHLCV for %s horizon=%s: %s",
+                symbol,
+                horizon,
+                exc,
+            )
+
             return None
 
         if not candles:
@@ -175,22 +225,28 @@ def _fetch_horizon_prices(
 
         candle = candles[0]
         close_price = float(candle[4])
+
         prices[horizon] = close_price
 
     return prices
 
 
 def _to_label(future_return: float) -> str:
+
     if future_return > 0.2:
         return "up"
+
     if future_return < -0.2:
         return "down"
+
     return "flat"
 
 
 if __name__ == "__main__":
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
+
     label_dataset()

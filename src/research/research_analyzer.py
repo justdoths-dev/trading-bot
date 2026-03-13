@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from src.notifications.research_notifier import ResearchNotifier
 from src.research.research_metrics import HORIZONS, calculate_research_metrics
 from src.research.strategy_lab.comparison_report import (
     compare_by_ai_execution_state,
@@ -28,6 +30,8 @@ from src.research.strategy_lab.ranking_report import (
     rank_by_symbol,
 )
 from src.research.strategy_lab.segment_report import build_segment_reports
+
+LOGGER = logging.getLogger(__name__)
 
 
 def load_jsonl_records(input_path: Path) -> list[dict[str, Any]]:
@@ -555,13 +559,31 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    metrics = run_research_analyzer(input_path=args.input, output_dir=args.output_dir)
 
-    print(f"Records analyzed: {metrics.get('dataset_overview', {}).get('total_records', 0)}")
-    print(f"Strategy lab dataset rows: {metrics.get('strategy_lab', {}).get('dataset_rows', 0)}")
+    metrics = run_research_analyzer(
+        input_path=args.input,
+        output_dir=args.output_dir,
+    )
+
+    print(
+        f"Records analyzed: {metrics.get('dataset_overview', {}).get('total_records', 0)}"
+    )
+    print(
+        f"Strategy lab dataset rows: {metrics.get('strategy_lab', {}).get('dataset_rows', 0)}"
+    )
     print(f"Summary JSON: {(args.output_dir / 'summary.json').resolve()}")
     print(f"Summary MD: {(args.output_dir / 'summary.md').resolve()}")
 
+    try:
+        notifier = ResearchNotifier()
+        notifier.send_latest_summary()
+    except Exception:
+        LOGGER.exception("ResearchNotifier failed to send summary.")
+
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
     main()
