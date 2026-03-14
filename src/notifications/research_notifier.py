@@ -82,6 +82,7 @@ class ResearchNotifier:
         schema_validation = payload.get("schema_validation", {}) or {}
         top_highlights = payload.get("top_highlights", {}) or {}
         edge_candidates_preview = payload.get("edge_candidates_preview", {}) or {}
+        edge_stability_preview = payload.get("edge_stability_preview", {}) or {}
 
         lines: list[str] = ["*Research Summary*"]
         lines.append(
@@ -105,6 +106,11 @@ class ResearchNotifier:
         if edge_lines:
             lines.append("*Edge Preview*")
             lines.extend(edge_lines[:3])
+
+        stability_lines = self._stability_preview_lines(edge_stability_preview)
+        if stability_lines:
+            lines.append("*Stability Notes*")
+            lines.extend(stability_lines[:2])
 
         return "\n".join(lines)
 
@@ -167,6 +173,41 @@ class ResearchNotifier:
                 f"{self._safe(candidate['label'])}={self._safe(candidate['group'])} "
                 f"({self._safe(strength)}, n={self._safe(candidate['sample_count'])})"
             )
+
+        return lines
+
+    def _stability_preview_lines(
+        self,
+        edge_stability_preview: dict[str, Any],
+    ) -> list[str]:
+        lines: list[str] = []
+
+        for label, entry in (
+            ("strategy", edge_stability_preview.get("strategy", {})),
+            ("symbol", edge_stability_preview.get("symbol", {})),
+            ("alignment", edge_stability_preview.get("alignment_state", {})),
+        ):
+            if not isinstance(entry, dict):
+                continue
+
+            stability_label = str(entry.get("stability_label", "insufficient_data"))
+            group = entry.get("group")
+            visible_horizons = entry.get("visible_horizons", []) or []
+            horizons_text = ", ".join(str(h) for h in visible_horizons)
+
+            if stability_label == "multi_horizon_confirmed" and group:
+                lines.append(
+                    f"- {self._safe(label)}={self._safe(group)} repeats across "
+                    f"{self._safe(horizons_text)}"
+                )
+            elif stability_label == "single_horizon_only" and group:
+                lines.append(
+                    f"- {self._safe(label)}={self._safe(group)} is single-horizon only"
+                )
+            elif stability_label == "unstable":
+                lines.append(
+                    f"- {self._safe(label)} preview is mixed across horizons"
+                )
 
         return lines
 

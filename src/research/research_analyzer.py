@@ -151,6 +151,9 @@ def run_research_analyzer(input_path: Path, output_dir: Path) -> dict[str, Any]:
     final_metrics["edge_candidates_preview"] = _build_edge_candidates_preview(
         strategy_lab=strategy_lab_metrics,
     )
+    final_metrics["edge_stability_preview"] = _build_edge_stability_preview(
+        edge_candidates_preview=final_metrics["edge_candidates_preview"],
+    )
 
     write_summary_files(final_metrics, output_dir)
     return final_metrics
@@ -544,6 +547,82 @@ def _horizon_visibility_reason(sample_gate: str, quality_gate: str) -> str:
     return "passed_sample_gate_only"
 
 
+def _build_edge_stability_preview(edge_candidates_preview: dict[str, Any]) -> dict[str, Any]:
+    by_horizon = edge_candidates_preview.get("by_horizon", {}) or {}
+
+    return {
+        "strategy": _build_stability_entry(by_horizon, "top_strategy"),
+        "symbol": _build_stability_entry(by_horizon, "top_symbol"),
+        "alignment_state": _build_stability_entry(by_horizon, "top_alignment_state"),
+    }
+
+
+def _build_stability_entry(
+    by_horizon: dict[str, Any],
+    candidate_key: str,
+) -> dict[str, Any]:
+    visible_candidates: dict[str, list[str]] = {}
+
+    for horizon in HORIZONS:
+        horizon_data = by_horizon.get(horizon, {}) or {}
+        candidate = horizon_data.get(candidate_key)
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("candidate_strength") == "insufficient_data":
+            continue
+
+        group = str(candidate.get("group", "insufficient_data"))
+        if group == "insufficient_data":
+            continue
+
+        visible_candidates.setdefault(group, []).append(horizon)
+
+    if not visible_candidates:
+        return {
+            "group": None,
+            "visible_horizons": [],
+            "stability_label": "insufficient_data",
+            "stability_score": 0,
+            "visibility_reason": "no_visible_candidates",
+        }
+
+    if len(visible_candidates) == 1:
+        group, horizons = next(iter(visible_candidates.items()))
+        horizons = list(horizons)
+
+        if len(horizons) >= 2:
+            return {
+                "group": group,
+                "visible_horizons": horizons,
+                "stability_label": "multi_horizon_confirmed",
+                "stability_score": 2,
+                "visibility_reason": "repeated_visible_candidate_across_horizons",
+            }
+
+        return {
+            "group": group,
+            "visible_horizons": horizons,
+            "stability_label": "single_horizon_only",
+            "stability_score": 1,
+            "visibility_reason": "visible_in_one_horizon_only",
+        }
+
+    ranked_candidates = sorted(
+        visible_candidates.items(),
+        key=lambda item: (-len(item[1]), item[0]),
+    )
+    top_group, top_horizons = ranked_candidates[0]
+    top_horizons = list(top_horizons)
+
+    return {
+        "group": top_group,
+        "visible_horizons": top_horizons,
+        "stability_label": "unstable",
+        "stability_score": 1,
+        "visibility_reason": "multiple_visible_candidates_without_convergence",
+    }
+
+
 def _max_candidate_strength(strengths: list[str]) -> str:
     if not strengths:
         return "insufficient_data"
@@ -560,6 +639,7 @@ def _build_markdown(metrics: dict[str, Any]) -> str:
     overview = metrics.get("dataset_overview", {}) or {}
     top_highlights = metrics.get("top_highlights", {}) or {}
     edge_candidates_preview = metrics.get("edge_candidates_preview", {}) or {}
+    edge_stability_preview = metrics.get("edge_stability_preview", {}) or {}
     horizons = metrics.get("horizon_summary", {}) or {}
     by_symbol = metrics.get("by_symbol", {}) or {}
     by_strategy = metrics.get("by_strategy", {}) or {}
@@ -574,6 +654,7 @@ def _build_markdown(metrics: dict[str, Any]) -> str:
 
     lines.extend(_markdown_top_highlights(top_highlights))
     lines.extend(_markdown_edge_candidates_preview(edge_candidates_preview))
+    lines.extend(_markdown_edge_stability_preview(edge_stability_preview))
 
     lines.append("## Schema Validation")
     lines.append("")
@@ -793,6 +874,41 @@ def _format_edge_candidate_markdown(candidate: Any) -> str:
         f"quality_gate={candidate.get('quality_gate', 'failed')}; "
         f"{candidate.get('chosen_metric_summary', 'n/a')})"
     )
+
+
+def _markdown_edge_stability_preview(
+    edge_stability_preview: dict[str, Any],
+) -> list[str]:
+    lines: list[str] = []
+
+    lines.append("## Edge Stability Preview")
+    lines.append("")
+
+    if not edge_stability_preview:
+        lines.append("No stability preview available.")
+        lines.append("")
+        return lines
+
+    for label, entry in (
+        ("strategy", edge_stability_preview.get("strategy", {})),
+        ("symbol", edge_stability_preview.get("symbol", {})),
+        ("alignment_state", edge_stability_preview.get("alignment_state", {})),
+    ):
+        lines.append(f"### {label}")
+        lines.append(f"- group: {entry.get('group', 'insufficient_data')}")
+        lines.append(
+            f"- visible_horizons: {', '.join(entry.get('visible_horizons', [])) or 'none'}"
+        )
+        lines.append(
+            f"- stability_label: {entry.get('stability_label', 'insufficient_data')}"
+        )
+        lines.append(f"- stability_score: {entry.get('stability_score', 0)}")
+        lines.append(
+            f"- visibility_reason: {entry.get('visibility_reason', 'no_visible_candidates')}"
+        )
+        lines.append("")
+
+    return lines
 
 
 def _markdown_strategy_lab_block(strategy_lab: dict[str, Any]) -> list[str]:

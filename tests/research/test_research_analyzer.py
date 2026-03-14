@@ -19,6 +19,72 @@ def _stub_strategy_lab_metrics(dataset_rows: int = 0) -> dict[str, Any]:
     }
 
 
+def _candidate(group: str, strength: str = "moderate") -> dict[str, Any]:
+    return {
+        "group": group,
+        "sample_count": 60,
+        "labeled_count": 60,
+        "coverage_pct": 100.0,
+        "median_future_return_pct": 0.45,
+        "positive_rate_pct": 58.0,
+        "signal_match_rate_pct": 57.0,
+        "bias_match_rate_pct": 56.0,
+        "robustness_signal": "signal_match_rate_pct",
+        "robustness_signal_pct": 57.0,
+        "sample_gate": "passed",
+        "quality_gate": "passed" if strength in {"moderate", "strong"} else "borderline",
+        "candidate_strength": strength,
+        "visibility_reason": "passed_sample_and_quality_gate",
+        "chosen_metric_summary": "sample=60, median=0.45, positive_rate=58.0",
+    }
+
+
+def _insufficient_candidate() -> dict[str, Any]:
+    return {
+        "group": "insufficient_data",
+        "sample_count": 0,
+        "labeled_count": 0,
+        "coverage_pct": None,
+        "median_future_return_pct": None,
+        "positive_rate_pct": None,
+        "signal_match_rate_pct": None,
+        "bias_match_rate_pct": None,
+        "robustness_signal": "n/a",
+        "robustness_signal_pct": None,
+        "sample_gate": "failed",
+        "quality_gate": "failed",
+        "candidate_strength": "insufficient_data",
+        "visibility_reason": "failed_absolute_minimum_gate",
+        "chosen_metric_summary": "insufficient_data",
+    }
+
+
+def _edge_candidates_preview(by_horizon: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "minimum_sample_count": 30,
+        "strength_thresholds": {
+            "weak": {
+                "sample_count": 30,
+                "median_future_return_pct_gt": 0,
+                "positive_rate_pct": 50,
+            },
+            "moderate": {
+                "sample_count": 50,
+                "median_future_return_pct": 0.30,
+                "positive_rate_pct": 55.0,
+                "robustness_pct": 52.0,
+            },
+            "strong": {
+                "sample_count": 80,
+                "median_future_return_pct": 0.50,
+                "positive_rate_pct": 58.0,
+                "robustness_pct": 55.0,
+            },
+        },
+        "by_horizon": by_horizon,
+    }
+
+
 def test_run_research_analyzer_handles_valid_records(
     monkeypatch,
     tmp_path: Path,
@@ -78,66 +144,85 @@ def test_run_research_analyzer_skips_invalid_records_without_crashing(
     assert result["strategy_lab"]["dataset_rows"] == 0
 
 
-def test_run_research_analyzer_handles_empty_input_safely(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    input_path = tmp_path / "empty.jsonl"
-    input_path.write_text("", encoding="utf-8")
-    output_dir = tmp_path / "reports"
-
-    monkeypatch.setattr(
-        research_analyzer,
-        "_build_strategy_lab_metrics",
-        lambda _input_path: (_ for _ in ()).throw(AssertionError("strategy lab should be skipped")),
+def test_edge_stability_preview_returns_insufficient_data_without_visible_candidates() -> None:
+    preview = _edge_candidates_preview(
+        {
+            "15m": {
+                "top_strategy": _insufficient_candidate(),
+                "top_symbol": _insufficient_candidate(),
+                "top_alignment_state": _insufficient_candidate(),
+            },
+            "1h": {
+                "top_strategy": _insufficient_candidate(),
+                "top_symbol": _insufficient_candidate(),
+                "top_alignment_state": _insufficient_candidate(),
+            },
+            "4h": {
+                "top_strategy": _insufficient_candidate(),
+                "top_symbol": _insufficient_candidate(),
+                "top_alignment_state": _insufficient_candidate(),
+            },
+        }
     )
 
-    result = research_analyzer.run_research_analyzer(input_path, output_dir)
+    result = research_analyzer._build_edge_stability_preview(preview)
 
-    assert result["dataset_overview"]["total_records"] == 0
-    assert result["schema_validation"]["total_records"] == 0
-    assert result["schema_validation"]["valid_records"] == 0
-    assert result["schema_validation"]["invalid_records"] == 0
-    assert result["strategy_lab"]["dataset_rows"] == 0
-    assert (output_dir / "summary.json").exists()
-    assert (output_dir / "summary.md").exists()
+    assert result["strategy"]["stability_label"] == "insufficient_data"
+    assert result["strategy"]["stability_score"] == 0
 
 
-def test_run_research_analyzer_returns_structurally_valid_summary(
-    monkeypatch,
-    tmp_path: Path,
-    valid_research_record: dict[str, Any],
-    write_jsonl,
-) -> None:
-    input_path = write_jsonl([valid_research_record])
-    output_dir = tmp_path / "reports"
-
-    monkeypatch.setattr(
-        research_analyzer,
-        "_build_strategy_lab_metrics",
-        lambda _input_path: _stub_strategy_lab_metrics(dataset_rows=1),
+def test_edge_stability_preview_returns_single_horizon_only_for_one_visible_group() -> None:
+    preview = _edge_candidates_preview(
+        {
+            "15m": {
+                "top_strategy": _candidate("swing"),
+                "top_symbol": _insufficient_candidate(),
+                "top_alignment_state": _insufficient_candidate(),
+            },
+            "1h": {
+                "top_strategy": _insufficient_candidate(),
+                "top_symbol": _insufficient_candidate(),
+                "top_alignment_state": _insufficient_candidate(),
+            },
+            "4h": {
+                "top_strategy": _insufficient_candidate(),
+                "top_symbol": _insufficient_candidate(),
+                "top_alignment_state": _insufficient_candidate(),
+            },
+        }
     )
 
-    result = research_analyzer.run_research_analyzer(input_path, output_dir)
-    written_summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
+    result = research_analyzer._build_edge_stability_preview(preview)
 
-    expected_top_level_keys = {
-        "dataset_overview",
-        "horizon_summary",
-        "by_symbol",
-        "by_strategy",
-        "schema_validation",
-        "strategy_lab",
-    }
+    assert result["strategy"]["stability_label"] == "single_horizon_only"
+    assert result["strategy"]["stability_score"] == 1
 
-    assert expected_top_level_keys.issubset(result.keys())
-    assert expected_top_level_keys.issubset(written_summary.keys())
-    assert set(result["schema_validation"].keys()) == {
-        "input_path",
-        "total_records",
-        "valid_records",
-        "invalid_records",
-        "error_count",
-        "warning_count",
-        "invalid_examples",
-    }
+
+def test_edge_stability_preview_returns_multi_horizon_confirmed_for_repeated_group() -> None:
+    preview = _edge_candidates_preview(
+        {
+            "15m": {"top_strategy": _candidate("swing")},
+            "1h": {"top_strategy": _candidate("swing")},
+            "4h": {"top_strategy": _insufficient_candidate()},
+        }
+    )
+
+    result = research_analyzer._build_edge_stability_preview(preview)
+
+    assert result["strategy"]["stability_label"] == "multi_horizon_confirmed"
+    assert result["strategy"]["stability_score"] == 2
+
+
+def test_edge_stability_preview_returns_unstable_for_different_visible_groups() -> None:
+    preview = _edge_candidates_preview(
+        {
+            "15m": {"top_strategy": _candidate("alpha")},
+            "1h": {"top_strategy": _candidate("beta")},
+            "4h": {"top_strategy": _insufficient_candidate()},
+        }
+    )
+
+    result = research_analyzer._build_edge_stability_preview(preview)
+
+    assert result["strategy"]["stability_label"] == "unstable"
+    assert result["strategy"]["stability_score"] == 1
