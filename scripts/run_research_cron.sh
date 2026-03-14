@@ -10,7 +10,6 @@ JOB_NAME="research_pipeline"
 CURRENT_STEP="startup"
 PYTHON_BIN=""
 ALERT_SENT=0
-LOCK_ACQUIRED=0
 SKIPPED_DUE_TO_LOCK=0
 
 mkdir -p "${LOG_DIR}"
@@ -96,7 +95,6 @@ if ! flock -n 9; then
   log_warn "Research cron run skipped because another run is already in progress."
   exit 0
 fi
-LOCK_ACQUIRED=1
 
 log_info "Research cron run started."
 log_info "Project root: ${PROJECT_ROOT}"
@@ -139,12 +137,14 @@ run_step() {
   CURRENT_STEP="${step_name}"
   log_info "Starting ${step_name}."
 
-  if "$@"; then
+  "$@"
+  local exit_code=$?
+
+  if [[ "${exit_code}" -eq 0 ]]; then
     log_info "Completed ${step_name}."
     return 0
   fi
 
-  local exit_code=$?
   log_error "${step_name} failed with exit code ${exit_code}."
   return "${exit_code}"
 }
