@@ -28,6 +28,7 @@ STABILITY_WEIGHTS = {
     "single_horizon_only": 1.0,
     "multi_horizon_confirmed": 2.0,
 }
+INVALID_GROUP_VALUES = {None, "", "n/a", "None", "insufficient_data"}
 
 
 def build_edge_stability_scores(
@@ -90,18 +91,19 @@ def _build_category_scores(
     for horizon in HORIZONS:
         horizon_data = edge_candidates.get(horizon, {}) or {}
         for key in (latest_group_field, cumulative_group_field):
-            group = _normalize_group(horizon_data.get(key))
+            group = _normalize_group(horizon_data.get(key), category=category)
             if group is not None:
                 groups.add(group)
 
     for key in ("latest_group", "cumulative_group"):
-        group = _normalize_group(edge_stability.get(key))
+        group = _normalize_group(edge_stability.get(key), category=category)
         if group is not None:
             groups.add(group)
 
     scored_items = [
         _score_group(
             group=group,
+            category=category,
             edge_candidates=edge_candidates,
             edge_stability=edge_stability,
             latest_group_field=latest_group_field,
@@ -115,6 +117,7 @@ def _build_category_scores(
 
 def _score_group(
     group: str,
+    category: str,
     edge_candidates: dict[str, Any],
     edge_stability: dict[str, Any],
     latest_group_field: str,
@@ -125,8 +128,14 @@ def _score_group(
 
     for horizon in HORIZONS:
         horizon_data = edge_candidates.get(horizon, {}) or {}
-        latest_group = _normalize_group(horizon_data.get(latest_group_field))
-        cumulative_group = _normalize_group(horizon_data.get(cumulative_group_field))
+        latest_group = _normalize_group(
+            horizon_data.get(latest_group_field),
+            category=category,
+        )
+        cumulative_group = _normalize_group(
+            horizon_data.get(cumulative_group_field),
+            category=category,
+        )
 
         if latest_group == group:
             latest_strength_labels.append(
@@ -146,9 +155,12 @@ def _score_group(
     latest_candidate_strength = _highest_strength(latest_strength_labels)
     cumulative_candidate_strength = _highest_strength(cumulative_strength_labels)
 
-    latest_group_match = _normalize_group(edge_stability.get("latest_group")) == group
+    latest_group_match = (
+        _normalize_group(edge_stability.get("latest_group"), category=category) == group
+    )
     cumulative_group_match = (
-        _normalize_group(edge_stability.get("cumulative_group")) == group
+        _normalize_group(edge_stability.get("cumulative_group"), category=category)
+        == group
     )
 
     latest_stability_label = (
@@ -292,10 +304,18 @@ def _horizon_bonus(horizon_count: int) -> float:
     return 1.5
 
 
-def _normalize_group(value: Any) -> str | None:
-    if value in (None, "", "n/a", "None"):
+def _normalize_group(value: Any, category: str) -> str | None:
+    if value in INVALID_GROUP_VALUES:
         return None
-    return str(value)
+
+    normalized = str(value).strip()
+    if normalized in INVALID_GROUP_VALUES:
+        return None
+
+    if category == "symbol":
+        return normalized.upper()
+
+    return normalized
 
 
 def _normalize_horizons(value: Any) -> list[str]:
