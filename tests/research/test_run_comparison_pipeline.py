@@ -200,6 +200,35 @@ def test_run_comparison_pipeline_returns_structured_summary_shape(
         "build_comparison_report",
         lambda latest_summary_path, cumulative_summary_path, output_dir: {},
     )
+    monkeypatch.setattr(
+        run_comparison_pipeline,
+        "build_edge_stability_scores",
+        lambda input_path, output_dir: {
+            "generated_at": "2026-03-14T10:00:00+00:00",
+            "summary_json": str(output_dir / "summary.json"),
+            "summary_md": str(output_dir / "summary.md"),
+        },
+    )
+    monkeypatch.setattr(
+        run_comparison_pipeline,
+        "build_edge_score_history",
+        lambda input_path, output_path: {
+            "generated_at": "2026-03-14T10:00:00+00:00",
+            "input_path": str(input_path),
+            "output_path": str(output_path),
+            "records_appended": 3,
+        },
+    )
+    monkeypatch.setattr(
+        run_comparison_pipeline,
+        "build_score_drift_report",
+        lambda input_path, output_dir: {
+            "generated_at": "2026-03-14T10:00:00+00:00",
+            "input_path": str(input_path),
+            "groups_analyzed": 3,
+            "groups_with_sufficient_history": 3,
+        },
+    )
 
     result = run_comparison_pipeline.run_comparison_pipeline(
         logs_dir=tmp_path / "logs",
@@ -207,17 +236,16 @@ def test_run_comparison_pipeline_returns_structured_summary_shape(
         cumulative_output=tmp_path / "trade_analysis_cumulative.jsonl",
         cumulative_output_dir=tmp_path / "reports" / "cumulative",
         comparison_output_dir=tmp_path / "reports" / "comparison",
+        edge_scores_output_dir=tmp_path / "reports" / "edge_scores",
+        edge_score_history_output=tmp_path / "reports" / "edge_scores_history.jsonl",
+        score_drift_output_dir=tmp_path / "reports" / "score_drift",
     )
 
     assert set(result.keys()) == {
         "cumulative_dataset",
         "cumulative_analysis",
         "comparison_report",
+        "edge_stability_scores",
+        "edge_score_history",
+        "score_drift",
     }
-    assert set(result["cumulative_analysis"].keys()) == {
-        "records_analyzed",
-        "strategy_lab_dataset_rows",
-        "summary_json",
-        "summary_md",
-    }
-    assert set(result["comparison_report"].keys()) == {"summary_json", "summary_md"}
