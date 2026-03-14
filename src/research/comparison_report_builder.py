@@ -56,6 +56,7 @@ def build_comparison_report(
         ),
     }
     report["drift_notes"] = _build_drift_notes(report)
+    report["comparison_summary"] = _build_comparison_summary(report)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     json_path = output_dir / "summary.json"
@@ -213,18 +214,10 @@ def _build_strategy_lab_edge_count_comparison(
             "cumulative_symbol_edges": _edge_count(cumulative_horizon.get("by_symbol")),
             "latest_strategy_edges": _edge_count(latest_horizon.get("by_strategy")),
             "cumulative_strategy_edges": _edge_count(cumulative_horizon.get("by_strategy")),
-            "latest_alignment_state_edges": _edge_count(
-                latest_horizon.get("by_alignment_state")
-            ),
-            "cumulative_alignment_state_edges": _edge_count(
-                cumulative_horizon.get("by_alignment_state")
-            ),
-            "latest_ai_execution_state_edges": _edge_count(
-                latest_horizon.get("by_ai_execution_state")
-            ),
-            "cumulative_ai_execution_state_edges": _edge_count(
-                cumulative_horizon.get("by_ai_execution_state")
-            ),
+            "latest_alignment_state_edges": _edge_count(latest_horizon.get("by_alignment_state")),
+            "cumulative_alignment_state_edges": _edge_count(cumulative_horizon.get("by_alignment_state")),
+            "latest_ai_execution_state_edges": _edge_count(latest_horizon.get("by_ai_execution_state")),
+            "cumulative_ai_execution_state_edges": _edge_count(cumulative_horizon.get("by_ai_execution_state")),
         }
 
     return result
@@ -249,10 +242,7 @@ def _build_drift_notes(report: dict[str, Any]) -> list[str]:
 
     for horizon, comparison in report["edge_candidates_comparison"].items():
         latest_rank = STRENGTH_RANK.get(comparison["latest_candidate_strength"], 0)
-        cumulative_rank = STRENGTH_RANK.get(
-            comparison["cumulative_candidate_strength"],
-            0,
-        )
+        cumulative_rank = STRENGTH_RANK.get(comparison["cumulative_candidate_strength"], 0)
         if latest_rank > cumulative_rank:
             notes.append(f"{horizon}: candidate_visibility_increased")
         elif latest_rank < cumulative_rank:
@@ -264,25 +254,101 @@ def _build_drift_notes(report: dict[str, Any]) -> list[str]:
     return notes
 
 
+def _build_comparison_summary(report: dict[str, Any]) -> dict[str, str]:
+    dataset = report["dataset_overview_comparison"]
+    top_highlights = report["top_highlights_comparison"]
+    edge_candidates = report["edge_candidates_comparison"]
+    edge_stability = report["edge_stability_comparison"]
+
+    dataset_size_context = (
+        f"latest covers {dataset['latest_total_records']} records versus {dataset['cumulative_total_records']} in cumulative baseline"
+    )
+    coverage_context = (
+        f"label coverage is {dataset['latest_label_coverage_any_horizon_pct']} for latest versus {dataset['cumulative_label_coverage_any_horizon_pct']} for cumulative"
+    )
+
+    aligned_horizons: list[str] = []
+    divergent_horizons: list[str] = []
+    for horizon in HORIZONS:
+        comparison = top_highlights[horizon]
+        if (
+            comparison["latest_top_symbol"] == comparison["cumulative_top_symbol"]
+            and comparison["latest_top_strategy"] == comparison["cumulative_top_strategy"]
+            and comparison["latest_best_alignment_state"] == comparison["cumulative_best_alignment_state"]
+            and comparison["latest_best_ai_execution_state"] == comparison["cumulative_best_ai_execution_state"]
+        ):
+            aligned_horizons.append(horizon)
+        else:
+            divergent_horizons.append(horizon)
+
+    key_alignment_summary = (
+        f"{', '.join(aligned_horizons)} remain aligned with cumulative baseline"
+        if aligned_horizons
+        else "no horizon remains fully aligned with cumulative baseline"
+    )
+    key_divergence_summary = (
+        f"latest diverges from cumulative in {', '.join(divergent_horizons)}"
+        if divergent_horizons
+        else "no material divergence detected across tracked horizons"
+    )
+
+    visible_horizons = [
+        horizon
+        for horizon in HORIZONS
+        if edge_candidates[horizon]["latest_candidate_strength"] != "insufficient_data"
+        or edge_candidates[horizon]["cumulative_candidate_strength"] != "insufficient_data"
+    ]
+    candidate_summary = (
+        f"candidate visibility remains present in {', '.join(visible_horizons)}"
+        if visible_horizons
+        else "no candidate visibility detected in either latest or cumulative view"
+    )
+
+    stability_parts: list[str] = []
+    for key in STABILITY_KEYS:
+        comparison = edge_stability[key]
+        latest_rank = STABILITY_RANK.get(comparison["latest_stability_label"], 0)
+        cumulative_rank = STABILITY_RANK.get(comparison["cumulative_stability_label"], 0)
+        if latest_rank > cumulative_rank:
+            stability_parts.append(f"{key} stability strengthened")
+        elif latest_rank < cumulative_rank:
+            stability_parts.append(f"{key} stability weakened")
+
+    if stability_parts:
+        stability_summary = "; ".join(stability_parts)
+    elif any(
+        edge_stability[key]["latest_stability_label"] == "multi_horizon_confirmed"
+        for key in STABILITY_KEYS
+    ):
+        stability_summary = "multi-horizon confirmed stability remains present in at least one tracked category"
+    else:
+        stability_summary = "no multi-horizon confirmed candidate detected"
+
+    return {
+        "dataset_size_context": dataset_size_context,
+        "coverage_context": coverage_context,
+        "key_alignment_summary": key_alignment_summary,
+        "key_divergence_summary": key_divergence_summary,
+        "candidate_summary": candidate_summary,
+        "stability_summary": stability_summary,
+    }
+
+
 def _group_from_candidate(candidate: Any) -> str:
     if not isinstance(candidate, dict):
         return "n/a"
-
     group = candidate.get("group")
     if group in (None, ""):
         return "n/a"
-
     return str(group)
 
 
 def _edge_count(report: Any) -> int:
     if not isinstance(report, dict):
         return 0
-
     findings = report.get("edge_findings", [])
     if not isinstance(findings, list):
         return 0
-
     return len(findings)
 
 
@@ -296,19 +362,24 @@ def _build_markdown(report: dict[str, Any]) -> str:
     lines.append(f"Cumulative input: {report['cumulative_input']}")
     lines.append("")
 
+    summary = report["comparison_summary"]
+    lines.append("## Executive Summary")
+    lines.append("")
+    lines.append(f"- {summary['dataset_size_context']}")
+    lines.append(f"- {summary['coverage_context']}")
+    lines.append(f"- {summary['key_alignment_summary']}")
+    lines.append(f"- {summary['key_divergence_summary']}")
+    lines.append(f"- {summary['candidate_summary']}")
+    lines.append(f"- {summary['stability_summary']}")
+    lines.append("")
+
     dataset = report["dataset_overview_comparison"]
     lines.append("## Dataset Overview")
     lines.append("")
     lines.append(f"- latest_total_records: {dataset['latest_total_records']}")
     lines.append(f"- cumulative_total_records: {dataset['cumulative_total_records']}")
-    lines.append(
-        "- latest_label_coverage_any_horizon_pct: "
-        f"{dataset['latest_label_coverage_any_horizon_pct']}"
-    )
-    lines.append(
-        "- cumulative_label_coverage_any_horizon_pct: "
-        f"{dataset['cumulative_label_coverage_any_horizon_pct']}"
-    )
+    lines.append(f"- latest_label_coverage_any_horizon_pct: {dataset['latest_label_coverage_any_horizon_pct']}")
+    lines.append(f"- cumulative_label_coverage_any_horizon_pct: {dataset['cumulative_label_coverage_any_horizon_pct']}")
     lines.append("")
 
     lines.append("## Top Highlights by Horizon")
@@ -316,20 +387,10 @@ def _build_markdown(report: dict[str, Any]) -> str:
     for horizon in HORIZONS:
         comparison = report["top_highlights_comparison"][horizon]
         lines.append(f"### {horizon}")
-        lines.append(
-            f"- top_symbol: latest={comparison['latest_top_symbol']} | cumulative={comparison['cumulative_top_symbol']}"
-        )
-        lines.append(
-            f"- top_strategy: latest={comparison['latest_top_strategy']} | cumulative={comparison['cumulative_top_strategy']}"
-        )
-        lines.append(
-            "- best_alignment_state: "
-            f"latest={comparison['latest_best_alignment_state']} | cumulative={comparison['cumulative_best_alignment_state']}"
-        )
-        lines.append(
-            "- best_ai_execution_state: "
-            f"latest={comparison['latest_best_ai_execution_state']} | cumulative={comparison['cumulative_best_ai_execution_state']}"
-        )
+        lines.append(f"- top_symbol: latest={comparison['latest_top_symbol']} | cumulative={comparison['cumulative_top_symbol']}")
+        lines.append(f"- top_strategy: latest={comparison['latest_top_strategy']} | cumulative={comparison['cumulative_top_strategy']}")
+        lines.append(f"- best_alignment_state: latest={comparison['latest_best_alignment_state']} | cumulative={comparison['cumulative_best_alignment_state']}")
+        lines.append(f"- best_ai_execution_state: latest={comparison['latest_best_ai_execution_state']} | cumulative={comparison['cumulative_best_ai_execution_state']}")
         lines.append("")
 
     lines.append("## Edge Candidate Preview Comparison")
@@ -337,19 +398,10 @@ def _build_markdown(report: dict[str, Any]) -> str:
     for horizon in HORIZONS:
         comparison = report["edge_candidates_comparison"][horizon]
         lines.append(f"### {horizon}")
-        lines.append(
-            f"- candidate_strength: latest={comparison['latest_candidate_strength']} | cumulative={comparison['cumulative_candidate_strength']}"
-        )
-        lines.append(
-            f"- top_strategy.group: latest={comparison['latest_top_strategy_group']} | cumulative={comparison['cumulative_top_strategy_group']}"
-        )
-        lines.append(
-            f"- top_symbol.group: latest={comparison['latest_top_symbol_group']} | cumulative={comparison['cumulative_top_symbol_group']}"
-        )
-        lines.append(
-            "- top_alignment_state.group: "
-            f"latest={comparison['latest_top_alignment_state_group']} | cumulative={comparison['cumulative_top_alignment_state_group']}"
-        )
+        lines.append(f"- candidate_strength: latest={comparison['latest_candidate_strength']} | cumulative={comparison['cumulative_candidate_strength']}")
+        lines.append(f"- top_strategy.group: latest={comparison['latest_top_strategy_group']} | cumulative={comparison['cumulative_top_strategy_group']}")
+        lines.append(f"- top_symbol.group: latest={comparison['latest_top_symbol_group']} | cumulative={comparison['cumulative_top_symbol_group']}")
+        lines.append(f"- top_alignment_state.group: latest={comparison['latest_top_alignment_state_group']} | cumulative={comparison['cumulative_top_alignment_state_group']}")
         lines.append("")
 
     lines.append("## Edge Stability Preview Comparison")
@@ -357,16 +409,9 @@ def _build_markdown(report: dict[str, Any]) -> str:
     for key in STABILITY_KEYS:
         comparison = report["edge_stability_comparison"][key]
         lines.append(f"### {key}")
-        lines.append(
-            f"- stability_label: latest={comparison['latest_stability_label']} | cumulative={comparison['cumulative_stability_label']}"
-        )
-        lines.append(
-            f"- group: latest={comparison['latest_group']} | cumulative={comparison['cumulative_group']}"
-        )
-        lines.append(
-            "- visible_horizons: "
-            f"latest={comparison['latest_visible_horizons']} | cumulative={comparison['cumulative_visible_horizons']}"
-        )
+        lines.append(f"- stability_label: latest={comparison['latest_stability_label']} | cumulative={comparison['cumulative_stability_label']}")
+        lines.append(f"- group: latest={comparison['latest_group']} | cumulative={comparison['cumulative_group']}")
+        lines.append(f"- visible_horizons: latest={comparison['latest_visible_horizons']} | cumulative={comparison['cumulative_visible_horizons']}")
         lines.append("")
 
     lines.append("## Strategy Lab Edge Count Comparison")
@@ -374,20 +419,10 @@ def _build_markdown(report: dict[str, Any]) -> str:
     for horizon in HORIZONS:
         comparison = report["strategy_lab_edge_count_comparison"][horizon]
         lines.append(f"### {horizon}")
-        lines.append(
-            f"- symbol_edges: latest={comparison['latest_symbol_edges']} | cumulative={comparison['cumulative_symbol_edges']}"
-        )
-        lines.append(
-            f"- strategy_edges: latest={comparison['latest_strategy_edges']} | cumulative={comparison['cumulative_strategy_edges']}"
-        )
-        lines.append(
-            "- alignment_state_edges: "
-            f"latest={comparison['latest_alignment_state_edges']} | cumulative={comparison['cumulative_alignment_state_edges']}"
-        )
-        lines.append(
-            "- ai_execution_state_edges: "
-            f"latest={comparison['latest_ai_execution_state_edges']} | cumulative={comparison['cumulative_ai_execution_state_edges']}"
-        )
+        lines.append(f"- symbol_edges: latest={comparison['latest_symbol_edges']} | cumulative={comparison['cumulative_symbol_edges']}")
+        lines.append(f"- strategy_edges: latest={comparison['latest_strategy_edges']} | cumulative={comparison['cumulative_strategy_edges']}")
+        lines.append(f"- alignment_state_edges: latest={comparison['latest_alignment_state_edges']} | cumulative={comparison['cumulative_alignment_state_edges']}")
+        lines.append(f"- ai_execution_state_edges: latest={comparison['latest_ai_execution_state_edges']} | cumulative={comparison['cumulative_ai_execution_state_edges']}")
         lines.append("")
 
     lines.append("## Drift Notes")
@@ -400,22 +435,10 @@ def _build_markdown(report: dict[str, Any]) -> str:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Build a latest-vs-cumulative research comparison report"
-    )
+    parser = argparse.ArgumentParser(description="Build a latest-vs-cumulative research comparison report")
     parser.add_argument("--latest", type=Path, required=True, help="Path to latest summary.json")
-    parser.add_argument(
-        "--cumulative",
-        type=Path,
-        required=True,
-        help="Path to cumulative summary.json",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        required=True,
-        help="Directory for comparison summary outputs",
-    )
+    parser.add_argument("--cumulative", type=Path, required=True, help="Path to cumulative summary.json")
+    parser.add_argument("--output-dir", type=Path, required=True, help="Directory for comparison summary outputs")
     return parser.parse_args()
 
 

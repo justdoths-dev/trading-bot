@@ -180,6 +180,7 @@ def test_build_comparison_report_happy_path(tmp_path: Path) -> None:
         report["edge_stability_comparison"]["strategy"]["cumulative_stability_label"]
         == "single_horizon_only"
     )
+    assert "comparison_summary" in report
     assert (output_dir / "summary.json").exists()
     assert (output_dir / "summary.md").exists()
 
@@ -210,6 +211,11 @@ def test_build_comparison_report_handles_missing_sections_safely(tmp_path: Path)
     )
     assert (
         report["strategy_lab_edge_count_comparison"]["1h"]["latest_symbol_edges"] == 0
+    )
+    assert "comparison_summary" in report
+    assert (
+        "latest covers 0 records"
+        in report["comparison_summary"]["dataset_size_context"]
     )
 
 
@@ -252,7 +258,7 @@ def test_build_comparison_report_writes_markdown_file(tmp_path: Path) -> None:
     build_comparison_report(latest_path, cumulative_path, output_dir)
 
     markdown = (output_dir / "summary.md").read_text(encoding="utf-8")
-    assert "Comparison Overview" in markdown
+    assert "Executive Summary" in markdown
     assert "Drift Notes" in markdown
 
 
@@ -269,6 +275,7 @@ def test_build_comparison_report_writes_json_file(tmp_path: Path) -> None:
     written = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
     assert "generated_at" in written
     assert "drift_notes" in written
+    assert "comparison_summary" in written
 
 
 def test_drift_notes_are_conservative_and_non_recommendation_like(
@@ -312,10 +319,15 @@ def test_drift_notes_are_conservative_and_non_recommendation_like(
     report = build_comparison_report(latest_path, cumulative_path, output_dir)
 
     joined_notes = " ".join(report["drift_notes"]).lower()
+    joined_summary = " ".join(report["comparison_summary"].values()).lower()
     assert "buy" not in joined_notes
     assert "sell" not in joined_notes
     assert "recommended" not in joined_notes
     assert "opportunity" not in joined_notes
+    assert "buy" not in joined_summary
+    assert "sell" not in joined_summary
+    assert "recommended" not in joined_summary
+    assert "opportunity" not in joined_summary
     assert any(
         "stability_strengthened" in note for note in report["drift_notes"]
     )
@@ -366,3 +378,46 @@ def test_edge_stability_comparison_detects_difference_between_latest_and_cumulat
     assert comparison["cumulative_stability_label"] == "single_horizon_only"
     assert comparison["latest_group"] == "swing"
     assert comparison["cumulative_group"] == "swing"
+
+
+def test_comparison_summary_identifies_divergence_and_alignment(tmp_path: Path) -> None:
+    latest_path = tmp_path / "latest.json"
+    cumulative_path = tmp_path / "cumulative.json"
+    output_dir = tmp_path / "comparison"
+
+    latest_path.write_text(
+        json.dumps(
+            _summary_payload(
+                total_records=120,
+                coverage=70.0,
+                top_symbol_15m="BTCUSDT",
+                top_strategy_15m="swing",
+                strategy_group_15m="swing",
+                stability_label="single_horizon_only",
+                stability_group="swing",
+                symbol_edges_15m=2,
+            )
+        ),
+        encoding="utf-8",
+    )
+    cumulative_path.write_text(
+        json.dumps(
+            _summary_payload(
+                total_records=800,
+                coverage=78.0,
+                top_symbol_15m="ETHUSDT",
+                top_strategy_15m="trend",
+                strategy_group_15m="trend",
+                stability_label="single_horizon_only",
+                stability_group="swing",
+                symbol_edges_15m=2,
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_comparison_report(latest_path, cumulative_path, output_dir)
+
+    summary = report["comparison_summary"]
+    assert "15m" in summary["key_divergence_summary"]
+    assert "1h, 4h" in summary["key_alignment_summary"]
