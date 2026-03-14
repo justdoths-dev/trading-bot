@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-from src.telegram.markdown_utils import escape_markdown
 from src.telegram.telegram_sender import TelegramSender
 
 logger = logging.getLogger(__name__)
@@ -46,7 +45,7 @@ class ResearchObservationalNotifier:
             }
 
         try:
-            response = sender.send_message(message, parse_mode="MarkdownV2")
+            response = sender.send_message(message, parse_mode=None)
             return {
                 "sent": True,
                 "reason": "Research observation sent successfully.",
@@ -193,29 +192,19 @@ def build_observational_message(
         "n/a",
     )
 
-    lines = ["*Research Observation*"]
-    lines.append(f"Generated: {escape_markdown(str(generated_at))}")
+    lines = ["Research Observation"]
+    lines.append(f"Generated: {generated_at}")
     lines.append("")
-    lines.append("*Drift Summary*")
+    lines.append("Drift Summary")
+    lines.append(f"- increase: {_coerce_int(drift_summary.get('increase'))}")
+    lines.append(f"- decrease: {_coerce_int(drift_summary.get('decrease'))}")
+    lines.append(f"- flat: {_coerce_int(drift_summary.get('flat'))}")
     lines.append(
-        "- increase: "
-        f"{escape_markdown(str(_coerce_int(drift_summary.get('increase'))))}"
-    )
-    lines.append(
-        "- decrease: "
-        f"{escape_markdown(str(_coerce_int(drift_summary.get('decrease'))))}"
-    )
-    lines.append(
-        "- flat: "
-        f"{escape_markdown(str(_coerce_int(drift_summary.get('flat'))))}"
-    )
-    lines.append(
-        "- insufficient_history: "
-        f"{escape_markdown(str(_coerce_int(drift_summary.get('insufficient_history'))))}"
+        f"- insufficient_history: {_coerce_int(drift_summary.get('insufficient_history'))}"
     )
     lines.append("")
 
-    lines.append("*Changed Groups*")
+    lines.append("Changed Groups")
     if not changed_groups:
         lines.append("- no changed groups detected")
     else:
@@ -223,7 +212,7 @@ def build_observational_message(
             lines.append(_format_changed_group_line(item))
     lines.append("")
 
-    lines.append("*Current Snapshot*")
+    lines.append("Current Snapshot")
     if not snapshot_lines:
         lines.append("- no current snapshot available")
     else:
@@ -364,14 +353,12 @@ def _build_snapshot_lines(edge_scores_summary: dict[str, Any] | None) -> list[st
         )
         score_text = "n/a" if score is None else _format_number(score)
         lines.append(
-            "- "
-            f"{escape_markdown(category)}: "
-            f"{escape_markdown(group)} "
-            f"(score={escape_markdown(score_text)}, "
-            f"source={escape_markdown(source_preference)}, "
-            f"strength={escape_markdown(selected_snapshot['selected_candidate_strength'])}, "
-            f"stability={escape_markdown(selected_snapshot['selected_stability_label'])}, "
-            f"horizons={escape_markdown(_format_horizon_text(selected_snapshot['selected_visible_horizons']))})"
+            f"- {category}: {group} "
+            f"(score={score_text}, "
+            f"source={source_preference}, "
+            f"strength={selected_snapshot['selected_candidate_strength']}, "
+            f"stability={selected_snapshot['selected_stability_label']}, "
+            f"horizons={_format_horizon_text(selected_snapshot['selected_visible_horizons'])})"
         )
 
     return lines
@@ -446,21 +433,18 @@ def _format_changed_group_line(item: dict[str, Any]) -> str:
     )
 
     return (
-        "- "
-        f"{escape_markdown(str(item.get('category', 'n/a')))}"
-        "/"
-        f"{escape_markdown(str(item.get('group', 'n/a')))}: "
-        f"drift={escape_markdown(str(item.get('drift_direction', 'n/a')))}, "
-        f"delta={escape_markdown(delta_text)}, "
-        f"score={escape_markdown(previous_score_text)} -> {escape_markdown(latest_score_text)}, "
-        f"strength={escape_markdown(str(item.get('previous_selected_candidate_strength', DEFAULT_STRENGTH_LABEL)))} "
-        f"-> {escape_markdown(str(item.get('latest_selected_candidate_strength', DEFAULT_STRENGTH_LABEL)))}, "
-        f"stability={escape_markdown(str(item.get('previous_stability_label', DEFAULT_STABILITY_LABEL)))} "
-        f"-> {escape_markdown(str(item.get('latest_stability_label', DEFAULT_STABILITY_LABEL)))}, "
-        f"horizons={escape_markdown(previous_horizons_text)} -> {escape_markdown(latest_horizons_text)}, "
-        f"horizon_delta={escape_markdown(horizon_count_delta_text)}, "
-        f"source={escape_markdown(str(item.get('previous_source_preference', DEFAULT_SOURCE_PREFERENCE)))} "
-        f"-> {escape_markdown(str(item.get('latest_source_preference', DEFAULT_SOURCE_PREFERENCE)))}"
+        f"- {item.get('category', 'n/a')}/{item.get('group', 'n/a')}: "
+        f"drift={item.get('drift_direction', 'n/a')}, "
+        f"delta={delta_text}, "
+        f"score={previous_score_text} -> {latest_score_text}, "
+        f"strength={item.get('previous_selected_candidate_strength', DEFAULT_STRENGTH_LABEL)} "
+        f"-> {item.get('latest_selected_candidate_strength', DEFAULT_STRENGTH_LABEL)}, "
+        f"stability={item.get('previous_stability_label', DEFAULT_STABILITY_LABEL)} "
+        f"-> {item.get('latest_stability_label', DEFAULT_STABILITY_LABEL)}, "
+        f"horizons={previous_horizons_text} -> {latest_horizons_text}, "
+        f"horizon_delta={horizon_count_delta_text}, "
+        f"source={item.get('previous_source_preference', DEFAULT_SOURCE_PREFERENCE)} "
+        f"-> {item.get('latest_source_preference', DEFAULT_SOURCE_PREFERENCE)}"
     )
 
 
