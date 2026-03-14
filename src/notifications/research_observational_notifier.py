@@ -46,7 +46,7 @@ class ResearchObservationalNotifier:
             }
 
         try:
-            response = sender.send_message(message)
+            response = sender.send_message(message, parse_mode="MarkdownV2")
             return {
                 "sent": True,
                 "reason": "Research observation sent successfully.",
@@ -335,8 +335,16 @@ def _build_snapshot_lines(edge_scores_summary: dict[str, Any] | None) -> list[st
     score_summary = _safe_dict(edge_scores_summary.get("score_summary"))
     score_details = _safe_dict(edge_scores_summary.get("edge_stability_scores"))
     snapshot_items = [
-        ("strategy", _safe_dict(score_summary.get("top_strategy")), score_details.get("strategy")),
-        ("symbol", _safe_dict(score_summary.get("top_symbol")), score_details.get("symbol")),
+        (
+            "strategy",
+            _safe_dict(score_summary.get("top_strategy")),
+            score_details.get("strategy"),
+        ),
+        (
+            "symbol",
+            _safe_dict(score_summary.get("top_symbol")),
+            score_details.get("symbol"),
+        ),
         (
             "alignment_state",
             _safe_dict(score_summary.get("top_alignment_state")),
@@ -348,9 +356,7 @@ def _build_snapshot_lines(edge_scores_summary: dict[str, Any] | None) -> list[st
     for category, item, category_items in snapshot_items:
         group = str(item.get("group", "n/a"))
         score = _coerce_optional_float(item.get("score"))
-        source_preference = str(
-            item.get("source_preference", DEFAULT_SOURCE_PREFERENCE)
-        )
+        source_preference = str(item.get("source_preference", DEFAULT_SOURCE_PREFERENCE))
         selected_snapshot = _select_snapshot_details(
             group=group,
             source_preference=source_preference,

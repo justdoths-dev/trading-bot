@@ -25,7 +25,13 @@ class TelegramSender:
 
         self.endpoint = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
 
-    def send_message(self, text: str) -> dict[str, Any]:
+    def send_message(
+        self,
+        text: str,
+        *,
+        parse_mode: str | None = "Markdown",
+        disable_web_page_preview: bool = True,
+    ) -> dict[str, Any]:
         """
         Send a message to Telegram.
 
@@ -39,12 +45,14 @@ class TelegramSender:
 
         message = self._truncate(message)
 
-        payload = {
+        payload: dict[str, Any] = {
             "chat_id": self.chat_id,
             "text": message,
-            "parse_mode": "Markdown",
-            "disable_web_page_preview": True,
+            "disable_web_page_preview": disable_web_page_preview,
         }
+
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
 
         try:
             response = requests.post(
