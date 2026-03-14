@@ -89,6 +89,17 @@ exec >>"${LOG_FILE}" 2>&1
 CURRENT_STEP="project root change"
 cd "${PROJECT_ROOT}"
 
+CURRENT_STEP="environment loading"
+if [[ -f "${PROJECT_ROOT}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${PROJECT_ROOT}/.env"
+  set +a
+  log_info "Environment variables loaded from ${PROJECT_ROOT}/.env."
+else
+  log_warn ".env file not found at ${PROJECT_ROOT}/.env."
+fi
+
 exec 9>"${LOCK_FILE}"
 if ! flock -n 9; then
   SKIPPED_DUE_TO_LOCK=1
@@ -137,8 +148,10 @@ run_step() {
   CURRENT_STEP="${step_name}"
   log_info "Starting ${step_name}."
 
+  set +e
   "$@"
   local exit_code=$?
+  set -e
 
   if [[ "${exit_code}" -eq 0 ]]; then
     log_info "Completed ${step_name}."
