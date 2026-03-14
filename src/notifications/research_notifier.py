@@ -13,6 +13,8 @@ from src.telegram.telegram_sender import TelegramSender
 
 logger = logging.getLogger(__name__)
 
+HORIZON_ORDER = ("15m", "1h", "4h")
+
 
 class ResearchNotifier:
     """Read the latest research report output and send a concise summary to Telegram."""
@@ -110,7 +112,7 @@ class ResearchNotifier:
         by_horizon = top_highlights.get("by_horizon", {}) or {}
         lines: list[str] = []
 
-        for horizon in ("15m", "1h", "4h"):
+        for horizon in HORIZON_ORDER:
             horizon_data = by_horizon.get(horizon, {}) or {}
 
             top_symbol = self._safe(horizon_data.get("top_symbol", "n/a"))
@@ -145,16 +147,25 @@ class ResearchNotifier:
         by_horizon = edge_candidates_preview.get("by_horizon", {}) or {}
         lines: list[str] = []
 
-        for horizon in ("15m", "1h", "4h"):
+        for horizon in HORIZON_ORDER:
             horizon_data = by_horizon.get(horizon, {}) or {}
             candidate = self._select_best_edge_candidate(horizon_data)
             if candidate is None:
                 continue
 
+            strength = str(candidate.get("candidate_strength", "insufficient_data"))
+            if strength == "weak":
+                lines.append(
+                    f"- {self._safe(horizon)}: weak preview only, "
+                    f"{self._safe(candidate['label'])}={self._safe(candidate['group'])} "
+                    f"(n={self._safe(candidate['sample_count'])})"
+                )
+                continue
+
             lines.append(
                 f"- {self._safe(horizon)}: "
                 f"{self._safe(candidate['label'])}={self._safe(candidate['group'])} "
-                f"({self._safe(candidate['candidate_strength'])}, n={self._safe(candidate['sample_count'])})"
+                f"({self._safe(strength)}, n={self._safe(candidate['sample_count'])})"
             )
 
         return lines
@@ -170,7 +181,7 @@ class ResearchNotifier:
         ]
 
         best: dict[str, Any] | None = None
-        best_score: tuple[int, float, float, int] | None = None
+        best_score: tuple[int, float, float, float, int] | None = None
 
         for label, candidate in candidates:
             if not isinstance(candidate, dict):
@@ -192,6 +203,10 @@ class ResearchNotifier:
                         "median_future_return_pct"
                     ),
                     "positive_rate_pct": candidate.get("positive_rate_pct"),
+                    "quality_gate": candidate.get("quality_gate", "failed"),
+                    "visibility_reason": candidate.get(
+                        "visibility_reason", "failed_absolute_minimum_gate"
+                    ),
                 }
                 best_score = score
 
@@ -200,15 +215,21 @@ class ResearchNotifier:
     def _candidate_sort_score(
         self,
         candidate: dict[str, Any],
-    ) -> tuple[int, float, float, int]:
+    ) -> tuple[int, float, float, float, int]:
         strength_rank = {
             "strong": 3,
             "moderate": 2,
             "weak": 1,
             "insufficient_data": 0,
         }
+        quality_rank = {
+            "passed": 2,
+            "borderline": 1,
+            "failed": 0,
+        }
         return (
             strength_rank.get(str(candidate.get("candidate_strength")), 0),
+            quality_rank.get(str(candidate.get("quality_gate")), 0),
             float(candidate.get("median_future_return_pct") or 0.0),
             float(candidate.get("positive_rate_pct") or 0.0),
             int(candidate.get("sample_count") or 0),

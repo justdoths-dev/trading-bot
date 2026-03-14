@@ -35,6 +35,14 @@ from src.services.cron_health import CronHealthReporter
 
 LOGGER = logging.getLogger(__name__)
 MIN_EDGE_CANDIDATE_SAMPLE_COUNT = 30
+EDGE_MODERATE_SAMPLE_COUNT = 50
+EDGE_STRONG_SAMPLE_COUNT = 80
+EDGE_MODERATE_MEDIAN_RETURN_PCT = 0.30
+EDGE_STRONG_MEDIAN_RETURN_PCT = 0.50
+EDGE_MODERATE_POSITIVE_RATE_PCT = 55.0
+EDGE_STRONG_POSITIVE_RATE_PCT = 58.0
+EDGE_MODERATE_ROBUSTNESS_PCT = 52.0
+EDGE_STRONG_ROBUSTNESS_PCT = 55.0
 
 
 def load_jsonl_records(input_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -323,16 +331,57 @@ def _build_edge_candidates_preview(strategy_lab: dict[str, Any]) -> dict[str, An
             if candidate["candidate_strength"] != "insufficient_data"
         ]
 
+        sample_gate = (
+            "passed"
+            if any(
+                candidate.get("sample_gate") == "passed"
+                for candidate in (top_strategy, top_symbol, top_alignment_state)
+            )
+            else "insufficient_data"
+        )
+
+        quality_gate = (
+            "passed"
+            if any(
+                candidate.get("quality_gate") == "passed"
+                for candidate in (top_strategy, top_symbol, top_alignment_state)
+            )
+            else "borderline"
+            if visible_strengths
+            else "failed"
+        )
+
         by_horizon[horizon] = {
             "top_strategy": top_strategy,
             "top_symbol": top_symbol,
             "top_alignment_state": top_alignment_state,
-            "sample_gate": "passed" if visible_strengths else "insufficient_data",
+            "sample_gate": sample_gate,
+            "quality_gate": quality_gate,
             "candidate_strength": _max_candidate_strength(visible_strengths),
+            "visibility_reason": _horizon_visibility_reason(sample_gate, quality_gate),
         }
 
     return {
         "minimum_sample_count": MIN_EDGE_CANDIDATE_SAMPLE_COUNT,
+        "strength_thresholds": {
+            "weak": {
+                "sample_count": MIN_EDGE_CANDIDATE_SAMPLE_COUNT,
+                "median_future_return_pct_gt": 0,
+                "positive_rate_pct": 50,
+            },
+            "moderate": {
+                "sample_count": EDGE_MODERATE_SAMPLE_COUNT,
+                "median_future_return_pct": EDGE_MODERATE_MEDIAN_RETURN_PCT,
+                "positive_rate_pct": EDGE_MODERATE_POSITIVE_RATE_PCT,
+                "robustness_pct": EDGE_MODERATE_ROBUSTNESS_PCT,
+            },
+            "strong": {
+                "sample_count": EDGE_STRONG_SAMPLE_COUNT,
+                "median_future_return_pct": EDGE_STRONG_MEDIAN_RETURN_PCT,
+                "positive_rate_pct": EDGE_STRONG_POSITIVE_RATE_PCT,
+                "robustness_pct": EDGE_STRONG_ROBUSTNESS_PCT,
+            },
+        },
         "by_horizon": by_horizon,
     }
 
@@ -343,36 +392,89 @@ def _extract_edge_candidate(report: Any) -> dict[str, Any]:
     for entry in ranked_groups:
         metrics = entry.get("metrics", {}) or {}
         sample_count = _to_float(metrics.get("sample_count"))
+        labeled_count = _to_float(metrics.get("labeled_count"))
+        coverage_pct = _to_float(metrics.get("coverage_pct"))
         median_future_return_pct = _to_float(metrics.get("median_future_return_pct"))
         positive_rate_pct = _to_float(
             metrics.get("positive_rate_pct", metrics.get("up_rate_pct"))
         )
+        signal_match_rate_pct = _to_float(
+            metrics.get("signal_match_rate_pct", metrics.get("signal_match_rate"))
+        )
+        bias_match_rate_pct = _to_float(
+            metrics.get("bias_match_rate_pct", metrics.get("bias_match_rate"))
+        )
+        robustness_label, robustness_value = _select_robustness_signal(metrics)
 
-        if sample_count is None or sample_count < MIN_EDGE_CANDIDATE_SAMPLE_COUNT:
+        sample_gate_passed = (
+            sample_count is not None
+            and sample_count >= MIN_EDGE_CANDIDATE_SAMPLE_COUNT
+            and median_future_return_pct is not None
+            and median_future_return_pct > 0
+            and positive_rate_pct is not None
+            and positive_rate_pct >= 50
+        )
+
+        if not sample_gate_passed:
             continue
-        if median_future_return_pct is None or median_future_return_pct <= 0:
-            continue
-        if positive_rate_pct is None or positive_rate_pct < 50:
-            continue
+
+        candidate_strength = _score_candidate_strength(
+            sample_count=sample_count,
+            median_future_return_pct=median_future_return_pct,
+            positive_rate_pct=positive_rate_pct,
+            robustness_value=robustness_value,
+        )
+        quality_gate = (
+            "passed"
+            if candidate_strength in {"moderate", "strong"}
+            else "borderline"
+        )
+        visibility_reason = (
+            "passed_sample_and_quality_gate"
+            if quality_gate == "passed"
+            else "passed_sample_gate_only"
+        )
 
         return {
             "group": str(entry.get("group", "n/a")),
             "sample_count": int(sample_count),
+            "labeled_count": int(labeled_count or 0),
+            "coverage_pct": coverage_pct,
             "median_future_return_pct": median_future_return_pct,
             "positive_rate_pct": positive_rate_pct,
-            "candidate_strength": _score_candidate_strength(
-                sample_count=sample_count,
+            "signal_match_rate_pct": signal_match_rate_pct,
+            "bias_match_rate_pct": bias_match_rate_pct,
+            "robustness_signal": robustness_label,
+            "robustness_signal_pct": robustness_value,
+            "sample_gate": "passed",
+            "quality_gate": quality_gate,
+            "candidate_strength": candidate_strength,
+            "visibility_reason": visibility_reason,
+            "chosen_metric_summary": _build_candidate_metric_summary(
+                sample_count=int(sample_count),
                 median_future_return_pct=median_future_return_pct,
                 positive_rate_pct=positive_rate_pct,
+                robustness_label=robustness_label,
+                robustness_value=robustness_value,
             ),
         }
 
     return {
         "group": "insufficient_data",
         "sample_count": 0,
+        "labeled_count": 0,
+        "coverage_pct": None,
         "median_future_return_pct": None,
         "positive_rate_pct": None,
+        "signal_match_rate_pct": None,
+        "bias_match_rate_pct": None,
+        "robustness_signal": "n/a",
+        "robustness_signal_pct": None,
+        "sample_gate": "failed",
+        "quality_gate": "failed",
         "candidate_strength": "insufficient_data",
+        "visibility_reason": "failed_absolute_minimum_gate",
+        "chosen_metric_summary": "insufficient_data",
     }
 
 
@@ -380,12 +482,66 @@ def _score_candidate_strength(
     sample_count: float,
     median_future_return_pct: float,
     positive_rate_pct: float,
+    robustness_value: float | None,
 ) -> str:
-    if sample_count >= 60 and median_future_return_pct >= 0.75 and positive_rate_pct >= 60:
+    if (
+        sample_count >= EDGE_STRONG_SAMPLE_COUNT
+        and median_future_return_pct >= EDGE_STRONG_MEDIAN_RETURN_PCT
+        and positive_rate_pct >= EDGE_STRONG_POSITIVE_RATE_PCT
+        and (robustness_value is None or robustness_value >= EDGE_STRONG_ROBUSTNESS_PCT)
+    ):
         return "strong"
-    if sample_count >= 45 and median_future_return_pct >= 0.30 and positive_rate_pct >= 55:
+
+    if (
+        sample_count >= EDGE_MODERATE_SAMPLE_COUNT
+        and median_future_return_pct >= EDGE_MODERATE_MEDIAN_RETURN_PCT
+        and positive_rate_pct >= EDGE_MODERATE_POSITIVE_RATE_PCT
+        and (
+            robustness_value is None
+            or robustness_value >= EDGE_MODERATE_ROBUSTNESS_PCT
+        )
+    ):
         return "moderate"
+
     return "weak"
+
+
+def _select_robustness_signal(metrics: dict[str, Any]) -> tuple[str, float | None]:
+    for output_label, keys in (
+        ("signal_match_rate_pct", ("signal_match_rate_pct", "signal_match_rate")),
+        ("bias_match_rate_pct", ("bias_match_rate_pct", "bias_match_rate")),
+        ("coverage_pct", ("coverage_pct",)),
+    ):
+        for key in keys:
+            value = _to_float(metrics.get(key))
+            if value is not None:
+                return output_label, value
+    return "n/a", None
+
+
+def _build_candidate_metric_summary(
+    sample_count: int,
+    median_future_return_pct: float,
+    positive_rate_pct: float,
+    robustness_label: str,
+    robustness_value: float | None,
+) -> str:
+    parts = [
+        f"sample={sample_count}",
+        f"median={median_future_return_pct}",
+        f"positive_rate={positive_rate_pct}",
+    ]
+    if robustness_label != "n/a" and robustness_value is not None:
+        parts.append(f"{robustness_label}={robustness_value}")
+    return ", ".join(parts)
+
+
+def _horizon_visibility_reason(sample_gate: str, quality_gate: str) -> str:
+    if sample_gate != "passed":
+        return "failed_absolute_minimum_gate"
+    if quality_gate == "passed":
+        return "passed_sample_and_quality_gate"
+    return "passed_sample_gate_only"
 
 
 def _max_candidate_strength(strengths: list[str]) -> str:
@@ -581,7 +737,9 @@ def _markdown_top_highlights(top_highlights: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _markdown_edge_candidates_preview(edge_candidates_preview: dict[str, Any]) -> list[str]:
+def _markdown_edge_candidates_preview(
+    edge_candidates_preview: dict[str, Any],
+) -> list[str]:
     lines: list[str] = []
     by_horizon = edge_candidates_preview.get("by_horizon", {}) or {}
 
@@ -596,9 +754,15 @@ def _markdown_edge_candidates_preview(edge_candidates_preview: dict[str, Any]) -
     for horizon in HORIZONS:
         horizon_data = by_horizon.get(horizon, {}) or {}
         lines.append(f"### {horizon}")
-        lines.append(f"- sample_gate: {horizon_data.get('sample_gate', 'insufficient_data')}")
+        lines.append(
+            f"- sample_gate: {horizon_data.get('sample_gate', 'insufficient_data')}"
+        )
+        lines.append(f"- quality_gate: {horizon_data.get('quality_gate', 'failed')}")
         lines.append(
             f"- candidate_strength: {horizon_data.get('candidate_strength', 'insufficient_data')}"
+        )
+        lines.append(
+            f"- visibility_reason: {horizon_data.get('visibility_reason', 'failed_absolute_minimum_gate')}"
         )
         lines.append(
             f"- top_strategy: {_format_edge_candidate_markdown(horizon_data.get('top_strategy'))}"
@@ -619,13 +783,15 @@ def _format_edge_candidate_markdown(candidate: Any) -> str:
     if not isinstance(candidate, dict):
         return "insufficient_data"
     if candidate.get("candidate_strength") == "insufficient_data":
-        return "insufficient_data"
+        return (
+            f"insufficient_data ({candidate.get('visibility_reason', 'failed_absolute_minimum_gate')})"
+        )
     return (
         f"{candidate.get('group', 'n/a')} "
-        f"(sample={candidate.get('sample_count', 0)}, "
-        f"median={_fmt_metric(candidate.get('median_future_return_pct'))}, "
-        f"positive_rate={_fmt_metric(candidate.get('positive_rate_pct'))}, "
-        f"strength={candidate.get('candidate_strength', 'insufficient_data')})"
+        f"({candidate.get('candidate_strength', 'insufficient_data')}; "
+        f"sample_gate={candidate.get('sample_gate', 'failed')}; "
+        f"quality_gate={candidate.get('quality_gate', 'failed')}; "
+        f"{candidate.get('chosen_metric_summary', 'n/a')})"
     )
 
 
@@ -950,5 +1116,6 @@ if __name__ == "__main__":
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
     main()
+
 
 
