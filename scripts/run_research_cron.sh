@@ -172,5 +172,10 @@ if ! run_step "research observational notifier" "${PYTHON_BIN}" -m src.notificat
   exit 1
 fi
 
+if ! run_step "research summary notifier" "${PYTHON_BIN}" -m src.notifications.research_summary_notifier; then
+  log_error "Research cron run failed during summary notifier execution."
+  exit 1
+fi
+
 CURRENT_STEP="completed"
 log_info "Research cron run finished successfully."
