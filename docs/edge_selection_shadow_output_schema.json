@@ -1,0 +1,361 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/schemas/edge_selection_shadow_output_schema.json",
+  "title": "Edge Selection Shadow Output",
+  "description": "Schema for a conservative shadow-mode edge selection output. This schema is documentation-oriented and must not be interpreted as live execution authorization.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "generated_at",
+    "mode",
+    "selection_status",
+    "reason_codes",
+    "candidates_considered",
+    "selected_symbol",
+    "selected_strategy",
+    "selected_horizon",
+    "selection_score",
+    "selection_confidence",
+    "ranking"
+  ],
+  "properties": {
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Timestamp for the shadow output generation."
+    },
+    "mode": {
+      "type": "string",
+      "const": "shadow",
+      "description": "Operating mode for this output."
+    },
+    "selection_status": {
+      "type": "string",
+      "enum": [
+        "selected",
+        "abstain",
+        "blocked"
+      ],
+      "description": "Overall result of the shadow selection pass."
+    },
+    "reason_codes": {
+      "type": "array",
+      "description": "Machine-readable reasons explaining the overall selection status.",
+      "items": {
+        "$ref": "#/$defs/reasonCode"
+      },
+      "uniqueItems": true
+    },
+    "candidates_considered": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of candidates evaluated by the engine before final status was determined."
+    },
+    "selected_symbol": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Selected symbol in shadow mode, or null when abstaining or blocked."
+    },
+    "selected_strategy": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Selected strategy in shadow mode, or null when abstaining or blocked."
+    },
+    "selected_horizon": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "15m",
+        "1h",
+        "4h",
+        null
+      ],
+      "description": "Selected horizon in shadow mode, or null when abstaining or blocked."
+    },
+    "selection_score": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Composite selection score used for shadow ranking only."
+    },
+    "selection_confidence": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Normalized shadow-only confidence value used for calibration and review. This field must not be interpreted as live execution authority."
+    },
+    "latest_window_record_count": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Optional recent-window record count used during evaluation."
+    },
+    "cumulative_record_count": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Optional cumulative record count used during evaluation."
+    },
+    "selection_explanation": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Optional human-readable explanation of the selection or abstention outcome."
+    },
+    "ranking": {
+      "type": "array",
+      "description": "Ordered candidate list produced during the shadow pass.",
+      "items": {
+        "$ref": "#/$defs/rankingItem"
+      }
+    }
+  },
+  "$defs": {
+    "reasonCode": {
+      "type": "string",
+      "enum": [
+        "INSUFFICIENT_SAMPLE_SIZE",
+        "INSUFFICIENT_SYMBOL_HISTORY",
+        "WEAK_LATEST_SUPPORT",
+        "WEAK_CUMULATIVE_SUPPORT",
+        "NO_VISIBLE_HORIZONS",
+        "NO_CANDIDATE_PASSED_STABILITY_GATE",
+        "LOW_STABILITY_SCORE",
+        "STABILITY_LABEL_UNSTABLE",
+        "INSUFFICIENT_STABILITY_DURATION",
+        "DRIFT_BLOCKED",
+        "DRIFT_PENALIZED",
+        "NEGATIVE_HORIZON_DELTA",
+        "RECENT_CUMULATIVE_CONFLICT",
+        "SOURCE_PREFERENCE_CONFLICT",
+        "TIE_REQUIRES_ABSTAIN",
+        "UPSTREAM_REPORT_MISSING",
+        "UPSTREAM_REPORT_STALE",
+        "UPSTREAM_REPORT_MALFORMED",
+        "SHADOW_SELECTION_ONLY",
+        "ABSTAIN_POLICY_TRIGGERED"
+      ]
+    },
+    "rankingItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rank",
+        "symbol",
+        "strategy",
+        "horizon",
+        "candidate_status",
+        "selection_score",
+        "selection_confidence",
+        "reason_codes",
+        "latest_sample_size",
+        "cumulative_sample_size",
+        "symbol_cumulative_support",
+        "strategy_cumulative_support",
+        "selected_candidate_strength",
+        "selected_stability_label",
+        "consecutive_visible_cycles",
+        "consecutive_stable_cycles",
+        "drift_direction",
+        "score_delta"
+      ],
+      "properties": {
+        "rank": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Deterministic rank among candidates considered in the shadow pass."
+        },
+        "symbol": {
+          "type": "string",
+          "description": "Candidate symbol."
+        },
+        "strategy": {
+          "type": "string",
+          "description": "Candidate strategy."
+        },
+        "horizon": {
+          "type": "string",
+          "enum": [
+            "15m",
+            "1h",
+            "4h"
+          ],
+          "description": "Candidate horizon."
+        },
+        "candidate_status": {
+          "type": "string",
+          "enum": [
+            "eligible",
+            "penalized",
+            "blocked"
+          ],
+          "description": "Candidate state after gating and penalty evaluation."
+        },
+        "selection_score": {
+          "type": "number",
+          "description": "Composite shadow selection score for ranking only."
+        },
+        "selection_confidence": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Normalized shadow-only confidence value for the candidate. This is intended for calibration and must not be treated as execution authority."
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/reasonCode"
+          },
+          "uniqueItems": true,
+          "description": "Machine-readable reasons associated with this candidate."
+        },
+        "latest_sample_size": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Recent-window support count for the candidate."
+        },
+        "cumulative_sample_size": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Cumulative support count for the candidate."
+        },
+        "symbol_cumulative_support": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Cumulative support count for the candidate symbol across relevant retained research scope."
+        },
+        "strategy_cumulative_support": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Cumulative support count for the candidate strategy across relevant retained research scope."
+        },
+        "selected_candidate_strength": {
+          "type": "string",
+          "enum": [
+            "insufficient_data",
+            "weak",
+            "moderate",
+            "strong"
+          ],
+          "description": "Candidate strength derived from upstream scoring outputs after source-preference resolution. The selection engine must not independently redefine this field using undocumented logic."
+        },
+        "selected_stability_label": {
+          "type": "string",
+          "enum": [
+            "insufficient_data",
+            "unstable",
+            "single_horizon_only",
+            "multi_horizon_confirmed"
+          ],
+          "description": "Selected stability label after source-preference resolution."
+        },
+        "selected_visible_horizons": {
+          "type": "array",
+          "description": "Visible horizons supporting the selected candidate view.",
+          "items": {
+            "type": "string",
+            "enum": [
+              "15m",
+              "1h",
+              "4h"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "source_preference": {
+          "type": "string",
+          "enum": [
+            "latest",
+            "cumulative",
+            "n/a"
+          ],
+          "description": "Preferred evidence source selected by the upstream scoring logic."
+        },
+        "edge_stability_score": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Observed upstream edge stability score for this candidate."
+        },
+        "stability_gate_pass": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether the candidate passed the future stability gate."
+        },
+        "consecutive_visible_cycles": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Number of consecutive research cycles in which the candidate remained visible."
+        },
+        "consecutive_stable_cycles": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Number of consecutive research cycles in which the candidate remained stability-qualified."
+        },
+        "drift_direction": {
+          "type": "string",
+          "enum": [
+            "increase",
+            "decrease",
+            "flat",
+            "insufficient_history"
+          ],
+          "description": "Observed drift direction from the drift analyzer."
+        },
+        "score_delta": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Observed score change between the latest two drift points."
+        },
+        "drift_blocked": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether drift policy blocked the candidate."
+        }
+      }
+    }
+  }
+}
