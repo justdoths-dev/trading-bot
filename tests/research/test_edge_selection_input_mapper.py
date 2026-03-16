@@ -151,6 +151,101 @@ def test_source_preference_na_uses_available_values_without_inventing(tmp_path: 
     ]
 
 
+def test_invalid_identifier_values_are_filtered_out_of_candidates(tmp_path: Path) -> None:
+    base_dir = _write_valid_reports(
+        tmp_path,
+        comparison_summary={
+            "dataset_overview_comparison": {
+                "latest_total_records": 124,
+                "cumulative_total_records": 3578,
+            },
+            "edge_candidates_comparison": {
+                "15m": {
+                    "latest_top_symbol_group": "insufficient_data",
+                    "cumulative_top_symbol_group": "insufficient_data",
+                    "latest_top_strategy_group": "insufficient_data",
+                    "cumulative_top_strategy_group": "insufficient_data",
+                    "latest_candidate_strength": "insufficient_data",
+                    "cumulative_candidate_strength": "insufficient_data",
+                },
+                "1h": {
+                    "latest_top_symbol_group": "n/a",
+                    "cumulative_top_symbol_group": "n/a",
+                    "latest_top_strategy_group": "unknown",
+                    "cumulative_top_strategy_group": "unknown",
+                    "latest_candidate_strength": "insufficient_data",
+                    "cumulative_candidate_strength": "insufficient_data",
+                },
+                "4h": {
+                    "latest_top_symbol_group": "ETHUSDT",
+                    "cumulative_top_symbol_group": "ETHUSDT",
+                    "latest_top_strategy_group": "swing",
+                    "cumulative_top_strategy_group": "swing",
+                    "latest_candidate_strength": "weak",
+                    "cumulative_candidate_strength": "weak",
+                },
+            },
+        },
+        edge_scores_summary={
+            "generated_at": "2026-03-15T00:02:00+00:00",
+            "edge_stability_scores": {
+                "symbol": [
+                    {
+                        "group": "ETHUSDT",
+                        "score": 2.5,
+                        "latest_stability_label": "single_horizon_only",
+                        "cumulative_stability_label": "single_horizon_only",
+                        "latest_candidate_strength": "weak",
+                        "cumulative_candidate_strength": "weak",
+                        "source_preference": "cumulative",
+                    }
+                ],
+                "strategy": [
+                    {
+                        "group": "swing",
+                        "score": 2.4,
+                        "latest_stability_label": "single_horizon_only",
+                        "cumulative_stability_label": "single_horizon_only",
+                        "latest_candidate_strength": "weak",
+                        "cumulative_candidate_strength": "weak",
+                        "source_preference": "cumulative",
+                    }
+                ],
+                "alignment_state": [],
+            },
+        },
+        score_drift_summary={
+            "generated_at": "2026-03-15T00:03:00+00:00",
+            "score_drift": [
+                {
+                    "category": "symbol",
+                    "group": "ETHUSDT",
+                    "drift_direction": "flat",
+                    "score_delta": 0.0,
+                }
+            ],
+        },
+    )
+
+    payload = map_edge_selection_input(base_dir)
+
+    assert payload["ok"] is True
+    assert payload["errors"] == []
+    assert payload["candidates"] == [
+        {
+            "symbol": "ETHUSDT",
+            "strategy": "swing",
+            "horizon": "4h",
+            "selected_candidate_strength": "weak",
+            "selected_stability_label": "single_horizon_only",
+            "source_preference": "cumulative",
+            "edge_stability_score": 2.5,
+            "drift_direction": "flat",
+            "score_delta": 0.0,
+        }
+    ]
+
+
 def _write_valid_reports(
     tmp_path: Path,
     *,

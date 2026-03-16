@@ -26,7 +26,17 @@ SOURCE_FIELDS = {
     },
 }
 VALID_SOURCE_PREFERENCES = {"latest", "cumulative", "n/a"}
+VALID_HORIZONS = {"15m", "1h", "4h"}
 SUPPORT_CATEGORY_ORDER = ("symbol", "strategy")
+INVALID_IDENTIFIER_VALUES = {
+    "insufficient_data",
+    "unstable",
+    "n/a",
+    "na",
+    "none",
+    "null",
+    "unknown",
+}
 
 
 def map_edge_selection_input(
@@ -92,6 +102,7 @@ def map_edge_selection_input(
         )
         for seed in seeds
     ]
+    candidates = [candidate for candidate in candidates if _is_valid_candidate(candidate)]
     candidates = _dedupe_candidates(candidates)
     candidates.sort(key=_candidate_sort_key)
 
@@ -184,15 +195,18 @@ def _build_candidate_seeds(comparison_summary: dict[str, Any]) -> list[dict[str,
     seeds: list[dict[str, Any]] = []
 
     for horizon in sorted(comparison):
+        if horizon not in VALID_HORIZONS:
+            continue
+
         horizon_payload = _coerce_dict(comparison.get(horizon))
         if not horizon_payload:
             continue
 
-        symbol = _first_non_empty(
+        symbol = _first_valid_identifier(
             horizon_payload.get("latest_top_symbol_group"),
             horizon_payload.get("cumulative_top_symbol_group"),
         )
-        strategy = _first_non_empty(
+        strategy = _first_valid_identifier(
             horizon_payload.get("latest_top_strategy_group"),
             horizon_payload.get("cumulative_top_strategy_group"),
         )
@@ -232,7 +246,7 @@ def _build_score_lookup(
             if not isinstance(item, dict):
                 continue
 
-            group = _normalize_text(item.get("group"))
+            group = _normalize_identifier(item.get("group"))
             if group is None:
                 continue
 
@@ -255,7 +269,7 @@ def _build_drift_lookup(
             continue
 
         category = _normalize_text(item.get("category"))
-        group = _normalize_text(item.get("group"))
+        group = _normalize_identifier(item.get("group"))
         if category is None or group is None:
             continue
 
@@ -271,9 +285,9 @@ def _build_candidate(
     drift_lookup: dict[tuple[str, str], dict[str, Any]],
 ) -> dict[str, Any]:
     candidate: dict[str, Any] = {
-        "symbol": seed.get("symbol"),
-        "strategy": seed.get("strategy"),
-        "horizon": seed.get("horizon"),
+        "symbol": _normalize_identifier(seed.get("symbol")),
+        "strategy": _normalize_identifier(seed.get("strategy")),
+        "horizon": _normalize_horizon(seed.get("horizon")),
     }
     candidate = {key: value for key, value in candidate.items() if value is not None}
 
@@ -354,7 +368,7 @@ def _select_supporting_score(
     matches: list[tuple[float, int, str, str, dict[str, Any]]] = []
 
     for category_index, category in enumerate(SUPPORT_CATEGORY_ORDER):
-        group = _normalize_text(seed.get(category))
+        group = _normalize_identifier(seed.get(category))
         if group is None:
             continue
 
@@ -428,6 +442,13 @@ def _resolve_stability_label(
     )
 
 
+def _is_valid_candidate(candidate: dict[str, Any]) -> bool:
+    symbol = _normalize_identifier(candidate.get("symbol"))
+    strategy = _normalize_identifier(candidate.get("strategy"))
+    horizon = _normalize_horizon(candidate.get("horizon"))
+    return symbol is not None and strategy is not None and horizon is not None
+
+
 def _normalize_source_preference(value: Any) -> str | None:
     normalized = _normalize_text(value)
     if normalized in VALID_SOURCE_PREFERENCES:
@@ -441,11 +462,27 @@ def _normalize_horizon_list(value: Any) -> list[str] | None:
 
     normalized: list[str] = []
     for item in value:
-        item_text = _normalize_text(item)
-        if item_text in {"15m", "1h", "4h"} and item_text not in normalized:
+        item_text = _normalize_horizon(item)
+        if item_text is not None and item_text not in normalized:
             normalized.append(item_text)
 
     return normalized or None
+
+
+def _normalize_horizon(value: Any) -> str | None:
+    normalized = _normalize_text(value)
+    if normalized in VALID_HORIZONS:
+        return normalized
+    return None
+
+
+def _normalize_identifier(value: Any) -> str | None:
+    normalized = _normalize_text(value)
+    if normalized is None:
+        return None
+    if normalized.lower() in INVALID_IDENTIFIER_VALUES:
+        return None
+    return normalized
 
 
 def _dedupe_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -471,6 +508,14 @@ def _candidate_sort_key(candidate: dict[str, Any]) -> tuple[str, str, str]:
 def _first_non_empty(*values: Any) -> str | None:
     for value in values:
         normalized = _normalize_text(value)
+        if normalized is not None:
+            return normalized
+    return None
+
+
+def _first_valid_identifier(*values: Any) -> str | None:
+    for value in values:
+        normalized = _normalize_identifier(value)
         if normalized is not None:
             return normalized
     return None
