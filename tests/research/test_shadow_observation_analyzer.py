@@ -152,3 +152,38 @@ def test_shadow_observation_analyzer_time_windows_and_outputs(tmp_path: Path) ->
 
     assert "shadow_observation_summary" in md_text or "Shadow Observation" in md_text
     assert "Replacement" in md_text
+
+
+def test_shadow_observation_empty_input(tmp_path: Path) -> None:
+    empty_file = tmp_path / "empty.jsonl"
+    empty_file.write_text("", encoding="utf-8")
+
+    result = run_shadow_observation_analyzer(
+        input_path=empty_file,
+        output_dir=tmp_path,
+    )
+
+    summary_path = Path(result["summary_json"])
+    md_path = Path(result["summary_md"])
+
+    assert summary_path.exists() is True
+    assert md_path.exists() is True
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+    assert result["run_count"] == 0
+    assert summary["report_type"] == "shadow_observation_summary"
+
+    overall = summary["overall"]
+    assert overall["total_runs"] == 0
+    assert overall["selected_runs"] == 0
+    assert overall["abstain_runs"] == 0
+    assert overall["blocked_runs"] == 0
+
+    assert summary["by_day"] == []
+    assert summary["recent_runs"] == []
+
+    data_quality = summary["data_quality"]
+    assert data_quality["parsed_runs"] == 0
+
+    
