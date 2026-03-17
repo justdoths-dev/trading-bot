@@ -50,6 +50,10 @@ def _run_analyzer(tmp_path: Path) -> tuple[dict, dict, str]:
     return result, summary, md_text
 
 
+# ---------------------------
+# Schema Validation Test
+# ---------------------------
+
 def test_shadow_observation_fixture_matches_writer_schema() -> None:
     assert FIXTURE_PATH.exists(), f"Missing fixture file: {FIXTURE_PATH}"
 
@@ -60,6 +64,10 @@ def test_shadow_observation_fixture_matches_writer_schema() -> None:
         validation = validate_shadow_output(record)
         assert validation.is_valid is True, validation.errors
 
+
+# ---------------------------
+# Overall Summary Test
+# ---------------------------
 
 def test_shadow_observation_analyzer_overall_summary(tmp_path: Path) -> None:
     result, summary, _ = _run_analyzer(tmp_path)
@@ -112,6 +120,10 @@ def test_shadow_observation_analyzer_overall_summary(tmp_path: Path) -> None:
     }
 
 
+# ---------------------------
+# Time Window & Output Test
+# ---------------------------
+
 def test_shadow_observation_analyzer_time_windows_and_outputs(tmp_path: Path) -> None:
     _, summary, md_text = _run_analyzer(tmp_path)
 
@@ -154,6 +166,10 @@ def test_shadow_observation_analyzer_time_windows_and_outputs(tmp_path: Path) ->
     assert "Replacement" in md_text
 
 
+# ---------------------------
+# Empty Input Test
+# ---------------------------
+
 def test_shadow_observation_empty_input(tmp_path: Path) -> None:
     empty_file = tmp_path / "empty.jsonl"
     empty_file.write_text("", encoding="utf-8")
@@ -185,5 +201,44 @@ def test_shadow_observation_empty_input(tmp_path: Path) -> None:
 
     data_quality = summary["data_quality"]
     assert data_quality["parsed_runs"] == 0
+
+
+# ---------------------------
+# Malformed JSON Test
+# ---------------------------
+
+def test_shadow_observation_malformed_json_line(tmp_path: Path) -> None:
+    malformed_file = tmp_path / "malformed.jsonl"
+
+    malformed_file.write_text(
+        (
+            '{"generated_at":"2026-03-17T06:15:00+00:00","mode":"shadow","selection_status":"abstain","reason_codes":["ALL_CANDIDATES_BLOCKED"],"candidates_considered":2,"selected_symbol":null,"selected_strategy":null,"selected_horizon":null,"selection_score":null,"selection_confidence":null,"latest_window_record_count":130,"cumulative_record_count":2420,"selection_explanation":"Abstained","ranking":[{"rank":1,"symbol":"XRPUSDT","strategy":"mean_reversion","horizon":"1h","candidate_status":"blocked","reason_codes":["CANDIDATE_STABILITY_UNSTABLE"],"selected_candidate_strength":"moderate","selected_stability_label":"unstable","drift_direction":"insufficient_history","source_preference":"n/a","edge_stability_score":3.1,"selected_visible_horizons":["1h"],"latest_sample_size":19,"cumulative_sample_size":160,"symbol_cumulative_support":220,"strategy_cumulative_support":181,"stability_gate_pass":false,"drift_blocked":false}]}\n'
+            '{"generated_at":"2026-03-17T12:00:00+00:00","mode":"shadow","selection_status":"blocked"\n'
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_shadow_observation_analyzer(
+        input_path=malformed_file,
+        output_dir=tmp_path,
+    )
+
+    summary_path = Path(result["summary_json"])
+    md_path = Path(result["summary_md"])
+
+    assert summary_path.exists() is True
+    assert md_path.exists() is True
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+    assert result["run_count"] == 1
+
+    overall = summary["overall"]
+    assert overall["total_runs"] == 1
+    assert overall["abstain_runs"] == 1
+
+    data_quality = summary["data_quality"]
+    assert data_quality["parsed_runs"] == 1
+    assert data_quality["malformed_lines"] == 1
 
     
