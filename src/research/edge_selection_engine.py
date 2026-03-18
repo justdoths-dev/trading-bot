@@ -1,9 +1,13 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import json
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
 from src.research.edge_selection_schema_validator import validate_shadow_output
+
+logger = logging.getLogger(__name__)
 
 BLOCKED_REASON_MAP = {
     "identity_incomplete": "CANDIDATE_IDENTITY_INCOMPLETE",
@@ -20,6 +24,8 @@ PENALTY_REASON_MAP = {
     "single_horizon_stability": "CANDIDATE_STABILITY_SINGLE_HORIZON_ONLY",
     "decreasing_drift": "CANDIDATE_DRIFT_DECREASING",
     "low_edge_score": "CANDIDATE_EDGE_STABILITY_SCORE_LOW",
+}
+ADVISORY_REASON_MAP = {
     "preferred_latest_sample": "CANDIDATE_LATEST_SAMPLE_PREFERRED_RANGE",
     "preferred_cumulative_sample": "CANDIDATE_CUMULATIVE_SAMPLE_PREFERRED_RANGE",
     "preferred_symbol_support": "CANDIDATE_SYMBOL_SUPPORT_PREFERRED_RANGE",
@@ -57,6 +63,11 @@ TOP_LEVEL_REASON_CODES = {
     "selected": "CLEAR_TOP_CANDIDATE",
 }
 
+VALID_CANDIDATE_STATUSES = tuple(STATUS_PRIORITY.keys())
+VALID_HORIZONS = {"15m", "1h", "4h"}
+VALID_SOURCE_PREFERENCES = {"latest", "cumulative", "n/a"}
+ELIGIBLE_CONSERVATIVE_PASS = "ELIGIBLE_CONSERVATIVE_PASS"
+
 SHADOW_MIN_EDGE_STABILITY_SCORE = 3.0
 HARD_MIN_LATEST_SAMPLE = 20
 HARD_MIN_CUMULATIVE_SAMPLE = 60
@@ -74,7 +85,7 @@ PREFERRED_STRATEGY_SUPPORT_MAX = 199
 
 
 def run_edge_selection_engine(mapped_payload: dict[str, Any]) -> dict[str, Any]:
-    """Evaluate mapped candidates conservatively and return shadow output."""
+    """Evaluate mapped candidates conservatively and return validated shadow output."""
 
     generated_at = datetime.now(UTC).isoformat()
 
@@ -126,6 +137,7 @@ def run_edge_selection_engine(mapped_payload: dict[str, Any]) -> dict[str, Any]:
     ]
 
     if not ranking:
+        explanation = "Abstained because no candidates were available from the mapper payload."
         return _finalize_output(
             _build_shadow_output(
                 generated_at=generated_at,
@@ -135,11 +147,20 @@ def run_edge_selection_engine(mapped_payload: dict[str, Any]) -> dict[str, Any]:
                 candidates_considered=0,
                 latest_window_record_count=latest_window_record_count,
                 cumulative_record_count=cumulative_record_count,
-                selection_explanation="Abstained because no candidates were available from the mapper payload.",
+                selection_explanation=explanation,
+                abstain_diagnosis=_build_abstain_diagnosis(
+                    category="no_candidates_available",
+                    summary=explanation,
+                    ranking=ranking,
+                    eligible_count=0,
+                    penalized_count=0,
+                    blocked_count=0,
+                ),
             )
         )
 
     eligible = [item for item in evaluated if item["candidate_status"] == "eligible"]
+    penalized = [item for item in evaluated if item["candidate_status"] == "penalized"]
     blocked = [item for item in evaluated if item["candidate_status"] == "blocked"]
 
     if not eligible:
@@ -163,11 +184,26 @@ def run_edge_selection_engine(mapped_payload: dict[str, Any]) -> dict[str, Any]:
                 latest_window_record_count=latest_window_record_count,
                 cumulative_record_count=cumulative_record_count,
                 selection_explanation=explanation,
+                abstain_diagnosis=_build_abstain_diagnosis(
+                    category=(
+                        "all_candidates_blocked"
+                        if reason_code == TOP_LEVEL_REASON_CODES["all_blocked"]
+                        else "no_eligible_candidates"
+                    ),
+                    summary=explanation,
+                    ranking=ranking,
+                    eligible_count=len(eligible),
+                    penalized_count=len(penalized),
+                    blocked_count=len(blocked),
+                ),
             )
         )
 
     top_candidate = eligible[0]
     if len(eligible) > 1 and _is_tied(top_candidate, eligible[1]):
+        explanation = (
+            "Abstained because the top eligible candidates were tied without sufficient distinction."
+        )
         return _finalize_output(
             _build_shadow_output(
                 generated_at=generated_at,
@@ -177,7 +213,16 @@ def run_edge_selection_engine(mapped_payload: dict[str, Any]) -> dict[str, Any]:
                 candidates_considered=len(ranking),
                 latest_window_record_count=latest_window_record_count,
                 cumulative_record_count=cumulative_record_count,
-                selection_explanation="Abstained because the top eligible candidates were tied without sufficient distinction.",
+                selection_explanation=explanation,
+                abstain_diagnosis=_build_abstain_diagnosis(
+                    category="tied_top_candidates",
+                    summary=explanation,
+                    ranking=ranking,
+                    eligible_count=len(eligible),
+                    penalized_count=len(penalized),
+                    blocked_count=len(blocked),
+                    compared_candidate=eligible[1],
+                ),
             )
         )
 
@@ -234,6 +279,8 @@ def _evaluate_candidate(candidate: Any) -> dict[str, Any]:
         stability=stability,
         drift_direction=drift_direction,
         edge_stability_score=edge_stability_score,
+    )
+    advisory_reason_codes = _advisory_reasons(
         latest_sample_size=latest_sample_size,
         cumulative_sample_size=cumulative_sample_size,
         symbol_cumulative_support=symbol_cumulative_support,
@@ -259,7 +306,18 @@ def _evaluate_candidate(candidate: Any) -> dict[str, Any]:
             selection_score=selection_score,
             candidate_status=candidate_status,
         )
-        reason_codes = penalty_reasons or ["ELIGIBLE_CONSERVATIVE_PASS"]
+        reason_codes = penalty_reasons or [ELIGIBLE_CONSERVATIVE_PASS]
+
+    gate_diagnostics = _build_gate_diagnostics(
+        candidate_status=candidate_status,
+        strength=strength,
+        stability=stability,
+        drift_direction=drift_direction,
+        edge_stability_score=edge_stability_score,
+        blocked_reasons=blocked_reasons,
+        penalty_reasons=penalty_reasons,
+        advisory_reason_codes=advisory_reason_codes,
+    )
 
     return {
         "symbol": symbol,
@@ -269,6 +327,7 @@ def _evaluate_candidate(candidate: Any) -> dict[str, Any]:
         "selection_score": selection_score,
         "selection_confidence": selection_confidence,
         "reason_codes": reason_codes,
+        "advisory_reason_codes": advisory_reason_codes,
         "selected_candidate_strength": strength,
         "selected_stability_label": stability,
         "drift_direction": drift_direction,
@@ -283,7 +342,8 @@ def _evaluate_candidate(candidate: Any) -> dict[str, Any]:
         "symbol_cumulative_support": symbol_cumulative_support,
         "strategy_cumulative_support": strategy_cumulative_support,
         "stability_gate_pass": candidate_status == "eligible",
-        "drift_blocked": "CANDIDATE_DRIFT_DECREASING" in blocked_reasons,
+        "drift_blocked": drift_direction == "decrease",
+        "gate_diagnostics": gate_diagnostics,
     }
 
 
@@ -335,10 +395,6 @@ def _penalty_reasons(
     stability: str,
     drift_direction: str,
     edge_stability_score: float | int | None,
-    latest_sample_size: int | None,
-    cumulative_sample_size: int | None,
-    symbol_cumulative_support: int | None,
-    strategy_cumulative_support: int | None,
 ) -> list[str]:
     reasons: list[str] = []
 
@@ -355,32 +411,44 @@ def _penalty_reasons(
     ):
         reasons.append(PENALTY_REASON_MAP["low_edge_score"])
 
+    return reasons
+
+
+def _advisory_reasons(
+    *,
+    latest_sample_size: int | None,
+    cumulative_sample_size: int | None,
+    symbol_cumulative_support: int | None,
+    strategy_cumulative_support: int | None,
+) -> list[str]:
+    reasons: list[str] = []
+
     if (
         latest_sample_size is not None
         and PREFERRED_LATEST_SAMPLE_MIN <= latest_sample_size <= PREFERRED_LATEST_SAMPLE_MAX
     ):
-        reasons.append(PENALTY_REASON_MAP["preferred_latest_sample"])
+        reasons.append(ADVISORY_REASON_MAP["preferred_latest_sample"])
     if (
         cumulative_sample_size is not None
         and PREFERRED_CUMULATIVE_SAMPLE_MIN
         <= cumulative_sample_size
         <= PREFERRED_CUMULATIVE_SAMPLE_MAX
     ):
-        reasons.append(PENALTY_REASON_MAP["preferred_cumulative_sample"])
+        reasons.append(ADVISORY_REASON_MAP["preferred_cumulative_sample"])
     if (
         symbol_cumulative_support is not None
         and PREFERRED_SYMBOL_SUPPORT_MIN
         <= symbol_cumulative_support
         <= PREFERRED_SYMBOL_SUPPORT_MAX
     ):
-        reasons.append(PENALTY_REASON_MAP["preferred_symbol_support"])
+        reasons.append(ADVISORY_REASON_MAP["preferred_symbol_support"])
     if (
         strategy_cumulative_support is not None
         and PREFERRED_STRATEGY_SUPPORT_MIN
         <= strategy_cumulative_support
         <= PREFERRED_STRATEGY_SUPPORT_MAX
     ):
-        reasons.append(PENALTY_REASON_MAP["preferred_strategy_support"])
+        reasons.append(ADVISORY_REASON_MAP["preferred_strategy_support"])
 
     return reasons
 
@@ -494,6 +562,7 @@ def _build_ranking_item(candidate: dict[str, Any], *, rank: int) -> dict[str, An
         "selection_score": candidate.get("selection_score"),
         "selection_confidence": candidate.get("selection_confidence"),
         "reason_codes": list(candidate["reason_codes"]),
+        "advisory_reason_codes": list(candidate.get("advisory_reason_codes") or []),
         "selected_candidate_strength": candidate["selected_candidate_strength"],
         "selected_stability_label": candidate["selected_stability_label"],
         "drift_direction": candidate["drift_direction"],
@@ -507,6 +576,7 @@ def _build_ranking_item(candidate: dict[str, Any], *, rank: int) -> dict[str, An
         "strategy_cumulative_support": candidate.get("strategy_cumulative_support"),
         "stability_gate_pass": candidate.get("stability_gate_pass"),
         "drift_blocked": candidate.get("drift_blocked"),
+        "gate_diagnostics": candidate.get("gate_diagnostics"),
     }
     return {key: value for key, value in item.items() if value is not None}
 
@@ -522,8 +592,9 @@ def _build_shadow_output(
     cumulative_record_count: int | None,
     selection_explanation: str,
     selected: dict[str, Any] | None = None,
+    abstain_diagnosis: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "generated_at": generated_at,
         "mode": "shadow",
         "selection_status": selection_status,
@@ -541,6 +612,137 @@ def _build_shadow_output(
         "selection_explanation": selection_explanation,
         "ranking": ranking,
     }
+    if abstain_diagnosis is not None:
+        payload["abstain_diagnosis"] = abstain_diagnosis
+    return payload
+
+
+def _build_gate_diagnostics(
+    *,
+    candidate_status: str,
+    strength: str,
+    stability: str,
+    drift_direction: str,
+    edge_stability_score: float | int | None,
+    blocked_reasons: list[str],
+    penalty_reasons: list[str],
+    advisory_reason_codes: list[str],
+) -> dict[str, dict[str, Any]]:
+    score_gate_reasons: list[str] = []
+    if (
+        edge_stability_score is not None
+        and float(edge_stability_score) < SHADOW_MIN_EDGE_STABILITY_SCORE
+    ):
+        score_gate_reasons.append(PENALTY_REASON_MAP["low_edge_score"])
+
+    stability_gate_reasons: list[str] = []
+    if strength == "insufficient_data":
+        stability_gate_reasons.append(BLOCKED_REASON_MAP["insufficient_data_strength"])
+    if stability == "insufficient_data":
+        stability_gate_reasons.append(BLOCKED_REASON_MAP["insufficient_data_stability"])
+    if stability == "unstable":
+        stability_gate_reasons.append(BLOCKED_REASON_MAP["unstable_stability"])
+    if stability == "single_horizon_only":
+        stability_gate_reasons.append(PENALTY_REASON_MAP["single_horizon_stability"])
+
+    drift_gate_reasons: list[str] = []
+    if drift_direction == "decrease":
+        drift_gate_reasons.append(PENALTY_REASON_MAP["decreasing_drift"])
+
+    eligibility_gate_reasons = list(blocked_reasons or penalty_reasons)
+
+    return {
+        "score_gate": {
+            "passed": len(score_gate_reasons) == 0,
+            "reason_codes": score_gate_reasons,
+        },
+        "stability_gate": {
+            "passed": len(stability_gate_reasons) == 0,
+            "reason_codes": stability_gate_reasons,
+        },
+        "drift_gate": {
+            "passed": len(drift_gate_reasons) == 0,
+            "reason_codes": drift_gate_reasons,
+        },
+        "eligibility_gate": {
+            "passed": candidate_status == "eligible",
+            "reason_codes": eligibility_gate_reasons,
+        },
+        "advisory": {
+            "reason_codes": list(advisory_reason_codes),
+        },
+    }
+
+
+def _build_abstain_diagnosis(
+    *,
+    category: str,
+    summary: str,
+    ranking: list[dict[str, Any]],
+    eligible_count: int,
+    penalized_count: int,
+    blocked_count: int,
+    compared_candidate: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    diagnosis = {
+        "category": category,
+        "summary": summary,
+        "eligible_candidate_count": eligible_count,
+        "penalized_candidate_count": penalized_count,
+        "blocked_candidate_count": blocked_count,
+        "top_candidate": _build_diagnostic_candidate_snapshot(ranking[0] if ranking else None),
+    }
+    if compared_candidate is not None:
+        diagnosis["compared_candidate"] = _build_diagnostic_candidate_snapshot(
+            compared_candidate
+        )
+    return diagnosis
+
+
+def _build_diagnostic_candidate_snapshot(
+    candidate: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(candidate, dict):
+        return None
+
+    return {
+        "symbol": candidate.get("symbol"),
+        "strategy": candidate.get("strategy"),
+        "horizon": candidate.get("horizon"),
+        "candidate_status": candidate.get("candidate_status"),
+        "selection_score": candidate.get("selection_score"),
+        "selection_confidence": candidate.get("selection_confidence"),
+        "reason_codes": list(candidate.get("reason_codes") or []),
+        "advisory_reason_codes": list(candidate.get("advisory_reason_codes") or []),
+        "gate_diagnostics": candidate.get("gate_diagnostics") or {},
+    }
+
+
+def _build_shadow_log_context(payload: dict[str, Any]) -> dict[str, Any]:
+    ranking = payload.get("ranking") if isinstance(payload.get("ranking"), list) else []
+    ranking_items = [item for item in ranking if isinstance(item, dict)]
+    top_candidate = ranking_items[0] if ranking_items else None
+    candidate_status_counts = {
+        status: sum(
+            1 for item in ranking_items if item.get("candidate_status") == status
+        )
+        for status in VALID_CANDIDATE_STATUSES
+    }
+
+    context = {
+        "selection_status": payload.get("selection_status"),
+        "reason_codes": list(payload.get("reason_codes") or []),
+        "selection_explanation": payload.get("selection_explanation"),
+        "candidates_considered": payload.get("candidates_considered"),
+        "candidate_status_counts": candidate_status_counts,
+        "top_candidate": _build_diagnostic_candidate_snapshot(top_candidate),
+    }
+
+    abstain_diagnosis = payload.get("abstain_diagnosis")
+    if isinstance(abstain_diagnosis, dict):
+        context["abstain_diagnosis"] = abstain_diagnosis
+
+    return context
 
 
 def _finalize_output(payload: dict[str, Any]) -> dict[str, Any]:
@@ -548,6 +750,15 @@ def _finalize_output(payload: dict[str, Any]) -> dict[str, Any]:
     if not validation_result.is_valid:
         joined = "; ".join(validation_result.errors)
         raise ValueError(f"Generated invalid shadow output: {joined}")
+
+    logger.info(
+        "Shadow selection decision: %s",
+        json.dumps(
+            _build_shadow_log_context(payload),
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+    )
     return payload
 
 
@@ -581,14 +792,14 @@ def _normalize_drift_direction(value: Any) -> str:
 
 def _normalize_source_preference(value: Any) -> str | None:
     normalized = _normalize_text(value)
-    if normalized in {"latest", "cumulative", "n/a"}:
+    if normalized in VALID_SOURCE_PREFERENCES:
         return normalized
     return None
 
 
 def _normalize_horizon(value: Any) -> str | None:
     normalized = _normalize_text(value)
-    if normalized in {"15m", "1h", "4h"}:
+    if normalized in VALID_HORIZONS:
         return normalized
     return None
 
