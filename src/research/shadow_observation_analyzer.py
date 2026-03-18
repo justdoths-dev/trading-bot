@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import json
@@ -26,6 +26,7 @@ DEFAULT_OUTPUT_DIR = (
 VALID_SELECTION_STATUSES = ("selected", "abstain", "blocked")
 VALID_CANDIDATE_STATUSES = ("eligible", "penalized", "blocked")
 VALID_HORIZONS = ("15m", "1h", "4h")
+VALID_GATE_NAMES = ("score_gate", "stability_gate", "drift_gate", "eligibility_gate", "advisory")
 
 RECENT_RUN_LIMIT = 10
 MAX_MALFORMED_LINE_NUMBERS = 20
@@ -114,6 +115,10 @@ def _load_shadow_runs(path: Path) -> dict[str, Any]:
         "invalid_selection_status_runs": 0,
         "invalid_candidate_status_items": 0,
         "invalid_horizon_values": 0,
+        "runs_with_abstain_diagnosis": 0,
+        "runs_with_top_candidate_gate_diagnostics": 0,
+        "ranking_items_with_gate_diagnostics": 0,
+        "ranking_items_with_advisory_reason_codes": 0,
     }
 
     if not path.exists():
@@ -193,9 +198,17 @@ def _normalize_run(
         if not isinstance(item, dict):
             data_quality["ranking_items_non_object"] += 1
             continue
-        ranking_items.append(_normalize_ranking_item(item, data_quality))
+        normalized_item = _normalize_ranking_item(item, data_quality)
+        ranking_items.append(normalized_item)
 
     top_candidate = ranking_items[0] if ranking_items else None
+
+    abstain_diagnosis = _normalize_abstain_diagnosis(payload.get("abstain_diagnosis"))
+    if abstain_diagnosis is not None:
+        data_quality["runs_with_abstain_diagnosis"] += 1
+
+    if isinstance(top_candidate, dict) and top_candidate.get("gate_diagnostics"):
+        data_quality["runs_with_top_candidate_gate_diagnostics"] += 1
 
     return {
         "line_number": line_number,
@@ -220,6 +233,7 @@ def _normalize_run(
         ),
         "ranking_items": ranking_items,
         "top_candidate": top_candidate,
+        "abstain_diagnosis": abstain_diagnosis,
     }
 
 
@@ -243,6 +257,14 @@ def _normalize_ranking_item(
         )
         data_quality["invalid_horizon_values"] += invalid_visible_horizon_count
 
+    advisory_reason_codes = _normalize_string_list(item.get("advisory_reason_codes"))
+    if advisory_reason_codes:
+        data_quality["ranking_items_with_advisory_reason_codes"] += 1
+
+    gate_diagnostics = _normalize_gate_diagnostics(item.get("gate_diagnostics"))
+    if gate_diagnostics:
+        data_quality["ranking_items_with_gate_diagnostics"] += 1
+
     return {
         "rank": _to_positive_int(item.get("rank")),
         "symbol": _clean_text(item.get("symbol")),
@@ -252,6 +274,7 @@ def _normalize_ranking_item(
         "selection_score": _to_float(item.get("selection_score")),
         "selection_confidence": _to_float(item.get("selection_confidence")),
         "reason_codes": _normalize_string_list(item.get("reason_codes")),
+        "advisory_reason_codes": advisory_reason_codes,
         "latest_sample_size": _to_non_negative_int(item.get("latest_sample_size")),
         "cumulative_sample_size": _to_non_negative_int(item.get("cumulative_sample_size")),
         "symbol_cumulative_support": _to_non_negative_int(
@@ -275,6 +298,7 @@ def _normalize_ranking_item(
         "drift_direction": _clean_text(item.get("drift_direction")),
         "score_delta": _to_float(item.get("score_delta")),
         "drift_blocked": _to_bool(item.get("drift_blocked")),
+        "gate_diagnostics": gate_diagnostics,
     }
 
 
@@ -287,6 +311,7 @@ def _build_overall_summary(runs: list[dict[str, Any]]) -> dict[str, Any]:
     )
     run_reason_code_counter = Counter()
     ranking_reason_code_counter = Counter()
+    ranking_advisory_reason_code_counter = Counter()
     candidate_status_counter = Counter()
     candidate_strength_counter = Counter()
     stability_label_counter = Counter()
@@ -296,6 +321,10 @@ def _build_overall_summary(runs: list[dict[str, Any]]) -> dict[str, Any]:
     selected_horizon_counter = Counter()
     source_preference_counter = Counter()
     visible_horizon_counter = Counter()
+    abstain_category_counter = Counter()
+    abstain_top_reason_counter = Counter()
+    gate_failure_counter = Counter()
+    gate_reason_code_counter = Counter()
 
     candidates_considered_values: list[float] = []
     ranking_depth_values: list[float] = []
@@ -311,6 +340,14 @@ def _build_overall_summary(runs: list[dict[str, Any]]) -> dict[str, Any]:
 
     for run in runs:
         run_reason_code_counter.update(run.get("reason_codes") or [])
+
+        abstain_diagnosis = run.get("abstain_diagnosis") or {}
+        abstain_category = abstain_diagnosis.get("category")
+        if abstain_category is not None:
+            abstain_category_counter[abstain_category] += 1
+
+        abstain_top_candidate = abstain_diagnosis.get("top_candidate") or {}
+        abstain_top_reason_counter.update(abstain_top_candidate.get("reason_codes") or [])
 
         _append_numeric_if_present(
             candidates_considered_values,
@@ -346,6 +383,9 @@ def _build_overall_summary(runs: list[dict[str, Any]]) -> dict[str, Any]:
         for item in run.get("ranking_items") or []:
             total_ranking_items += 1
             ranking_reason_code_counter.update(item.get("reason_codes") or [])
+            ranking_advisory_reason_code_counter.update(
+                item.get("advisory_reason_codes") or []
+            )
 
             candidate_status = item.get("candidate_status")
             if candidate_status is not None:
@@ -375,6 +415,18 @@ def _build_overall_summary(runs: list[dict[str, Any]]) -> dict[str, Any]:
                 drift_blocked_known += 1
                 if drift_blocked:
                     drift_blocked_true += 1
+
+            gate_diagnostics = item.get("gate_diagnostics") or {}
+            for gate_name, gate_value in gate_diagnostics.items():
+                if gate_name not in VALID_GATE_NAMES or not isinstance(gate_value, dict):
+                    continue
+
+                if gate_name != "advisory":
+                    passed = gate_value.get("passed")
+                    if passed is False:
+                        gate_failure_counter[gate_name] += 1
+
+                gate_reason_code_counter.update(gate_value.get("reason_codes") or [])
 
             _append_numeric_if_present(
                 support_values["latest_sample_size"],
@@ -432,6 +484,10 @@ def _build_overall_summary(runs: list[dict[str, Any]]) -> dict[str, Any]:
             ranking_reason_code_counter,
             total_ranking_items,
         ),
+        "ranking_advisory_reason_code_frequencies": _build_frequency_rows(
+            ranking_advisory_reason_code_counter,
+            total_ranking_items,
+        ),
         "candidate_status_frequencies": _build_frequency_rows(
             candidate_status_counter,
             total_ranking_items,
@@ -469,6 +525,22 @@ def _build_overall_summary(runs: list[dict[str, Any]]) -> dict[str, Any]:
             selected_horizon_counter,
             selected_runs,
         ),
+        "abstain_diagnosis_category_frequencies": _build_frequency_rows(
+            abstain_category_counter,
+            abstain_runs,
+        ),
+        "abstain_top_candidate_reason_code_frequencies": _build_frequency_rows(
+            abstain_top_reason_counter,
+            abstain_runs,
+        ),
+        "gate_failure_frequencies": _build_frequency_rows(
+            gate_failure_counter,
+            total_ranking_items,
+        ),
+        "gate_reason_code_frequencies": _build_frequency_rows(
+            gate_reason_code_counter,
+            total_ranking_items,
+        ),
         "secondary_metrics": {
             "selection_score": _build_number_summary(selection_score_values),
             "selection_confidence": _build_number_summary(selection_confidence_values),
@@ -496,12 +568,15 @@ def _build_support_metrics(values: dict[str, list[float]]) -> dict[str, Any]:
 def _build_top_candidate_summary(runs: list[dict[str, Any]]) -> dict[str, Any]:
     identity_counter = Counter()
     reason_counter = Counter()
+    advisory_reason_counter = Counter()
     status_counter = Counter()
     strength_counter = Counter()
     stability_counter = Counter()
     drift_counter = Counter()
     source_preference_counter = Counter()
     visible_horizon_counter = Counter()
+    gate_failure_counter = Counter()
+    gate_reason_code_counter = Counter()
 
     top_identities: list[tuple[str, str, str] | None] = []
 
@@ -517,6 +592,7 @@ def _build_top_candidate_summary(runs: list[dict[str, Any]]) -> dict[str, Any]:
             continue
 
         reason_counter.update(top_candidate.get("reason_codes") or [])
+        advisory_reason_counter.update(top_candidate.get("advisory_reason_codes") or [])
 
         candidate_status = top_candidate.get("candidate_status")
         if candidate_status is not None:
@@ -540,6 +616,18 @@ def _build_top_candidate_summary(runs: list[dict[str, Any]]) -> dict[str, Any]:
 
         for horizon in top_candidate.get("selected_visible_horizons") or []:
             visible_horizon_counter[horizon] += 1
+
+        gate_diagnostics = top_candidate.get("gate_diagnostics") or {}
+        for gate_name, gate_value in gate_diagnostics.items():
+            if gate_name not in VALID_GATE_NAMES or not isinstance(gate_value, dict):
+                continue
+
+            if gate_name != "advisory":
+                passed = gate_value.get("passed")
+                if passed is False:
+                    gate_failure_counter[gate_name] += 1
+
+            gate_reason_code_counter.update(gate_value.get("reason_codes") or [])
 
     runs_with_top_candidate = sum(1 for identity in top_identities if identity is not None)
     comparable_transitions = 0
@@ -583,6 +671,10 @@ def _build_top_candidate_summary(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "comparable_transitions": comparable_transitions,
         "replacement_rate": _ratio(replacement_count, comparable_transitions),
         "reason_code_frequencies": _build_frequency_rows(reason_counter, runs_with_top_candidate),
+        "advisory_reason_code_frequencies": _build_frequency_rows(
+            advisory_reason_counter,
+            runs_with_top_candidate,
+        ),
         "candidate_status_frequencies": _build_frequency_rows(
             status_counter,
             runs_with_top_candidate,
@@ -605,6 +697,14 @@ def _build_top_candidate_summary(runs: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "visible_horizon_distribution": _build_frequency_rows(
             visible_horizon_counter,
+            runs_with_top_candidate,
+        ),
+        "gate_failure_frequencies": _build_frequency_rows(
+            gate_failure_counter,
+            runs_with_top_candidate,
+        ),
+        "gate_reason_code_frequencies": _build_frequency_rows(
+            gate_reason_code_counter,
             runs_with_top_candidate,
         ),
         "consecutive_appearance_summary": {
@@ -817,6 +917,12 @@ def _build_by_day_summary(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for run in day_runs
             if run.get("selection_status") is not None
         )
+        abstain_category_counter = Counter(
+            run["abstain_diagnosis"]["category"]
+            for run in day_runs
+            if isinstance(run.get("abstain_diagnosis"), dict)
+            and run["abstain_diagnosis"].get("category") is not None
+        )
         top_identities = [_candidate_identity(run.get("top_candidate")) for run in day_runs]
         comparable_transitions = 0
         replacement_count = 0
@@ -858,6 +964,10 @@ def _build_by_day_summary(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "unique_top_ranked_candidates": len(
                     {identity for identity in top_identities if identity is not None}
                 ),
+                "abstain_diagnosis_category_frequencies": _build_frequency_rows(
+                    abstain_category_counter,
+                    selection_status_counter.get("abstain", 0),
+                ),
             }
         )
 
@@ -872,6 +982,7 @@ def _build_recent_runs_summary(
 
     for run in runs[-limit:]:
         top_candidate = run.get("top_candidate") or {}
+        abstain_diagnosis = run.get("abstain_diagnosis") or {}
         rows.append(
             {
                 "line_number": run["line_number"],
@@ -883,6 +994,13 @@ def _build_recent_runs_summary(
                 "selected_symbol": run.get("selected_symbol"),
                 "selected_strategy": run.get("selected_strategy"),
                 "selected_horizon": run.get("selected_horizon"),
+                "selection_explanation": run.get("selection_explanation"),
+                "abstain_diagnosis": {
+                    "category": abstain_diagnosis.get("category"),
+                    "summary": abstain_diagnosis.get("summary"),
+                }
+                if abstain_diagnosis
+                else None,
                 "top_candidate": {
                     "symbol": top_candidate.get("symbol"),
                     "strategy": top_candidate.get("strategy"),
@@ -900,6 +1018,8 @@ def _build_recent_runs_summary(
                     "drift_direction": top_candidate.get("drift_direction"),
                     "drift_blocked": top_candidate.get("drift_blocked"),
                     "reason_codes": top_candidate.get("reason_codes") or [],
+                    "advisory_reason_codes": top_candidate.get("advisory_reason_codes") or [],
+                    "gate_diagnostics": top_candidate.get("gate_diagnostics") or {},
                 },
             }
         )
@@ -1161,6 +1281,59 @@ def _append_limited(values: list[int], value: int, limit: int) -> None:
         values.append(value)
 
 
+def _normalize_abstain_diagnosis(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+
+    normalized = {
+        "category": _clean_text(value.get("category")),
+        "summary": _clean_text(value.get("summary")),
+        "eligible_candidate_count": _to_non_negative_int(value.get("eligible_candidate_count")),
+        "penalized_candidate_count": _to_non_negative_int(value.get("penalized_candidate_count")),
+        "blocked_candidate_count": _to_non_negative_int(value.get("blocked_candidate_count")),
+        "top_candidate": _normalize_diagnostic_candidate(value.get("top_candidate")),
+        "compared_candidate": _normalize_diagnostic_candidate(value.get("compared_candidate")),
+    }
+    return normalized
+
+
+def _normalize_gate_diagnostics(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+
+    normalized: dict[str, Any] = {}
+    for gate_name in VALID_GATE_NAMES:
+        gate_value = _normalize_gate_result(value.get(gate_name))
+        if gate_value is not None:
+            normalized[gate_name] = gate_value
+    return normalized
+
+
+def _normalize_gate_result(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        "passed": _to_bool(value.get("passed")),
+        "reason_codes": _normalize_string_list(value.get("reason_codes")),
+    }
+
+
+def _normalize_diagnostic_candidate(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        "symbol": _clean_text(value.get("symbol")),
+        "strategy": _clean_text(value.get("strategy")),
+        "horizon": _normalize_horizon(value.get("horizon")),
+        "candidate_status": _normalize_candidate_status(value.get("candidate_status")),
+        "selection_score": _to_float(value.get("selection_score")),
+        "selection_confidence": _to_float(value.get("selection_confidence")),
+        "reason_codes": _normalize_string_list(value.get("reason_codes")),
+        "advisory_reason_codes": _normalize_string_list(value.get("advisory_reason_codes")),
+        "gate_diagnostics": _normalize_gate_diagnostics(value.get("gate_diagnostics")),
+    }
+
+
 def _normalize_selection_status(value: Any) -> str | None:
     text = _clean_text(value)
     if text in VALID_SELECTION_STATUSES:
@@ -1377,6 +1550,21 @@ def _render_markdown(summary: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
+            "## Abstain Diagnosis",
+            "",
+            "| Category | Count | Rate |",
+            "| --- | ---: | ---: |",
+        ]
+    )
+
+    for row in (overall.get("abstain_diagnosis_category_frequencies", []) or [])[:10]:
+        lines.append(
+            f"| {row.get('value') or 'n/a'} | {row.get('count', 0)} | {_format_pct(row.get('rate'))} |"
+        )
+
+    lines.extend(
+        [
+            "",
             "## Top-Ranked Candidate Behavior",
             "",
             f"- Runs with top candidate: {top_ranked.get('runs_with_top_candidate', 0)}",
@@ -1484,6 +1672,9 @@ def _render_markdown(summary: dict[str, Any]) -> str:
             f"- Invalid horizon values: {data_quality.get('invalid_horizon_values', 0)}",
             f"- Runs without timestamp: {data_quality.get('runs_without_timestamp', 0)}",
             f"- Runs missing selection status: {data_quality.get('runs_missing_selection_status', 0)}",
+            f"- Runs with abstain diagnosis: {data_quality.get('runs_with_abstain_diagnosis', 0)}",
+            f"- Ranking items with gate diagnostics: {data_quality.get('ranking_items_with_gate_diagnostics', 0)}",
+            f"- Ranking items with advisory reason codes: {data_quality.get('ranking_items_with_advisory_reason_codes', 0)}",
             "",
             "## Unavailable Metrics",
             "",
@@ -1555,3 +1746,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
