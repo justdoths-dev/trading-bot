@@ -18,6 +18,7 @@ DEFAULT_SOURCE_PREFERENCE = "n/a"
 DEFAULT_STABILITY_LABEL = "insufficient_data"
 DEFAULT_STRENGTH_LABEL = "insufficient_data"
 SUPPRESSION_MESSAGE = "Research observation suppressed: no meaningful change detected."
+DEFAULT_MAX_REASON_CODES = 3
 
 
 class ResearchObservationalNotifier:
@@ -219,6 +220,232 @@ def build_observational_message(
         lines.extend(snapshot_lines)
 
     return "\n".join(lines).strip()
+
+
+def build_shadow_selection_message(shadow_selection: dict[str, Any] | None) -> str:
+    payload = shadow_selection if isinstance(shadow_selection, dict) else {}
+
+    selection_status = str(payload.get("selection_status", "unknown"))
+    reason_codes = _normalize_reason_codes(payload.get("reason_codes"))
+    explanation = _first_non_empty(payload.get("selection_explanation"), "n/a")
+    generated_at = _first_non_empty(payload.get("generated_at"), "n/a")
+    candidates_considered = _coerce_optional_int(payload.get("candidates_considered"))
+    ranking = payload.get("ranking") if isinstance(payload.get("ranking"), list) else []
+    abstain_diagnosis = (
+        payload.get("abstain_diagnosis")
+        if isinstance(payload.get("abstain_diagnosis"), dict)
+        else {}
+    )
+
+    top_candidate = _select_shadow_top_candidate(payload, abstain_diagnosis, ranking)
+    compared_candidate = abstain_diagnosis.get("compared_candidate")
+    selected_candidate = _build_selected_candidate_snapshot(payload)
+
+    lines = ["Shadow Selection", f"Generated: {generated_at}"]
+    lines.append(f"Decision: {selection_status} ({_format_reason_codes(reason_codes)})")
+    lines.append(f"Summary: {explanation}")
+
+    if candidates_considered is not None:
+        lines.append(f"Candidates considered: {candidates_considered}")
+    lines.append(f"Ranking depth: {len([item for item in ranking if isinstance(item, dict)])}")
+
+    diagnosis_category = _first_non_empty(abstain_diagnosis.get("category"))
+    diagnosis_summary = _first_non_empty(abstain_diagnosis.get("summary"))
+    if diagnosis_category:
+        lines.append(f"Diagnosis category: {diagnosis_category}")
+    if diagnosis_summary:
+        lines.append(f"Diagnosis: {diagnosis_summary}")
+
+    diagnosis_counts_line = _format_abstain_diagnosis_counts(abstain_diagnosis)
+    if diagnosis_counts_line:
+        lines.append(diagnosis_counts_line)
+
+    if selected_candidate is not None:
+        lines.append("")
+        lines.append("Selected Candidate")
+        lines.extend(_build_candidate_detail_lines(selected_candidate, include_rank=False))
+
+    if top_candidate:
+        lines.append("")
+        lines.append("Top Candidate")
+        lines.extend(_build_candidate_detail_lines(top_candidate, include_rank=True))
+
+    if isinstance(compared_candidate, dict) and compared_candidate:
+        lines.append(
+            f"Tie Peer: {_format_candidate_identity(compared_candidate)} "
+            f"[{compared_candidate.get('candidate_status', 'n/a')}]"
+        )
+        lines.append("")
+        lines.append("Compared Candidate")
+        lines.extend(_build_candidate_detail_lines(compared_candidate, include_rank=False))
+
+    return "\n".join(lines).strip()
+
+
+def _select_shadow_top_candidate(
+    payload: dict[str, Any],
+    abstain_diagnosis: dict[str, Any],
+    ranking: list[Any],
+) -> dict[str, Any]:
+    diagnosis_top = abstain_diagnosis.get("top_candidate")
+    if isinstance(diagnosis_top, dict) and diagnosis_top:
+        return diagnosis_top
+
+    ranking_top = ranking[0] if ranking and isinstance(ranking[0], dict) else None
+    if isinstance(ranking_top, dict) and ranking_top:
+        return ranking_top
+
+    selected_candidate = _build_selected_candidate_snapshot(payload)
+    return selected_candidate or {}
+
+
+def _build_selected_candidate_snapshot(payload: dict[str, Any]) -> dict[str, Any] | None:
+    symbol = _first_non_empty(payload.get("selected_symbol"))
+    strategy = _first_non_empty(payload.get("selected_strategy"))
+    horizon = _first_non_empty(payload.get("selected_horizon"))
+
+    if not symbol and not strategy and not horizon:
+        return None
+
+    return {
+        "symbol": symbol or "n/a",
+        "strategy": strategy or "n/a",
+        "horizon": horizon or "n/a",
+        "candidate_status": "selected",
+        "selection_score": payload.get("selection_score"),
+        "selection_confidence": payload.get("selection_confidence"),
+        "reason_codes": _normalize_reason_codes(payload.get("reason_codes")),
+        "advisory_reason_codes": [],
+        "gate_diagnostics": {},
+    }
+
+
+def _build_candidate_detail_lines(
+    candidate: dict[str, Any],
+    *,
+    include_rank: bool,
+) -> list[str]:
+    lines: list[str] = []
+
+    if include_rank and candidate.get("rank") is not None:
+        lines.append(f"- rank: {candidate.get('rank')}")
+
+    lines.append(f"- identity: {_format_candidate_identity(candidate)}")
+    lines.append(f"- status: {candidate.get('candidate_status', 'n/a')}")
+
+    score_text = _format_optional_number(candidate.get("selection_score"))
+    confidence_text = _format_optional_number(candidate.get("selection_confidence"))
+    lines.append(f"- score/confidence: {score_text} / {confidence_text}")
+
+    strength = _first_non_empty(candidate.get("selected_candidate_strength"))
+    stability = _first_non_empty(candidate.get("selected_stability_label"))
+    drift_direction = _first_non_empty(candidate.get("drift_direction"))
+    source_preference = _first_non_empty(candidate.get("source_preference"))
+    visible_horizons = _format_horizon_text(candidate.get("selected_visible_horizons"))
+
+    descriptor_parts: list[str] = []
+    if strength:
+        descriptor_parts.append(f"strength={strength}")
+    if stability:
+        descriptor_parts.append(f"stability={stability}")
+    if drift_direction:
+        descriptor_parts.append(f"drift={drift_direction}")
+    if source_preference:
+        descriptor_parts.append(f"source={source_preference}")
+    if visible_horizons != "none":
+        descriptor_parts.append(f"horizons={visible_horizons}")
+
+    if descriptor_parts:
+        lines.append("- " + ", ".join(descriptor_parts))
+
+    main_reasons = _normalize_reason_codes(candidate.get("reason_codes"))
+    lines.append(f"- main reasons: {_format_reason_codes(main_reasons)}")
+
+    advisory_reasons = _normalize_reason_codes(candidate.get("advisory_reason_codes"))
+    if advisory_reasons:
+        lines.append(f"- advisory: {_format_reason_codes(advisory_reasons)}")
+
+    gate_summary = _format_gate_summary(candidate.get("gate_diagnostics"))
+    if gate_summary:
+        lines.append(f"- gates: {gate_summary}")
+
+    return lines
+
+
+def _format_abstain_diagnosis_counts(abstain_diagnosis: dict[str, Any]) -> str | None:
+    eligible_count = _coerce_optional_int(abstain_diagnosis.get("eligible_candidate_count"))
+    penalized_count = _coerce_optional_int(
+        abstain_diagnosis.get("penalized_candidate_count")
+    )
+    blocked_count = _coerce_optional_int(abstain_diagnosis.get("blocked_candidate_count"))
+
+    if eligible_count is None and penalized_count is None and blocked_count is None:
+        return None
+
+    return (
+        "Diagnosis counts: "
+        f"eligible={eligible_count if eligible_count is not None else 'n/a'}, "
+        f"penalized={penalized_count if penalized_count is not None else 'n/a'}, "
+        f"blocked={blocked_count if blocked_count is not None else 'n/a'}"
+    )
+
+
+def _format_candidate_identity(candidate: dict[str, Any]) -> str:
+    symbol = str(candidate.get("symbol", "n/a"))
+    strategy = str(candidate.get("strategy", "n/a"))
+    horizon = str(candidate.get("horizon", "n/a"))
+    return f"{symbol} / {strategy} / {horizon}"
+
+
+def _normalize_reason_codes(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _format_reason_codes(reason_codes: list[str], limit: int = DEFAULT_MAX_REASON_CODES) -> str:
+    if not reason_codes:
+        return "n/a"
+    return ", ".join(reason_codes[: max(limit, 0)])
+
+
+def _format_gate_summary(value: Any) -> str:
+    diagnostics = value if isinstance(value, dict) else {}
+    if not diagnostics:
+        return ""
+
+    parts: list[str] = []
+    for gate_name in (
+        "score_gate",
+        "stability_gate",
+        "drift_gate",
+        "eligibility_gate",
+        "advisory",
+    ):
+        gate = diagnostics.get(gate_name) if isinstance(diagnostics.get(gate_name), dict) else {}
+        if not gate:
+            continue
+
+        if gate_name == "advisory":
+            reasons = _format_reason_codes(
+                _normalize_reason_codes(gate.get("reason_codes"))
+            )
+            parts.append(f"advisory=({reasons})")
+            continue
+
+        passed = gate.get("passed")
+        status = "pass" if passed is True else "fail" if passed is False else "n/a"
+        reasons = _format_reason_codes(_normalize_reason_codes(gate.get("reason_codes")))
+        parts.append(f"{gate_name.replace('_gate', '')}={status} ({reasons})")
+
+    return " | ".join(parts)
+
+
+def _format_optional_number(value: Any) -> str:
+    parsed = _coerce_optional_float(value)
+    if parsed is None:
+        return "n/a"
+    return _format_number(parsed)
 
 
 def maybe_send_notification(
