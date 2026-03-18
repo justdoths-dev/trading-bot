@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from src.research.edge_selection_engine import run_edge_selection_engine
 from src.research.edge_selection_schema_validator import validate_shadow_output
@@ -254,6 +254,108 @@ def test_invalid_mapper_payload_returns_blocked_status() -> None:
     assert result["ranking"] == []
 
 
+def test_abstain_result_includes_structured_diagnostics() -> None:
+    payload = _base_mapper_payload(
+        candidates=[
+            {
+                "symbol": "SOLUSDT",
+                "strategy": "breakout",
+                "horizon": "15m",
+                "selected_candidate_strength": "weak",
+                "selected_stability_label": "single_horizon_only",
+                "drift_direction": "decrease",
+                "edge_stability_score": 1.2,
+                "latest_sample_size": 45,
+                "cumulative_sample_size": 130,
+                "symbol_cumulative_support": 260,
+                "strategy_cumulative_support": 210,
+            }
+        ]
+    )
+
+    result = run_edge_selection_engine(payload)
+
+    assert result["selection_status"] == "abstain"
+    assert result["abstain_diagnosis"]["category"] == "no_eligible_candidates"
+    assert result["abstain_diagnosis"]["top_candidate"]["symbol"] == "SOLUSDT"
+    gate_diagnostics = result["ranking"][0]["gate_diagnostics"]
+    assert gate_diagnostics["score_gate"]["passed"] is False
+    assert gate_diagnostics["stability_gate"]["passed"] is False
+    assert gate_diagnostics["drift_gate"]["passed"] is False
+    assert gate_diagnostics["eligibility_gate"]["passed"] is False
+    assert "CANDIDATE_EDGE_STABILITY_SCORE_LOW" in gate_diagnostics["score_gate"]["reason_codes"]
+    assert "CANDIDATE_STABILITY_SINGLE_HORIZON_ONLY" in gate_diagnostics["stability_gate"]["reason_codes"]
+    assert "CANDIDATE_DRIFT_DECREASING" in gate_diagnostics["drift_gate"]["reason_codes"]
+
+
+def test_selected_result_keeps_gate_diagnostics_for_top_candidate() -> None:
+    payload = _base_mapper_payload(
+        candidates=[
+            {
+                "symbol": "BTCUSDT",
+                "strategy": "swing",
+                "horizon": "4h",
+                "selected_candidate_strength": "strong",
+                "selected_stability_label": "multi_horizon_confirmed",
+                "drift_direction": "increase",
+                "edge_stability_score": 4.5,
+                "score_delta": 0.3,
+                "latest_sample_size": 55,
+                "cumulative_sample_size": 220,
+                "symbol_cumulative_support": 400,
+                "strategy_cumulative_support": 320,
+            }
+        ]
+    )
+
+    result = run_edge_selection_engine(payload)
+
+    assert result["selection_status"] == "selected"
+    gate_diagnostics = result["ranking"][0]["gate_diagnostics"]
+    assert gate_diagnostics["score_gate"]["passed"] is True
+    assert gate_diagnostics["stability_gate"]["passed"] is True
+    assert gate_diagnostics["drift_gate"]["passed"] is True
+    assert gate_diagnostics["eligibility_gate"]["passed"] is True
+
+
+def test_tied_abstain_includes_compared_candidate_diagnosis() -> None:
+    payload = _base_mapper_payload(
+        candidates=[
+            {
+                "symbol": "ADAUSDT",
+                "strategy": "swing",
+                "horizon": "1h",
+                "selected_candidate_strength": "strong",
+                "selected_stability_label": "multi_horizon_confirmed",
+                "drift_direction": "flat",
+                "edge_stability_score": 3.5,
+                "latest_sample_size": 50,
+                "cumulative_sample_size": 180,
+                "symbol_cumulative_support": 240,
+                "strategy_cumulative_support": 220,
+            },
+            {
+                "symbol": "BNBUSDT",
+                "strategy": "trend",
+                "horizon": "1h",
+                "selected_candidate_strength": "strong",
+                "selected_stability_label": "multi_horizon_confirmed",
+                "drift_direction": "flat",
+                "edge_stability_score": 3.5,
+                "latest_sample_size": 50,
+                "cumulative_sample_size": 180,
+                "symbol_cumulative_support": 240,
+                "strategy_cumulative_support": 220,
+            },
+        ]
+    )
+
+    result = run_edge_selection_engine(payload)
+
+    assert result["selection_status"] == "abstain"
+    assert result["abstain_diagnosis"]["category"] == "tied_top_candidates"
+    assert result["abstain_diagnosis"]["compared_candidate"]["symbol"] == "BNBUSDT"
+
 def _base_mapper_payload(
     *,
     ok: bool = True,
@@ -271,3 +373,4 @@ def _base_mapper_payload(
         "warnings": warnings or [],
         "history_line_count": 5,
     }
+
