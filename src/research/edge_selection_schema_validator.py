@@ -18,6 +18,19 @@ VALID_STABILITY_LABELS = {
 }
 VALID_DRIFT_DIRECTIONS = {"increase", "decrease", "flat", "insufficient_history"}
 VALID_SOURCE_PREFERENCES = {"latest", "cumulative", "n/a"}
+VALID_GATE_DIAGNOSTICS_KEYS = {
+    "score_gate",
+    "stability_gate",
+    "drift_gate",
+    "eligibility_gate",
+    "advisory",
+}
+VALID_BOOLEAN_GATE_KEYS = {
+    "score_gate",
+    "stability_gate",
+    "drift_gate",
+    "eligibility_gate",
+}
 
 REQUIRED_REPORT_PATHS = (
     Path("latest") / "summary.json",
@@ -48,6 +61,14 @@ def validate_shadow_output(payload: dict[str, Any]) -> ValidationResult:
     if not isinstance(payload, dict):
         result.add_error("Shadow output payload must be a dict.")
         return result
+
+    generated_at = payload.get("generated_at")
+    if generated_at is not None:
+        _validate_optional_iso_datetime(
+            generated_at,
+            field_name="generated_at",
+            result=result,
+        )
 
     mode = payload.get("mode")
     if mode != "shadow":
@@ -91,6 +112,27 @@ def validate_shadow_output(payload: dict[str, Any]) -> ValidationResult:
         result=result,
     )
 
+    _validate_optional_non_negative_int(
+        payload.get("candidates_considered"),
+        field_name="candidates_considered",
+        result=result,
+    )
+    _validate_optional_non_negative_int(
+        payload.get("latest_window_record_count"),
+        field_name="latest_window_record_count",
+        result=result,
+    )
+    _validate_optional_non_negative_int(
+        payload.get("cumulative_record_count"),
+        field_name="cumulative_record_count",
+        result=result,
+    )
+    _validate_optional_non_empty_string(
+        payload.get("selection_explanation"),
+        field_name="selection_explanation",
+        result=result,
+    )
+
     ranking = payload.get("ranking")
     if not isinstance(ranking, list):
         result.add_error("ranking must be a list.")
@@ -106,6 +148,21 @@ def validate_shadow_output(payload: dict[str, Any]) -> ValidationResult:
             item=item,
             index=index,
             seen_ranks=seen_ranks,
+            result=result,
+        )
+
+    candidates_considered = payload.get("candidates_considered")
+    if isinstance(candidates_considered, int) and not isinstance(candidates_considered, bool):
+        if candidates_considered < len(ranking_items):
+            result.add_error(
+                "candidates_considered must be greater than or equal to the number of ranking items."
+            )
+
+    abstain_diagnosis = payload.get("abstain_diagnosis")
+    if abstain_diagnosis is not None:
+        _validate_abstain_diagnosis(
+            abstain_diagnosis,
+            ranking_items=ranking_items,
             result=result,
         )
 
@@ -129,6 +186,35 @@ def validate_shadow_output(payload: dict[str, Any]) -> ValidationResult:
                 result.add_error(
                     f"{field_name} must be present when selection_status is 'selected'."
                 )
+
+        if not ranking_items:
+            result.add_error(
+                "ranking must contain at least one item when selection_status is 'selected'."
+            )
+
+        selected_symbol = payload.get("selected_symbol")
+        selected_strategy = payload.get("selected_strategy")
+        selected_horizon = payload.get("selected_horizon")
+        matched_selected = any(
+            item.get("symbol") == selected_symbol
+            and item.get("strategy") == selected_strategy
+            and item.get("horizon") == selected_horizon
+            for item in ranking_items
+        )
+        if ranking_items and not matched_selected:
+            result.add_error(
+                "selected_symbol/selected_strategy/selected_horizon must match a ranking item."
+            )
+
+        if abstain_diagnosis is not None:
+            result.add_error(
+                "abstain_diagnosis must be omitted when selection_status is 'selected'."
+            )
+
+    if selection_status == "blocked" and abstain_diagnosis is not None:
+        result.add_error(
+            "abstain_diagnosis must be omitted when selection_status is 'blocked'."
+        )
 
     return result
 
@@ -250,10 +336,36 @@ def _validate_ranking_item(
         result=result,
     )
 
+    advisory_reason_codes = item.get("advisory_reason_codes")
+    if advisory_reason_codes is not None:
+        _validate_reason_codes(
+            advisory_reason_codes,
+            field_name=f"{prefix}.advisory_reason_codes",
+            result=result,
+        )
+
     if candidate_status == "blocked":
         if not isinstance(reason_codes, list) or len(reason_codes) == 0:
             result.add_error(
                 f"{prefix}.reason_codes must contain at least one entry when candidate_status is 'blocked'."
+            )
+        if item.get("selection_score") is not None:
+            result.add_error(
+                f"{prefix}.selection_score must be None when candidate_status is 'blocked'."
+            )
+        if item.get("selection_confidence") is not None:
+            result.add_error(
+                f"{prefix}.selection_confidence must be None when candidate_status is 'blocked'."
+            )
+
+    if candidate_status in {"eligible", "penalized"}:
+        if item.get("selection_score") is None:
+            result.add_error(
+                f"{prefix}.selection_score must be present when candidate_status is '{candidate_status}'."
+            )
+        if item.get("selection_confidence") is None:
+            result.add_error(
+                f"{prefix}.selection_confidence must be present when candidate_status is '{candidate_status}'."
             )
 
     selected_visible_horizons = item.get("selected_visible_horizons")
@@ -331,6 +443,174 @@ def _validate_ranking_item(
     if drift_blocked is not None and not isinstance(drift_blocked, bool):
         result.add_error(f"{prefix}.drift_blocked must be a boolean or None.")
 
+    gate_diagnostics = item.get("gate_diagnostics")
+    if gate_diagnostics is not None:
+        _validate_gate_diagnostics(
+            gate_diagnostics,
+            field_name=f"{prefix}.gate_diagnostics",
+            result=result,
+        )
+
+
+def _validate_abstain_diagnosis(
+    value: Any,
+    *,
+    ranking_items: list[dict[str, Any]],
+    result: ValidationResult,
+) -> None:
+    if not isinstance(value, dict):
+        result.add_error("abstain_diagnosis must be a dict.")
+        return
+
+    _validate_required_non_empty_string(
+        value.get("category"),
+        field_name="abstain_diagnosis.category",
+        result=result,
+    )
+    _validate_required_non_empty_string(
+        value.get("summary"),
+        field_name="abstain_diagnosis.summary",
+        result=result,
+    )
+    _validate_required_non_negative_int(
+        value.get("eligible_candidate_count"),
+        field_name="abstain_diagnosis.eligible_candidate_count",
+        result=result,
+    )
+    _validate_required_non_negative_int(
+        value.get("penalized_candidate_count"),
+        field_name="abstain_diagnosis.penalized_candidate_count",
+        result=result,
+    )
+    _validate_required_non_negative_int(
+        value.get("blocked_candidate_count"),
+        field_name="abstain_diagnosis.blocked_candidate_count",
+        result=result,
+    )
+
+    eligible_count = value.get("eligible_candidate_count")
+    penalized_count = value.get("penalized_candidate_count")
+    blocked_count = value.get("blocked_candidate_count")
+    if all(
+        isinstance(v, int) and not isinstance(v, bool)
+        for v in (eligible_count, penalized_count, blocked_count)
+    ):
+        total_count = eligible_count + penalized_count + blocked_count
+        if total_count > len(ranking_items):
+            result.add_error(
+                "abstain_diagnosis candidate counts must not exceed the number of ranking items."
+            )
+
+    _validate_optional_candidate_snapshot(
+        value.get("top_candidate"),
+        field_name="abstain_diagnosis.top_candidate",
+        result=result,
+    )
+    _validate_optional_candidate_snapshot(
+        value.get("compared_candidate"),
+        field_name="abstain_diagnosis.compared_candidate",
+        result=result,
+    )
+
+
+def _validate_optional_candidate_snapshot(
+    value: Any,
+    *,
+    field_name: str,
+    result: ValidationResult,
+) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        result.add_error(f"{field_name} must be a dict or None.")
+        return
+
+    _validate_optional_non_empty_string(
+        value.get("symbol"),
+        field_name=f"{field_name}.symbol",
+        result=result,
+    )
+    _validate_optional_non_empty_string(
+        value.get("strategy"),
+        field_name=f"{field_name}.strategy",
+        result=result,
+    )
+
+    horizon = value.get("horizon")
+    if horizon is not None and horizon not in VALID_HORIZONS:
+        result.add_error(f"{field_name}.horizon must be one of: 15m, 1h, 4h.")
+
+    candidate_status = value.get("candidate_status")
+    if candidate_status is not None and candidate_status not in VALID_CANDIDATE_STATUSES:
+        result.add_error(
+            f"{field_name}.candidate_status must be one of: eligible, penalized, blocked."
+        )
+
+    _validate_optional_number(
+        value.get("selection_score"),
+        field_name=f"{field_name}.selection_score",
+        result=result,
+    )
+    _validate_optional_probability(
+        value.get("selection_confidence"),
+        field_name=f"{field_name}.selection_confidence",
+        result=result,
+    )
+    _validate_reason_codes(
+        value.get("reason_codes"),
+        field_name=f"{field_name}.reason_codes",
+        result=result,
+    )
+
+    advisory_reason_codes = value.get("advisory_reason_codes")
+    if advisory_reason_codes is not None:
+        _validate_reason_codes(
+            advisory_reason_codes,
+            field_name=f"{field_name}.advisory_reason_codes",
+            result=result,
+        )
+
+    gate_diagnostics = value.get("gate_diagnostics")
+    if gate_diagnostics is not None:
+        _validate_gate_diagnostics(
+            gate_diagnostics,
+            field_name=f"{field_name}.gate_diagnostics",
+            result=result,
+        )
+
+
+def _validate_gate_diagnostics(
+    value: Any,
+    *,
+    field_name: str,
+    result: ValidationResult,
+) -> None:
+    if not isinstance(value, dict):
+        result.add_error(f"{field_name} must be a dict.")
+        return
+
+    for key, gate_value in value.items():
+        if key not in VALID_GATE_DIAGNOSTICS_KEYS:
+            result.add_error(
+                f"{field_name} contains unsupported key '{key}'."
+            )
+            continue
+
+        if not isinstance(gate_value, dict):
+            result.add_error(f"{field_name}.{key} must be a dict.")
+            continue
+
+        if key in VALID_BOOLEAN_GATE_KEYS:
+            passed = gate_value.get("passed")
+            if not isinstance(passed, bool):
+                result.add_error(f"{field_name}.{key}.passed must be a boolean.")
+
+        _validate_reason_codes(
+            gate_value.get("reason_codes"),
+            field_name=f"{field_name}.{key}.reason_codes",
+            result=result,
+        )
+
 
 def _validate_reason_codes(
     value: Any,
@@ -393,6 +673,7 @@ def _validate_optional_history_file(
         result.add_warning(f"Optional upstream history file is stale: {path}")
 
     non_empty_line_count = 0
+    line_number = 0
     try:
         with path.open("r", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
@@ -417,6 +698,36 @@ def _validate_optional_history_file(
 def _is_stale(path: Path, stale_cutoff: datetime) -> bool:
     modified_at = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
     return modified_at < stale_cutoff
+
+
+def _validate_optional_iso_datetime(
+    value: Any,
+    *,
+    field_name: str,
+    result: ValidationResult,
+) -> None:
+    if not isinstance(value, str) or not value.strip():
+        result.add_error(f"{field_name} must be a non-empty ISO datetime string.")
+        return
+
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        result.add_error(f"{field_name} must be a valid ISO datetime string.")
+        return
+
+    if parsed.tzinfo is None:
+        result.add_error(f"{field_name} must include timezone information.")
+
+
+def _validate_required_non_empty_string(
+    value: Any,
+    *,
+    field_name: str,
+    result: ValidationResult,
+) -> None:
+    if not isinstance(value, str) or not value.strip():
+        result.add_error(f"{field_name} must be a non-empty string.")
 
 
 def _validate_optional_non_empty_string(
@@ -456,6 +767,16 @@ def _validate_optional_probability(
         return
     if not 0.0 <= float(value) <= 1.0:
         result.add_error(f"{field_name} must be between 0 and 1.")
+
+
+def _validate_required_non_negative_int(
+    value: Any,
+    *,
+    field_name: str,
+    result: ValidationResult,
+) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        result.add_error(f"{field_name} must be a non-negative integer.")
 
 
 def _validate_optional_non_negative_int(
