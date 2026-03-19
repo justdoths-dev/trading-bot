@@ -62,6 +62,8 @@ def map_edge_selection_input(
             errors=list(validation_result.errors),
             warnings=list(validation_result.warnings),
             history_line_count=None,
+            candidate_seed_count=0,
+            candidate_seed_diagnostics={},
         )
 
     try:
@@ -82,6 +84,8 @@ def map_edge_selection_input(
             errors=[str(exc)],
             warnings=list(validation_result.warnings),
             history_line_count=None,
+            candidate_seed_count=0,
+            candidate_seed_diagnostics={},
         )
 
     latest_window_record_count = _extract_latest_record_count(
@@ -94,6 +98,8 @@ def map_edge_selection_input(
     drift_lookup = _build_drift_lookup(score_drift_summary)
 
     seeds = _build_candidate_seeds(comparison_summary)
+    candidate_seed_diagnostics = _build_candidate_seed_diagnostics(comparison_summary, seeds)
+
     candidates = [
         _build_candidate(
             seed,
@@ -115,6 +121,8 @@ def map_edge_selection_input(
         errors=[],
         warnings=list(validation_result.warnings),
         history_line_count=history_line_count,
+        candidate_seed_count=len(seeds),
+        candidate_seed_diagnostics=candidate_seed_diagnostics,
     )
 
 
@@ -128,6 +136,8 @@ def _build_result(
     errors: list[str],
     warnings: list[str],
     history_line_count: int | None,
+    candidate_seed_count: int,
+    candidate_seed_diagnostics: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "ok": ok,
@@ -138,6 +148,8 @@ def _build_result(
         "errors": errors,
         "warnings": warnings,
         "history_line_count": history_line_count,
+        "candidate_seed_count": candidate_seed_count,
+        "candidate_seed_diagnostics": candidate_seed_diagnostics,
     }
 
 
@@ -229,6 +241,109 @@ def _build_candidate_seeds(comparison_summary: dict[str, Any]) -> list[dict[str,
         )
 
     return seeds
+
+
+def _build_candidate_seed_diagnostics(
+    comparison_summary: dict[str, Any],
+    seeds: list[dict[str, Any]],
+) -> dict[str, Any]:
+    comparison = _coerce_dict(comparison_summary.get("edge_candidates_comparison"))
+    horizon_diagnostics: list[dict[str, Any]] = []
+    horizons_with_seed: list[str] = []
+    horizons_without_seed: list[str] = []
+    all_horizons_insufficient_data = True
+
+    for horizon in sorted(comparison):
+        if horizon not in VALID_HORIZONS:
+            continue
+
+        horizon_payload = _coerce_dict(comparison.get(horizon))
+        if not horizon_payload:
+            horizons_without_seed.append(horizon)
+            horizon_diagnostics.append(
+                {
+                    "horizon": horizon,
+                    "seed_generated": False,
+                    "blocker_reasons": ["missing_horizon_payload"],
+                }
+            )
+            all_horizons_insufficient_data = False
+            continue
+
+        latest_strength = _normalize_text(horizon_payload.get("latest_candidate_strength"))
+        cumulative_strength = _normalize_text(
+            horizon_payload.get("cumulative_candidate_strength")
+        )
+
+        latest_symbol = _normalize_text(horizon_payload.get("latest_top_symbol_group"))
+        cumulative_symbol = _normalize_text(
+            horizon_payload.get("cumulative_top_symbol_group")
+        )
+        latest_strategy = _normalize_text(horizon_payload.get("latest_top_strategy_group"))
+        cumulative_strategy = _normalize_text(
+            horizon_payload.get("cumulative_top_strategy_group")
+        )
+        latest_alignment_state = _normalize_text(
+            horizon_payload.get("latest_top_alignment_state_group")
+        )
+        cumulative_alignment_state = _normalize_text(
+            horizon_payload.get("cumulative_top_alignment_state_group")
+        )
+
+        valid_symbol = _first_valid_identifier(latest_symbol, cumulative_symbol)
+        valid_strategy = _first_valid_identifier(latest_strategy, cumulative_strategy)
+
+        seed_generated = any(
+            seed.get("horizon") == horizon
+            for seed in seeds
+        )
+
+        if seed_generated:
+            horizons_with_seed.append(horizon)
+        else:
+            horizons_without_seed.append(horizon)
+
+        latest_is_insufficient = latest_strength == "insufficient_data"
+        cumulative_is_insufficient = cumulative_strength == "insufficient_data"
+        if not (latest_is_insufficient and cumulative_is_insufficient):
+            all_horizons_insufficient_data = False
+
+        blocker_reasons: list[str] = []
+        if latest_is_insufficient and cumulative_is_insufficient:
+            blocker_reasons.append("candidate_strength_insufficient_data")
+        if valid_symbol is None:
+            blocker_reasons.append("no_valid_symbol_group")
+        if valid_strategy is None:
+            blocker_reasons.append("no_valid_strategy_group")
+        if valid_symbol is None and valid_strategy is None:
+            blocker_reasons.append("no_valid_symbol_or_strategy_group")
+
+        horizon_diagnostics.append(
+            {
+                "horizon": horizon,
+                "seed_generated": seed_generated,
+                "latest_candidate_strength": latest_strength or "n/a",
+                "cumulative_candidate_strength": cumulative_strength or "n/a",
+                "latest_top_symbol_group": latest_symbol or "n/a",
+                "cumulative_top_symbol_group": cumulative_symbol or "n/a",
+                "latest_top_strategy_group": latest_strategy or "n/a",
+                "cumulative_top_strategy_group": cumulative_strategy or "n/a",
+                "latest_top_alignment_state_group": latest_alignment_state or "n/a",
+                "cumulative_top_alignment_state_group": cumulative_alignment_state or "n/a",
+                "has_valid_symbol_group": valid_symbol is not None,
+                "has_valid_strategy_group": valid_strategy is not None,
+                "blocker_reasons": blocker_reasons,
+            }
+        )
+
+    return {
+        "total_horizons_evaluated": len(horizon_diagnostics),
+        "candidate_seed_count": len(seeds),
+        "horizons_with_seed": horizons_with_seed,
+        "horizons_without_seed": horizons_without_seed,
+        "all_horizons_insufficient_data": all_horizons_insufficient_data,
+        "horizon_diagnostics": horizon_diagnostics,
+    }
 
 
 def _build_score_lookup(

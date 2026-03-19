@@ -113,6 +113,14 @@ def run_edge_selection_engine(mapped_payload: dict[str, Any]) -> dict[str, Any]:
     cumulative_record_count = _coerce_non_negative_int(
         mapped_payload.get("cumulative_record_count")
     )
+    candidate_seed_count = _coerce_non_negative_int(
+        mapped_payload.get("candidate_seed_count")
+    )
+    candidate_seed_diagnostics = (
+        mapped_payload.get("candidate_seed_diagnostics")
+        if isinstance(mapped_payload.get("candidate_seed_diagnostics"), dict)
+        else {}
+    )
 
     if not is_ok or (isinstance(upstream_errors, list) and upstream_errors):
         return _finalize_output(
@@ -155,6 +163,8 @@ def run_edge_selection_engine(mapped_payload: dict[str, Any]) -> dict[str, Any]:
                     eligible_count=0,
                     penalized_count=0,
                     blocked_count=0,
+                    candidate_seed_count=candidate_seed_count,
+                    candidate_seed_diagnostics=candidate_seed_diagnostics,
                 ),
             )
         )
@@ -195,6 +205,8 @@ def run_edge_selection_engine(mapped_payload: dict[str, Any]) -> dict[str, Any]:
                     eligible_count=len(eligible),
                     penalized_count=len(penalized),
                     blocked_count=len(blocked),
+                    candidate_seed_count=candidate_seed_count,
+                    candidate_seed_diagnostics=candidate_seed_diagnostics,
                 ),
             )
         )
@@ -222,6 +234,8 @@ def run_edge_selection_engine(mapped_payload: dict[str, Any]) -> dict[str, Any]:
                     penalized_count=len(penalized),
                     blocked_count=len(blocked),
                     compared_candidate=eligible[1],
+                    candidate_seed_count=candidate_seed_count,
+                    candidate_seed_diagnostics=candidate_seed_diagnostics,
                 ),
             )
         )
@@ -683,6 +697,8 @@ def _build_abstain_diagnosis(
     penalized_count: int,
     blocked_count: int,
     compared_candidate: dict[str, Any] | None = None,
+    candidate_seed_count: int | None = None,
+    candidate_seed_diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     diagnosis = {
         "category": category,
@@ -692,10 +708,18 @@ def _build_abstain_diagnosis(
         "blocked_candidate_count": blocked_count,
         "top_candidate": _build_diagnostic_candidate_snapshot(ranking[0] if ranking else None),
     }
+
+    if candidate_seed_count is not None:
+        diagnosis["candidate_seed_count"] = candidate_seed_count
+
+    if isinstance(candidate_seed_diagnostics, dict) and candidate_seed_diagnostics:
+        diagnosis["candidate_seed_diagnostics"] = candidate_seed_diagnostics
+
     if compared_candidate is not None:
         diagnosis["compared_candidate"] = _build_diagnostic_candidate_snapshot(
             compared_candidate
         )
+
     return diagnosis
 
 

@@ -260,6 +260,10 @@ def build_shadow_selection_message(shadow_selection: dict[str, Any] | None) -> s
     if diagnosis_counts_line:
         lines.append(diagnosis_counts_line)
 
+    seed_summary_lines = _build_seed_diagnostics_summary_lines(abstain_diagnosis)
+    if seed_summary_lines:
+        lines.extend(seed_summary_lines)
+
     if selected_candidate is not None:
         lines.append("")
         lines.append("Selected Candidate")
@@ -387,6 +391,77 @@ def _format_abstain_diagnosis_counts(abstain_diagnosis: dict[str, Any]) -> str |
         f"eligible={eligible_count if eligible_count is not None else 'n/a'}, "
         f"penalized={penalized_count if penalized_count is not None else 'n/a'}, "
         f"blocked={blocked_count if blocked_count is not None else 'n/a'}"
+    )
+
+
+def _build_seed_diagnostics_summary_lines(abstain_diagnosis: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+
+    candidate_seed_count = _coerce_optional_int(abstain_diagnosis.get("candidate_seed_count"))
+    candidate_seed_diagnostics = (
+        abstain_diagnosis.get("candidate_seed_diagnostics")
+        if isinstance(abstain_diagnosis.get("candidate_seed_diagnostics"), dict)
+        else {}
+    )
+
+    if candidate_seed_count is not None:
+        lines.append(f"Candidate seeds: {candidate_seed_count}")
+
+    if not candidate_seed_diagnostics:
+        return lines
+
+    total_horizons_evaluated = _coerce_optional_int(
+        candidate_seed_diagnostics.get("total_horizons_evaluated")
+    )
+    if total_horizons_evaluated is not None:
+        lines.append(f"Horizons evaluated: {total_horizons_evaluated}")
+
+    horizons_with_seed = _format_horizon_text(
+        candidate_seed_diagnostics.get("horizons_with_seed")
+    )
+    horizons_without_seed = _format_horizon_text(
+        candidate_seed_diagnostics.get("horizons_without_seed")
+    )
+    lines.append(f"Horizons with seeds: {horizons_with_seed}")
+    lines.append(f"Horizons without seeds: {horizons_without_seed}")
+
+    if candidate_seed_diagnostics.get("all_horizons_insufficient_data") is True:
+        lines.append("Seed diagnosis: all tracked horizons remained at insufficient_data.")
+
+    horizon_diagnostics = candidate_seed_diagnostics.get("horizon_diagnostics")
+    if isinstance(horizon_diagnostics, list) and horizon_diagnostics:
+        lines.append("Seed blockers")
+        for item in horizon_diagnostics:
+            if not isinstance(item, dict):
+                continue
+            lines.append(_format_seed_diagnostic_line(item))
+
+    return lines
+
+
+def _format_seed_diagnostic_line(item: dict[str, Any]) -> str:
+    horizon = _first_non_empty(item.get("horizon"), "n/a")
+    seed_generated = item.get("seed_generated") is True
+    latest_strength = _first_non_empty(item.get("latest_candidate_strength"), "n/a")
+    cumulative_strength = _first_non_empty(item.get("cumulative_candidate_strength"), "n/a")
+    latest_symbol = _first_non_empty(item.get("latest_top_symbol_group"), "n/a")
+    cumulative_symbol = _first_non_empty(item.get("cumulative_top_symbol_group"), "n/a")
+    latest_strategy = _first_non_empty(item.get("latest_top_strategy_group"), "n/a")
+    cumulative_strategy = _first_non_empty(item.get("cumulative_top_strategy_group"), "n/a")
+
+    blocker_reasons = item.get("blocker_reasons")
+    blocker_text = _format_reason_codes(
+        [str(reason).strip() for reason in blocker_reasons]
+        if isinstance(blocker_reasons, list)
+        else []
+    )
+
+    return (
+        f"- {horizon}: seed_generated={'yes' if seed_generated else 'no'}, "
+        f"strength={latest_strength}/{cumulative_strength}, "
+        f"symbol={latest_symbol}/{cumulative_symbol}, "
+        f"strategy={latest_strategy}/{cumulative_strategy}, "
+        f"blockers={blocker_text}"
     )
 
 
