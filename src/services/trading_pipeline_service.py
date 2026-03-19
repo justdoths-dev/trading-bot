@@ -5,6 +5,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from src.notifications.shadow_event_notifier import ShadowEventNotifier
 from src.research.edge_selection_engine import run_edge_selection_engine
 from src.research.edge_selection_input_mapper import map_edge_selection_input
 from src.research.edge_selection_shadow_writer import write_edge_selection_shadow_output
@@ -54,7 +55,7 @@ class TradingPipelineService:
                 with self._lock:
                     self._last_ai_results[symbol] = ai_result
 
-        self._run_shadow_observation(symbol=symbol)
+        self._run_shadow_observation(trigger_symbol=symbol)
 
         logger.debug(
             "TradingPipelineService.run completed: symbol=%s run_ai=%s",
@@ -86,12 +87,17 @@ class TradingPipelineService:
 
         return pipeline
 
-    def _run_shadow_observation(self, symbol: str) -> None:
+    def _run_shadow_observation(self, trigger_symbol: str) -> None:
         """
         Produce a shadow edge-selection output after a trading cycle.
 
         This path must never interrupt the main trading pipeline. Any exception is
         logged and suppressed so runtime trading behavior remains unchanged.
+
+        Note:
+        The shadow observation is generated from the research reports directory,
+        so `trigger_symbol` identifies the trading cycle that triggered this work,
+        not necessarily the symbol identity of the resulting shadow selection.
         """
         try:
             mapped_payload = map_edge_selection_input(RESEARCH_REPORTS_DIR)
@@ -99,14 +105,45 @@ class TradingPipelineService:
             output_path = write_edge_selection_shadow_output(shadow_result)
 
             logger.info(
-                "Shadow observation output written: symbol=%s status=%s candidates=%s path=%s",
-                symbol,
+                "Shadow observation output written: trigger_symbol=%s status=%s candidates=%s path=%s",
+                trigger_symbol,
                 shadow_result.get("selection_status"),
                 shadow_result.get("candidates_considered"),
                 output_path,
             )
+
+            self._notify_shadow_events(
+                trigger_symbol=trigger_symbol,
+                shadow_output_path=output_path,
+            )
         except Exception:
             logger.exception(
-                "Shadow observation generation failed after trading cycle: symbol=%s",
-                symbol,
+                "Shadow observation generation failed after trading cycle: trigger_symbol=%s",
+                trigger_symbol,
+            )
+
+    def _notify_shadow_events(
+        self,
+        *,
+        trigger_symbol: str,
+        shadow_output_path: Path,
+    ) -> None:
+        """Attempt observer-only shadow event notifications without affecting runtime."""
+        try:
+            result = ShadowEventNotifier(
+                shadow_output_path=shadow_output_path
+            ).notify_latest_events()
+
+            if result.get("event_count", 0) > 0 or result.get("failure_count", 0) > 0:
+                logger.info(
+                    "Shadow event notification result: trigger_symbol=%s events=%s sent=%s failures=%s",
+                    trigger_symbol,
+                    result.get("event_count", 0),
+                    result.get("sent_count", 0),
+                    result.get("failure_count", 0),
+                )
+        except Exception:
+            logger.exception(
+                "Shadow event notification failed after trading cycle: trigger_symbol=%s",
+                trigger_symbol,
             )
