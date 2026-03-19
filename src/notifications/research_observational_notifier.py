@@ -1,4 +1,4 @@
-"""Research-only observational notifier for score drift and score snapshots."""
+"""Research-only observational notifier for score drift, score snapshots, and shadow selection."""
 
 from __future__ import annotations
 
@@ -9,6 +9,10 @@ import os
 from pathlib import Path
 from typing import Any
 
+from src.research.edge_selection_shadow_writer import (
+    DEFAULT_SHADOW_OUTPUT_PATH,
+    read_edge_selection_shadow_outputs,
+)
 from src.telegram.telegram_sender import TelegramSender
 
 logger = logging.getLogger(__name__)
@@ -182,6 +186,7 @@ def build_observational_message(
     score_drift_summary: dict[str, Any] | None,
     edge_scores_summary: dict[str, Any] | None,
     comparison_summary: dict[str, Any] | None = None,
+    shadow_selection: dict[str, Any] | None = None,
 ) -> str:
     changed_groups = extract_changed_groups(score_drift_summary)
     drift_summary = _safe_dict((score_drift_summary or {}).get("drift_summary"))
@@ -190,6 +195,7 @@ def build_observational_message(
         (score_drift_summary or {}).get("generated_at"),
         (edge_scores_summary or {}).get("generated_at"),
         (comparison_summary or {}).get("generated_at"),
+        (shadow_selection or {}).get("generated_at"),
         "n/a",
     )
 
@@ -219,11 +225,18 @@ def build_observational_message(
     else:
         lines.extend(snapshot_lines)
 
+    shadow_selection_message = build_shadow_selection_message(shadow_selection)
+    if shadow_selection_message:
+        lines.append("")
+        lines.append(shadow_selection_message)
+
     return "\n".join(lines).strip()
 
 
 def build_shadow_selection_message(shadow_selection: dict[str, Any] | None) -> str:
     payload = shadow_selection if isinstance(shadow_selection, dict) else {}
+    if not payload:
+        return ""
 
     selection_status = str(payload.get("selection_status", "unknown"))
     reason_codes = _normalize_reason_codes(payload.get("reason_codes"))
@@ -564,6 +577,7 @@ def run_research_observational_notifier(
     score_drift_summary_path: Path | None = None,
     edge_scores_summary_path: Path | None = None,
     comparison_summary_path: Path | None = None,
+    shadow_output_path: Path | None = None,
     dry_run: bool = False,
     always_send: bool = False,
     stdout: bool = False,
@@ -577,10 +591,12 @@ def run_research_observational_notifier(
     resolved_comparison_summary_path = (
         comparison_summary_path or _default_comparison_summary_path()
     )
+    resolved_shadow_output_path = shadow_output_path or DEFAULT_SHADOW_OUTPUT_PATH
 
     score_drift_summary = load_json(resolved_score_drift_summary_path)
     edge_scores_summary = load_json(resolved_edge_scores_summary_path)
     comparison_summary = load_json(resolved_comparison_summary_path)
+    shadow_selection = load_latest_shadow_selection(resolved_shadow_output_path)
 
     meaningful_change = detect_meaningful_change(score_drift_summary)
     changed_groups = extract_changed_groups(score_drift_summary)
@@ -588,6 +604,7 @@ def run_research_observational_notifier(
         score_drift_summary=score_drift_summary,
         edge_scores_summary=edge_scores_summary,
         comparison_summary=comparison_summary,
+        shadow_selection=shadow_selection,
     )
     delivery = maybe_send_notification(
         message,
@@ -601,14 +618,30 @@ def run_research_observational_notifier(
         "score_drift_summary_path": str(resolved_score_drift_summary_path),
         "edge_scores_summary_path": str(resolved_edge_scores_summary_path),
         "comparison_summary_path": str(resolved_comparison_summary_path),
+        "shadow_output_path": str(resolved_shadow_output_path),
         "score_drift_summary_found": score_drift_summary is not None,
         "edge_scores_summary_found": edge_scores_summary is not None,
         "comparison_summary_found": comparison_summary is not None,
+        "shadow_selection_found": shadow_selection is not None,
         "meaningful_change": meaningful_change,
         "changed_group_count": len(changed_groups),
         "message": message,
         **delivery,
     }
+
+
+def load_latest_shadow_selection(path: Path) -> dict[str, Any] | None:
+    try:
+        records = read_edge_selection_shadow_outputs(path)
+    except Exception:
+        logger.exception("Failed to read latest shadow selection from %s", path)
+        return None
+
+    if not records:
+        return None
+
+    latest = records[-1]
+    return latest if isinstance(latest, dict) else None
 
 
 def _iter_drift_groups(score_drift_summary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -889,6 +922,12 @@ def _parse_args() -> argparse.Namespace:
         help="Optional path to comparison summary.json",
     )
     parser.add_argument(
+        "--shadow-output",
+        type=Path,
+        default=DEFAULT_SHADOW_OUTPUT_PATH,
+        help="Path to shadow selection JSONL output",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Build the observational message without sending it",
@@ -912,6 +951,7 @@ def main() -> None:
         score_drift_summary_path=args.score_drift_summary,
         edge_scores_summary_path=args.edge_scores_summary,
         comparison_summary_path=args.comparison_summary,
+        shadow_output_path=args.shadow_output,
         dry_run=args.dry_run,
         always_send=args.always_send,
         stdout=args.stdout,
