@@ -133,6 +133,8 @@ def run_edge_selection_engine(mapped_payload: dict[str, Any]) -> dict[str, Any]:
                 latest_window_record_count=latest_window_record_count,
                 cumulative_record_count=cumulative_record_count,
                 selection_explanation="Blocked because mapped input reported upstream validation errors.",
+                candidate_seed_count=candidate_seed_count,
+                candidate_seed_diagnostics=candidate_seed_diagnostics,
             )
         )
 
@@ -166,6 +168,8 @@ def run_edge_selection_engine(mapped_payload: dict[str, Any]) -> dict[str, Any]:
                     candidate_seed_count=candidate_seed_count,
                     candidate_seed_diagnostics=candidate_seed_diagnostics,
                 ),
+                candidate_seed_count=candidate_seed_count,
+                candidate_seed_diagnostics=candidate_seed_diagnostics,
             )
         )
 
@@ -208,6 +212,8 @@ def run_edge_selection_engine(mapped_payload: dict[str, Any]) -> dict[str, Any]:
                     candidate_seed_count=candidate_seed_count,
                     candidate_seed_diagnostics=candidate_seed_diagnostics,
                 ),
+                candidate_seed_count=candidate_seed_count,
+                candidate_seed_diagnostics=candidate_seed_diagnostics,
             )
         )
 
@@ -237,6 +243,8 @@ def run_edge_selection_engine(mapped_payload: dict[str, Any]) -> dict[str, Any]:
                     candidate_seed_count=candidate_seed_count,
                     candidate_seed_diagnostics=candidate_seed_diagnostics,
                 ),
+                candidate_seed_count=candidate_seed_count,
+                candidate_seed_diagnostics=candidate_seed_diagnostics,
             )
         )
 
@@ -251,6 +259,8 @@ def run_edge_selection_engine(mapped_payload: dict[str, Any]) -> dict[str, Any]:
             cumulative_record_count=cumulative_record_count,
             selected=top_candidate,
             selection_explanation="Selected the clear top candidate under conservative shadow-only rules.",
+            candidate_seed_count=candidate_seed_count,
+            candidate_seed_diagnostics=candidate_seed_diagnostics,
         )
     )
 
@@ -607,6 +617,8 @@ def _build_shadow_output(
     selection_explanation: str,
     selected: dict[str, Any] | None = None,
     abstain_diagnosis: dict[str, Any] | None = None,
+    candidate_seed_count: int | None = None,
+    candidate_seed_diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = {
         "generated_at": generated_at,
@@ -628,6 +640,10 @@ def _build_shadow_output(
     }
     if abstain_diagnosis is not None:
         payload["abstain_diagnosis"] = abstain_diagnosis
+    if candidate_seed_count is not None:
+        payload["candidate_seed_count"] = candidate_seed_count
+    if isinstance(candidate_seed_diagnostics, dict) and candidate_seed_diagnostics:
+        payload["candidate_seed_diagnostics"] = candidate_seed_diagnostics
     return payload
 
 
@@ -708,18 +724,14 @@ def _build_abstain_diagnosis(
         "blocked_candidate_count": blocked_count,
         "top_candidate": _build_diagnostic_candidate_snapshot(ranking[0] if ranking else None),
     }
-
     if candidate_seed_count is not None:
         diagnosis["candidate_seed_count"] = candidate_seed_count
-
     if isinstance(candidate_seed_diagnostics, dict) and candidate_seed_diagnostics:
         diagnosis["candidate_seed_diagnostics"] = candidate_seed_diagnostics
-
     if compared_candidate is not None:
         diagnosis["compared_candidate"] = _build_diagnostic_candidate_snapshot(
             compared_candidate
         )
-
     return diagnosis
 
 
@@ -761,6 +773,11 @@ def _build_shadow_log_context(payload: dict[str, Any]) -> dict[str, Any]:
         "candidate_status_counts": candidate_status_counts,
         "top_candidate": _build_diagnostic_candidate_snapshot(top_candidate),
     }
+
+    if payload.get("candidate_seed_count") is not None:
+        context["candidate_seed_count"] = payload.get("candidate_seed_count")
+    if isinstance(payload.get("candidate_seed_diagnostics"), dict):
+        context["candidate_seed_diagnostics"] = payload.get("candidate_seed_diagnostics")
 
     abstain_diagnosis = payload.get("abstain_diagnosis")
     if isinstance(abstain_diagnosis, dict):
