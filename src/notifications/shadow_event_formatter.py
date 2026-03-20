@@ -19,62 +19,111 @@ def format_shadow_event(event: ShadowEvent) -> str:
     }[event.event_type]
 
     lines: list[str] = [header]
-    lines.append(f"Generated: {event.generated_at or 'n/a'}")
-    lines.append(f"Selection status: {event.selection_status or 'n/a'}")
+    candidate = event.current_candidate or event.previous_candidate
+    lines.append(f"Candidate: {_format_identity(candidate) if candidate else 'n/a'}")
+    lines.append(f"Status: {event.selection_status or 'n/a'}")
 
     if event.current_candidate is not None:
-        lines.append(f"Candidate: {_format_identity(event.current_candidate)}")
         lines.append(
-            "Current: "
-            f"score={_format_number(event.current_candidate.selection_score)}, "
-            f"confidence={_format_number(event.current_candidate.selection_confidence)}, "
-            f"stability={event.current_candidate.selected_stability_label or 'n/a'}, "
-            f"delta={_format_signed_number(event.current_candidate.score_delta)}, "
-            f"source={event.current_candidate.source_preference or 'n/a'}"
+            "Score: "
+            f"{_format_number(event.current_candidate.selection_score)} | "
+            f"Confidence: {_format_number(event.current_candidate.selection_confidence)}"
+        )
+        lines.append(
+            "Stability: "
+            f"{event.current_candidate.selected_stability_label or 'n/a'}"
         )
 
-        current_reason_codes = _format_reason_codes(event.current_candidate.reason_codes)
-        if current_reason_codes:
-            lines.append(f"Current reasons: {current_reason_codes}")
+        reason_line = _build_reason_line(event)
+        if reason_line:
+            lines.append(reason_line)
 
-    if event.previous_candidate is not None:
-        lines.append(
-            "Previous: "
-            f"score={_format_number(event.previous_candidate.selection_score)}, "
-            f"confidence={_format_number(event.previous_candidate.selection_confidence)}, "
-            f"stability={event.previous_candidate.selected_stability_label or 'n/a'}, "
-            f"delta={_format_signed_number(event.previous_candidate.score_delta)}, "
-            f"source={event.previous_candidate.source_preference or 'n/a'}"
-        )
+    previous_line = _build_previous_line(event)
+    if previous_line:
+        lines.append(previous_line)
 
-        previous_reason_codes = _format_reason_codes(event.previous_candidate.reason_codes)
-        if previous_reason_codes:
-            lines.append(f"Previous reasons: {previous_reason_codes}")
+    trigger_line = _build_trigger_line(event)
+    if trigger_line:
+        lines.append(trigger_line)
 
-    detail_line = _build_detail_line(event)
-    if detail_line:
-        lines.append(detail_line)
-
+    lines.append(f"Generated: {event.generated_at or 'n/a'}")
     return "\n".join(lines).strip()
 
 
-def _build_detail_line(event: ShadowEvent) -> str:
+def _build_reason_line(event: ShadowEvent) -> str:
+    candidate = event.current_candidate
+    if candidate is None:
+        return ""
+
+    current_reason_codes = _format_reason_codes(candidate.reason_codes)
+    if current_reason_codes:
+        return f"Reason: {current_reason_codes}"
+
     if event.event_type is ShadowEventType.FIRST_SELECTED_EVENT:
         previous_status = event.metadata.get("previous_selection_status") or "n/a"
-        return f"Transition: {previous_status} -> selected"
+        return f"Reason: transition from {previous_status}"
 
     if event.event_type is ShadowEventType.STABILITY_TRANSITION_EVENT:
         previous_stability = event.metadata.get("previous_stability_label") or "n/a"
         current_stability = event.metadata.get("current_stability_label") or "n/a"
-        return f"Transition: {previous_stability} -> {current_stability}"
+        if previous_stability != current_stability:
+            return f"Reason: {previous_stability} -> {current_stability}"
+
+    return ""
+
+
+def _build_previous_line(event: ShadowEvent) -> str:
+    if event.event_type is ShadowEventType.SCORE_SURGE_EVENT:
+        return ""
+
+    current = event.current_candidate
+    previous = event.previous_candidate
+    if current is None or previous is None:
+        return ""
+
+    differences: list[str] = []
+
+    if _format_number(previous.selection_score) != _format_number(current.selection_score):
+        differences.append(
+            f"score {_format_number(previous.selection_score)} -> {_format_number(current.selection_score)}"
+        )
+    if _format_number(previous.selection_confidence) != _format_number(
+        current.selection_confidence
+    ):
+        differences.append(
+            "confidence "
+            f"{_format_number(previous.selection_confidence)} -> "
+            f"{_format_number(current.selection_confidence)}"
+        )
+    if (
+        (previous.selected_stability_label or "n/a")
+        != (current.selected_stability_label or "n/a")
+    ):
+        differences.append(
+            "stability "
+            f"{previous.selected_stability_label or 'n/a'} -> "
+            f"{current.selected_stability_label or 'n/a'}"
+        )
+
+    if not differences:
+        return ""
+
+    return "Previous: " + " | ".join(differences[:2])
+
+
+def _build_trigger_line(event: ShadowEvent) -> str:
+    if event.event_type is ShadowEventType.FIRST_SELECTED_EVENT:
+        previous_status = event.metadata.get("previous_selection_status") or "n/a"
+        return f"Trigger: first selected from {previous_status}"
+
+    if event.event_type is ShadowEventType.STABILITY_TRANSITION_EVENT:
+        previous_stability = event.metadata.get("previous_stability_label") or "n/a"
+        current_stability = event.metadata.get("current_stability_label") or "n/a"
+        return f"Trigger: stability {previous_stability} -> {current_stability}"
 
     if event.event_type is ShadowEventType.SCORE_SURGE_EVENT:
         threshold = event.score_surge_threshold
-        return (
-            "Trigger: "
-            f"score_delta={_format_signed_number(event.metadata.get('score_delta'))} "
-            f">= threshold={_format_number(threshold)}"
-        )
+        return f"Trigger: score surge >= {_format_number(threshold)}"
 
     return ""
 

@@ -9,6 +9,10 @@ import os
 from pathlib import Path
 from typing import Any
 
+from src.research.edge_selection_diagnosis_report import (
+    build_edge_selection_diagnosis_report,
+)
+
 from src.research.edge_selection_shadow_writer import (
     DEFAULT_SHADOW_OUTPUT_PATH,
     read_edge_selection_shadow_outputs,
@@ -190,7 +194,13 @@ def build_observational_message(
 ) -> str:
     changed_groups = extract_changed_groups(score_drift_summary)
     drift_summary = _safe_dict((score_drift_summary or {}).get("drift_summary"))
-    snapshot_lines = _build_snapshot_lines(edge_scores_summary)
+    comparison_payload = comparison_summary if isinstance(comparison_summary, dict) else {}
+    diagnosis_report = build_edge_selection_diagnosis_report(
+        research_summary_data=comparison_payload,
+        edge_candidates_preview=comparison_payload.get("edge_candidates_preview"),
+        edge_stability_preview=comparison_payload.get("edge_stability_preview"),
+        shadow_selection=shadow_selection,
+    )
     generated_at = _first_non_empty(
         (score_drift_summary or {}).get("generated_at"),
         (edge_scores_summary or {}).get("generated_at"),
@@ -201,34 +211,37 @@ def build_observational_message(
 
     lines = ["Research Observation"]
     lines.append(f"Generated: {generated_at}")
-    lines.append("")
-    lines.append("Drift Summary")
-    lines.append(f"- increase: {_coerce_int(drift_summary.get('increase'))}")
-    lines.append(f"- decrease: {_coerce_int(drift_summary.get('decrease'))}")
-    lines.append(f"- flat: {_coerce_int(drift_summary.get('flat'))}")
-    lines.append(
-        f"- insufficient_history: {_coerce_int(drift_summary.get('insufficient_history'))}"
-    )
-    lines.append("")
-
-    lines.append("Changed Groups")
-    if not changed_groups:
-        lines.append("- no changed groups detected")
-    else:
-        for item in changed_groups:
-            lines.append(_format_changed_group_line(item))
-    lines.append("")
-
-    lines.append("Current Snapshot")
-    if not snapshot_lines:
-        lines.append("- no current snapshot available")
-    else:
-        lines.extend(snapshot_lines)
 
     shadow_selection_message = build_shadow_selection_message(shadow_selection)
     if shadow_selection_message:
         lines.append("")
         lines.append(shadow_selection_message)
+
+    blocked_horizons = _extract_blocked_horizons(
+        comparison_payload.get("edge_candidates_preview")
+    )
+    why_blocked_lines = _build_why_blocked_lines(
+        blocked_horizons=blocked_horizons,
+        edge_candidates_preview=comparison_payload.get("edge_candidates_preview"),
+        diagnosis_report=diagnosis_report,
+    )
+    if why_blocked_lines:
+        lines.append("")
+        lines.append("Why blocked")
+        lines.extend(why_blocked_lines)
+
+    drift_line = (
+        f"increase {_coerce_int(drift_summary.get('increase'))} | "
+        f"decrease {_coerce_int(drift_summary.get('decrease'))} | "
+        f"flat {_coerce_int(drift_summary.get('flat'))}"
+    )
+    lines.append("")
+    lines.append("Drift")
+    lines.append(drift_line)
+
+    change_lines = [_format_changed_group_line(item) for item in changed_groups]
+    if change_lines:
+        lines.extend(change_lines[:3])
 
     return "\n".join(lines).strip()
 
@@ -251,52 +264,175 @@ def build_shadow_selection_message(shadow_selection: dict[str, Any] | None) -> s
     )
 
     top_candidate = _select_shadow_top_candidate(payload, abstain_diagnosis, ranking)
-    compared_candidate = abstain_diagnosis.get("compared_candidate")
-    selected_candidate = _build_selected_candidate_snapshot(payload)
+    lines = [f"Status: {selection_status.upper()}"]
 
-    lines = ["Shadow Selection", f"Generated: {generated_at}"]
-    lines.append(f"Decision: {selection_status} ({_format_reason_codes(reason_codes)})")
-    lines.append(f"Summary: {explanation}")
+    reason_text = _format_primary_reason(reason_codes, abstain_diagnosis, explanation)
+    if reason_text:
+        lines.append(f"Reason: {reason_text}")
 
-    if candidates_considered is not None:
-        lines.append(f"Candidates considered: {candidates_considered}")
-    lines.append(f"Ranking depth: {len([item for item in ranking if isinstance(item, dict)])}")
+    ranking_depth = len([item for item in ranking if isinstance(item, dict)])
+    if candidates_considered is not None or ranking_depth:
+        lines.append(
+            "Candidates: "
+            f"{candidates_considered if candidates_considered is not None else 0} | "
+            f"Ranking: {ranking_depth}"
+        )
 
-    diagnosis_category = _first_non_empty(abstain_diagnosis.get("category"))
-    diagnosis_summary = _first_non_empty(abstain_diagnosis.get("summary"))
-    if diagnosis_category:
-        lines.append(f"Diagnosis category: {diagnosis_category}")
-    if diagnosis_summary:
-        lines.append(f"Diagnosis: {diagnosis_summary}")
-
-    diagnosis_counts_line = _format_abstain_diagnosis_counts(abstain_diagnosis)
-    if diagnosis_counts_line:
-        lines.append(diagnosis_counts_line)
-
-    seed_summary_lines = _build_seed_diagnostics_summary_lines(abstain_diagnosis)
-    if seed_summary_lines:
-        lines.extend(seed_summary_lines)
-
-    if selected_candidate is not None:
-        lines.append("")
-        lines.append("Selected Candidate")
-        lines.extend(_build_candidate_detail_lines(selected_candidate, include_rank=False))
+    blocked_horizons = _extract_blocked_horizons_from_seed_diagnostics(abstain_diagnosis)
+    if blocked_horizons:
+        lines.append(f"Blocked horizons: {', '.join(blocked_horizons)}")
 
     if top_candidate:
-        lines.append("")
-        lines.append("Top Candidate")
-        lines.extend(_build_candidate_detail_lines(top_candidate, include_rank=True))
+        lines.append(f"Top: {_format_candidate_identity(top_candidate)}")
+        score_text = _format_optional_number(top_candidate.get("selection_score"))
+        confidence_text = _format_optional_number(top_candidate.get("selection_confidence"))
+        lines.append(f"Top score: {score_text} | Confidence: {confidence_text}")
 
-    if isinstance(compared_candidate, dict) and compared_candidate:
-        lines.append(
-            f"Tie Peer: {_format_candidate_identity(compared_candidate)} "
-            f"[{compared_candidate.get('candidate_status', 'n/a')}]"
-        )
-        lines.append("")
-        lines.append("Compared Candidate")
-        lines.extend(_build_candidate_detail_lines(compared_candidate, include_rank=False))
+        gate_summary = _format_compact_gate_failures(top_candidate.get("gate_diagnostics"))
+        if gate_summary:
+            lines.append(f"Failed gates: {gate_summary}")
+
+    drift_summary = _format_compact_drift_reasons(top_candidate)
+    if drift_summary:
+        lines.append(f"Drift issues: {drift_summary}")
+
+    lines.append(f"Generated: {generated_at}")
 
     return "\n".join(lines).strip()
+
+
+def _format_primary_reason(
+    reason_codes: list[str],
+    abstain_diagnosis: dict[str, Any],
+    explanation: str,
+) -> str:
+    if reason_codes:
+        return reason_codes[0]
+    diagnosis_category = _first_non_empty(abstain_diagnosis.get("category"))
+    if diagnosis_category:
+        return diagnosis_category.upper()
+    return explanation if explanation != "n/a" else ""
+
+
+def _extract_blocked_horizons(edge_candidates_preview: Any) -> list[str]:
+    preview = edge_candidates_preview if isinstance(edge_candidates_preview, dict) else {}
+    by_horizon = preview.get("by_horizon", {}) or {}
+    blocked: list[str] = []
+    for horizon, item in by_horizon.items():
+        if not isinstance(item, dict):
+            continue
+        candidates = [
+            item.get("top_strategy"),
+            item.get("top_symbol"),
+            item.get("top_alignment_state"),
+        ]
+        strengths = [
+            str(candidate.get("candidate_strength", "insufficient_data"))
+            for candidate in candidates
+            if isinstance(candidate, dict)
+        ]
+        if strengths and all(strength == "insufficient_data" for strength in strengths):
+            blocked.append(str(horizon))
+    return blocked
+
+
+def _extract_blocked_horizons_from_seed_diagnostics(abstain_diagnosis: dict[str, Any]) -> list[str]:
+    candidate_seed_diagnostics = (
+        abstain_diagnosis.get("candidate_seed_diagnostics")
+        if isinstance(abstain_diagnosis.get("candidate_seed_diagnostics"), dict)
+        else {}
+    )
+    horizon_diagnostics = (
+        candidate_seed_diagnostics.get("horizon_diagnostics")
+        if isinstance(candidate_seed_diagnostics.get("horizon_diagnostics"), list)
+        else []
+    )
+    blocked: list[str] = []
+    for item in horizon_diagnostics:
+        if not isinstance(item, dict):
+            continue
+        if item.get("seed_generated") is True:
+            continue
+        horizon = _first_non_empty(item.get("horizon"))
+        if horizon:
+            blocked.append(horizon)
+    return blocked
+
+
+def _build_why_blocked_lines(
+    *,
+    blocked_horizons: list[str],
+    edge_candidates_preview: Any,
+    diagnosis_report: dict[str, Any],
+) -> list[str]:
+    preview = edge_candidates_preview if isinstance(edge_candidates_preview, dict) else {}
+    by_horizon = preview.get("by_horizon", {}) or {}
+    lines: list[str] = []
+
+    for horizon in blocked_horizons:
+        horizon_payload = by_horizon.get(horizon, {}) or {}
+        reason = _detect_horizon_block_reason(horizon_payload)
+        lines.append(f"{horizon}: {reason}")
+
+    if not lines:
+        failed_layers = diagnosis_report.get("failed_layers")
+        if isinstance(failed_layers, list) and failed_layers:
+            lines.append(", ".join(str(item) for item in failed_layers[:3]))
+
+    return lines
+
+
+def _detect_horizon_block_reason(horizon_payload: dict[str, Any]) -> str:
+    candidates = [
+        horizon_payload.get("top_strategy"),
+        horizon_payload.get("top_symbol"),
+        horizon_payload.get("top_alignment_state"),
+    ]
+    visibility_reasons = [
+        str(candidate.get("visibility_reason", "")).strip()
+        for candidate in candidates
+        if isinstance(candidate, dict)
+    ]
+    if visibility_reasons and all(reason == "failed_absolute_minimum_gate" for reason in visibility_reasons):
+        return "insufficient_data"
+    if any(
+        isinstance(candidate, dict) and str(candidate.get("quality_gate", "failed")) != "passed"
+        for candidate in candidates
+    ):
+        return "quality_borderline"
+    return "visibility_lost"
+
+
+def _format_compact_gate_failures(value: Any) -> str:
+    diagnostics = value if isinstance(value, dict) else {}
+    failures: list[str] = []
+    for gate_name in ("score_gate", "stability_gate", "drift_gate", "eligibility_gate"):
+        gate = diagnostics.get(gate_name) if isinstance(diagnostics.get(gate_name), dict) else {}
+        if gate.get("passed") is False:
+            failures.append(gate_name.replace("_gate", ""))
+    return ", ".join(failures)
+
+
+def _format_compact_drift_reasons(candidate: dict[str, Any]) -> str:
+    if not isinstance(candidate, dict):
+        return ""
+    drift_direction = _first_non_empty(candidate.get("drift_direction"))
+    gate_diagnostics = (
+        candidate.get("gate_diagnostics")
+        if isinstance(candidate.get("gate_diagnostics"), dict)
+        else {}
+    )
+    drift_gate = (
+        gate_diagnostics.get("drift_gate")
+        if isinstance(gate_diagnostics.get("drift_gate"), dict)
+        else {}
+    )
+    reasons = _normalize_reason_codes(drift_gate.get("reason_codes"))
+    parts: list[str] = []
+    if drift_direction:
+        parts.append(drift_direction)
+    parts.extend(reasons[:2])
+    return ", ".join(parts)
 
 
 def _select_shadow_top_candidate(
@@ -756,30 +892,11 @@ def _select_snapshot_details(
 def _format_changed_group_line(item: dict[str, Any]) -> str:
     score_delta = item.get("score_delta")
     delta_text = "n/a" if score_delta is None else _format_signed_number(score_delta)
-    previous_score = item.get("previous_score")
-    latest_score = item.get("latest_score")
-    previous_score_text = "n/a" if previous_score is None else _format_number(previous_score)
-    latest_score_text = "n/a" if latest_score is None else _format_number(latest_score)
-    previous_horizons_text = _format_horizon_text(item.get("previous_horizons"))
-    latest_horizons_text = _format_horizon_text(item.get("latest_horizons"))
-    horizon_count_delta = item.get("horizon_count_delta")
-    horizon_count_delta_text = (
-        "n/a" if horizon_count_delta is None else str(horizon_count_delta)
-    )
-
     return (
         f"- {item.get('category', 'n/a')}/{item.get('group', 'n/a')}: "
-        f"drift={item.get('drift_direction', 'n/a')}, "
-        f"delta={delta_text}, "
-        f"score={previous_score_text} -> {latest_score_text}, "
-        f"strength={item.get('previous_selected_candidate_strength', DEFAULT_STRENGTH_LABEL)} "
-        f"-> {item.get('latest_selected_candidate_strength', DEFAULT_STRENGTH_LABEL)}, "
-        f"stability={item.get('previous_stability_label', DEFAULT_STABILITY_LABEL)} "
-        f"-> {item.get('latest_stability_label', DEFAULT_STABILITY_LABEL)}, "
-        f"horizons={previous_horizons_text} -> {latest_horizons_text}, "
-        f"horizon_delta={horizon_count_delta_text}, "
-        f"source={item.get('previous_source_preference', DEFAULT_SOURCE_PREFERENCE)} "
-        f"-> {item.get('latest_source_preference', DEFAULT_SOURCE_PREFERENCE)}"
+        f"{item.get('drift_direction', 'n/a')} {delta_text} | "
+        f"{item.get('previous_stability_label', DEFAULT_STABILITY_LABEL)} -> "
+        f"{item.get('latest_stability_label', DEFAULT_STABILITY_LABEL)}"
     )
 
 
