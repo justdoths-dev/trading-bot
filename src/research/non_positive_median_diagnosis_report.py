@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -94,13 +95,17 @@ def _ratio(numerator: int, denominator: int) -> float:
 
 
 def _path_hint(parts: list[str]) -> str:
-    return " > ".join(parts[-8:])
+    return " > ".join(parts[-10:])
 
 
 def _format_pct(value: float | None) -> str:
     if value is None:
         return "n/a"
     return f"{value:.6f}"
+
+
+def _load_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _extract_metric(raw: dict[str, Any], *keys: str) -> float | None:
@@ -136,58 +141,104 @@ def _metric_complete(raw: dict[str, Any]) -> bool:
     )
 
 
-def _walk_summary_rows(
+def _looks_like_metric_row(raw: dict[str, Any]) -> bool:
+    if not _metric_complete(raw):
+        return False
+
+    # 노이즈성 config/threshold dict 제외를 위한 최소한의 row-like 신호
+    row_like_keys = {
+        "group",
+        "group_name",
+        "candidate_group",
+        "name",
+        "label",
+        "labeled_count",
+        "label_count",
+        "count",
+        "sample_size",
+        "observations",
+    }
+    if any(key in raw for key in row_like_keys):
+        return True
+
+    # 그래도 metric row일 수 있으므로 4개 핵심 metric만 있어도 허용
+    return True
+
+
+def _infer_horizon_from_path_or_raw(path_parts: list[str], raw: dict[str, Any]) -> str | None:
+    raw_horizon = raw.get("horizon")
+    if isinstance(raw_horizon, str) and raw_horizon in TARGET_HORIZONS:
+        return raw_horizon
+
+    for part in reversed(path_parts):
+        if part in TARGET_HORIZONS:
+            return part
+    return None
+
+
+def _infer_category_from_path_or_raw(path_parts: list[str], raw: dict[str, Any]) -> str | None:
+    raw_category = raw.get("category")
+    if isinstance(raw_category, str) and raw_category in TARGET_CATEGORIES:
+        return raw_category
+
+    for part in reversed(path_parts):
+        if part in TARGET_CATEGORIES:
+            return part
+    return None
+
+
+def _infer_rank_from_path(path_parts: list[str]) -> int | None:
+    for part in reversed(path_parts):
+        match = re.fullmatch(r"\[(\d+)\]", part)
+        if match:
+            return int(match.group(1)) + 1
+    return None
+
+
+def _infer_group_from_row(raw: dict[str, Any], category: str | None) -> str:
+    if category is not None:
+        key = f"{category}_group"
+        if key in raw:
+            return _normalize_group(raw.get(key))
+
+    candidates = (
+        raw.get("group"),
+        raw.get("group_name"),
+        raw.get("candidate_group"),
+        raw.get("name"),
+        raw.get("label"),
+        raw.get("bucket"),
+    )
+    for candidate in candidates:
+        if candidate is not None and not isinstance(candidate, (dict, list)):
+            return _normalize_group(candidate)
+
+    return "unknown"
+
+
+def _collect_metric_complete_dicts(
     node: Any,
-    horizon: str | None,
-    category: str | None,
     path_parts: list[str],
-    out_rows: list[tuple[dict[str, Any], str, str, int | None, list[str]]],
+    out_rows: list[tuple[dict[str, Any], list[str]]],
 ) -> None:
     if isinstance(node, dict):
-        if horizon is not None and category is not None and _metric_complete(node):
-            out_rows.append((node, horizon, category, None, path_parts))
-            return
-
+        if _looks_like_metric_row(node):
+            out_rows.append((node, path_parts))
         for key, value in node.items():
-            next_horizon = horizon
-            next_category = category
-
-            if key in TARGET_HORIZONS:
-                next_horizon = key
-            if key in TARGET_CATEGORIES:
-                next_category = key
-
-            _walk_summary_rows(
-                value,
-                next_horizon,
-                next_category,
-                [*path_parts, key],
-                out_rows,
-            )
-
+            _collect_metric_complete_dicts(value, [*path_parts, key], out_rows)
     elif isinstance(node, list):
         for index, item in enumerate(node):
-            rank = index + 1 if horizon is not None and category is not None else None
-            if isinstance(item, dict) and horizon is not None and category is not None and _metric_complete(item):
-                out_rows.append((item, horizon, category, rank, [*path_parts, f"[{index}]"]))
-            else:
-                _walk_summary_rows(
-                    item,
-                    horizon,
-                    category,
-                    [*path_parts, f"[{index}]"],
-                    out_rows,
-                )
-
-
-def _load_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+            _collect_metric_complete_dicts(item, [*path_parts, f"[{index}]"], out_rows)
 
 
 def load_main_metric_rows(input_dir: Path) -> tuple[list[MetricRow], dict[str, int]]:
     instrumentation = {
         "summary_json_found": 0,
         "summary_candidate_rows_seen": 0,
+        "summary_metric_complete_dicts_seen": 0,
+        "summary_rows_missing_horizon_count": 0,
+        "summary_rows_missing_category_count": 0,
+        "summary_rows_missing_group_count": 0,
         "main_rows_count": 0,
         "metric_complete_rows_count": 0,
         "summary_read_error_count": 0,
@@ -211,12 +262,22 @@ def load_main_metric_rows(input_dir: Path) -> tuple[list[MetricRow], dict[str, i
         instrumentation["summary_read_error_count"] += 1
         return rows, instrumentation
 
-    discovered: list[tuple[dict[str, Any], str, str, int | None, list[str]]] = []
-    _walk_summary_rows(payload, None, None, [summary_path.name], discovered)
+    discovered: list[tuple[dict[str, Any], list[str]]] = []
+    _collect_metric_complete_dicts(payload, [summary_path.name], discovered)
 
-    instrumentation["summary_candidate_rows_seen"] = len(discovered)
+    instrumentation["summary_metric_complete_dicts_seen"] = len(discovered)
 
-    for raw, horizon, category, rank, path_parts in discovered:
+    for raw, path_parts in discovered:
+        horizon = _infer_horizon_from_path_or_raw(path_parts, raw)
+        if horizon is None:
+            instrumentation["summary_rows_missing_horizon_count"] += 1
+            continue
+
+        category = _infer_category_from_path_or_raw(path_parts, raw)
+        if category is None:
+            instrumentation["summary_rows_missing_category_count"] += 1
+            continue
+
         median = _extract_metric(raw, "median_future_return_pct")
         avg = _extract_metric(raw, "avg_future_return_pct", "mean_future_return_pct")
         positive_rate = _extract_metric(raw, "positive_rate_pct", "positive_rate")
@@ -230,15 +291,9 @@ def load_main_metric_rows(input_dir: Path) -> tuple[list[MetricRow], dict[str, i
         ):
             continue
 
-        instrumentation["metric_complete_rows_count"] += 1
-
-        group = _normalize_group(
-            raw.get("group")
-            or raw.get("group_name")
-            or raw.get("candidate_group")
-            or raw.get("name")
-            or raw.get("label")
-        )
+        group = _infer_group_from_row(raw, category)
+        if group == "unknown":
+            instrumentation["summary_rows_missing_group_count"] += 1
 
         rows.append(
             MetricRow(
@@ -246,7 +301,7 @@ def load_main_metric_rows(input_dir: Path) -> tuple[list[MetricRow], dict[str, i
                 horizon=horizon,
                 category=category,
                 group=group,
-                rank=rank,
+                rank=_infer_rank_from_path(path_parts),
                 median_future_return_pct=median,
                 avg_future_return_pct=avg,
                 positive_rate_pct=positive_rate,
@@ -265,6 +320,8 @@ def load_main_metric_rows(input_dir: Path) -> tuple[list[MetricRow], dict[str, i
             )
         )
 
+    instrumentation["summary_candidate_rows_seen"] = len(rows)
+    instrumentation["metric_complete_rows_count"] = len(rows)
     instrumentation["main_rows_count"] = len(rows)
     return rows, instrumentation
 
@@ -698,7 +755,7 @@ def build_non_positive_median_diagnosis_report(input_dir: Path) -> dict[str, Any
         overall["total_evaluated_rows"],
     )
 
-    rank_scope = _build_rank_scope_breakdown(main_rows, top_n=3)
+    rank_scope = _build_rankScope_breakdown(main_rows, top_n=3)  # type: ignore[name-defined]
     horizon_breakdown = _breakdown_by_horizon_and_category(main_rows)
     category_breakdown = _breakdown_by_category(main_rows)
     metric_interactions = _build_metric_interaction_breakdown(main_rows)
@@ -945,6 +1002,10 @@ def main() -> None:
             ensure_ascii=False,
         )
     )
+
+
+def _build_rankScope_breakdown(rows: list[MetricRow], top_n: int = 3) -> dict[str, Any]:
+    return _build_rank_scope_breakdown(rows, top_n=top_n)
 
 
 if __name__ == "__main__":
