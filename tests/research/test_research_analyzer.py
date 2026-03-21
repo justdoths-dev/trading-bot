@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -34,7 +33,11 @@ def _candidate(group: str, strength: str = "moderate") -> dict[str, Any]:
         "sample_gate": "passed",
         "quality_gate": "passed" if strength in {"moderate", "strong"} else "borderline",
         "candidate_strength": strength,
-        "visibility_reason": "passed_sample_and_quality_gate",
+        "visibility_reason": (
+            "passed_sample_and_quality_gate"
+            if strength in {"moderate", "strong"}
+            else "passed_sample_gate_only"
+        ),
         "chosen_metric_summary": "sample=60, median=0.45, positive_rate=58.0",
     }
 
@@ -65,8 +68,8 @@ def _edge_candidates_preview(by_horizon: dict[str, dict[str, Any]]) -> dict[str,
         "strength_thresholds": {
             "weak": {
                 "sample_count": 30,
+                "labeled_count_gt": 0,
                 "median_future_return_pct_gt": 0,
-                "positive_rate_pct": 50,
             },
             "moderate": {
                 "sample_count": 50,
@@ -82,6 +85,59 @@ def _edge_candidates_preview(by_horizon: dict[str, dict[str, Any]]) -> dict[str,
             },
         },
         "by_horizon": by_horizon,
+    }
+
+
+def _ranked_group_entry(
+    group: str,
+    *,
+    sample_count: float,
+    labeled_count: float | None,
+    coverage_pct: float | None,
+    median_future_return_pct: float | None,
+    positive_rate_pct: float | None,
+    robustness_pct: float | None = 57.0,
+) -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "sample_count": sample_count,
+        "median_future_return_pct": median_future_return_pct,
+        "signal_match_rate_pct": robustness_pct,
+    }
+    if labeled_count is not None:
+        metrics["labeled_count"] = labeled_count
+    if coverage_pct is not None:
+        metrics["coverage_pct"] = coverage_pct
+    if positive_rate_pct is not None:
+        metrics["positive_rate_pct"] = positive_rate_pct
+
+    return {
+        "group": group,
+        "metrics": metrics,
+    }
+
+
+def _ranked_group(
+    group: str,
+    *,
+    sample_count: float,
+    labeled_count: float | None,
+    coverage_pct: float | None,
+    median_future_return_pct: float | None,
+    positive_rate_pct: float | None,
+    robustness_pct: float | None = 57.0,
+) -> dict[str, Any]:
+    return {
+        "ranked_groups": [
+            _ranked_group_entry(
+                group,
+                sample_count=sample_count,
+                labeled_count=labeled_count,
+                coverage_pct=coverage_pct,
+                median_future_return_pct=median_future_return_pct,
+                positive_rate_pct=positive_rate_pct,
+                robustness_pct=robustness_pct,
+            )
+        ]
     }
 
 
@@ -131,7 +187,9 @@ def test_run_research_analyzer_skips_invalid_records_without_crashing(
     monkeypatch.setattr(
         research_analyzer,
         "_build_strategy_lab_metrics",
-        lambda _input_path: (_ for _ in ()).throw(AssertionError("strategy lab should be skipped")),
+        lambda _input_path: (_ for _ in ()).throw(
+            AssertionError("strategy lab should be skipped")
+        ),
     )
 
     result = research_analyzer.run_research_analyzer(input_path, output_dir)
@@ -226,3 +284,155 @@ def test_edge_stability_preview_returns_unstable_for_different_visible_groups() 
 
     assert result["strategy"]["stability_label"] == "unstable"
     assert result["strategy"]["stability_score"] == 1
+
+
+def test_extract_edge_candidate_keeps_weak_visible_when_positive_rate_is_below_fifty() -> None:
+    report = _ranked_group(
+        "range_mean_revert",
+        sample_count=42,
+        labeled_count=42,
+        coverage_pct=100.0,
+        median_future_return_pct=0.12,
+        positive_rate_pct=48.0,
+    )
+
+    result = research_analyzer._extract_edge_candidate(report)
+
+    assert result["group"] == "range_mean_revert"
+    assert result["sample_gate"] == "passed"
+    assert result["quality_gate"] == "borderline"
+    assert result["candidate_strength"] == "weak"
+    assert result["positive_rate_pct"] == 48.0
+    assert result["visibility_reason"] == "passed_sample_gate_only"
+
+
+def test_extract_edge_candidate_keeps_truly_insufficient_candidates_hidden() -> None:
+    report = _ranked_group(
+        "not_ready",
+        sample_count=42,
+        labeled_count=0,
+        coverage_pct=0.0,
+        median_future_return_pct=0.12,
+        positive_rate_pct=48.0,
+    )
+
+    result = research_analyzer._extract_edge_candidate(report)
+
+    assert result["group"] == "insufficient_data"
+    assert result["sample_gate"] == "failed"
+    assert result["quality_gate"] == "failed"
+    assert result["candidate_strength"] == "insufficient_data"
+
+
+def test_extract_edge_candidate_still_classifies_moderate_and_strong_correctly() -> None:
+    moderate = research_analyzer._extract_edge_candidate(
+        _ranked_group(
+            "moderate_case",
+            sample_count=55,
+            labeled_count=55,
+            coverage_pct=100.0,
+            median_future_return_pct=0.35,
+            positive_rate_pct=56.0,
+            robustness_pct=53.0,
+        )
+    )
+    strong = research_analyzer._extract_edge_candidate(
+        _ranked_group(
+            "strong_case",
+            sample_count=90,
+            labeled_count=90,
+            coverage_pct=100.0,
+            median_future_return_pct=0.6,
+            positive_rate_pct=60.0,
+            robustness_pct=57.0,
+        )
+    )
+
+    assert moderate["candidate_strength"] == "moderate"
+    assert moderate["quality_gate"] == "passed"
+    assert strong["candidate_strength"] == "strong"
+    assert strong["quality_gate"] == "passed"
+
+
+def test_edge_candidate_preview_markdown_remains_compatible_for_borderline_visibility() -> None:
+    strategy_lab = {
+        "ranking": {
+            "15m": {
+                "by_strategy": _ranked_group(
+                    "range_mean_revert",
+                    sample_count=42,
+                    labeled_count=42,
+                    coverage_pct=100.0,
+                    median_future_return_pct=0.12,
+                    positive_rate_pct=48.0,
+                ),
+            },
+            "1h": {},
+            "4h": {},
+        }
+    }
+
+    preview = research_analyzer._build_edge_candidates_preview(strategy_lab)
+    markdown_lines = research_analyzer._markdown_edge_candidates_preview(preview)
+    markdown = "\n".join(markdown_lines)
+
+    fifteen = preview["by_horizon"]["15m"]
+    assert preview["strength_thresholds"]["weak"]["sample_count"] == 30
+    assert preview["strength_thresholds"]["weak"]["labeled_count_gt"] == 0
+    assert fifteen["top_strategy"]["candidate_strength"] == "weak"
+    assert fifteen["top_strategy"]["quality_gate"] == "borderline"
+    assert fifteen["sample_gate"] == "passed"
+    assert fifteen["quality_gate"] == "borderline"
+    assert "sample_gate: passed" in markdown
+    assert "quality_gate: borderline" in markdown
+    assert "range_mean_revert (weak; sample_gate=passed; quality_gate=borderline;" in markdown
+
+
+def test_extract_edge_candidate_passes_absolute_minimum_with_coverage_only_support() -> None:
+    report = _ranked_group(
+        "coverage_only_case",
+        sample_count=45,
+        labeled_count=0,
+        coverage_pct=12.5,
+        median_future_return_pct=0.08,
+        positive_rate_pct=47.0,
+    )
+
+    result = research_analyzer._extract_edge_candidate(report)
+
+    assert result["group"] == "coverage_only_case"
+    assert result["sample_gate"] == "passed"
+    assert result["quality_gate"] == "borderline"
+    assert result["candidate_strength"] == "weak"
+    assert result["visibility_reason"] == "passed_sample_gate_only"
+
+
+def test_extract_edge_candidate_falls_back_to_second_ranked_group_when_first_fails() -> None:
+    report = {
+        "ranked_groups": [
+            _ranked_group_entry(
+                "first_blocked",
+                sample_count=45,
+                labeled_count=0,
+                coverage_pct=0.0,
+                median_future_return_pct=0.10,
+                positive_rate_pct=60.0,
+            ),
+            _ranked_group_entry(
+                "second_viable",
+                sample_count=52,
+                labeled_count=52,
+                coverage_pct=100.0,
+                median_future_return_pct=0.11,
+                positive_rate_pct=49.0,
+            ),
+        ]
+    }
+
+    result = research_analyzer._extract_edge_candidate(report)
+
+    assert result["group"] == "second_viable"
+    assert result["sample_gate"] == "passed"
+    assert result["quality_gate"] == "borderline"
+    assert result["candidate_strength"] == "weak"
+    assert result["visibility_reason"] == "passed_sample_gate_only"

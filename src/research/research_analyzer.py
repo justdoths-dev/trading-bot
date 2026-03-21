@@ -363,8 +363,8 @@ def _build_edge_candidates_preview(strategy_lab: dict[str, Any]) -> dict[str, An
         "strength_thresholds": {
             "weak": {
                 "sample_count": MIN_EDGE_CANDIDATE_SAMPLE_COUNT,
+                "labeled_count_gt": 0,
                 "median_future_return_pct_gt": 0,
-                "positive_rate_pct": 50,
             },
             "moderate": {
                 "sample_count": EDGE_MODERATE_SAMPLE_COUNT,
@@ -403,13 +403,11 @@ def _extract_edge_candidate(report: Any) -> dict[str, Any]:
         )
         robustness_label, robustness_value = _select_robustness_signal(metrics)
 
-        sample_gate_passed = (
-            sample_count is not None
-            and sample_count >= MIN_EDGE_CANDIDATE_SAMPLE_COUNT
-            and median_future_return_pct is not None
-            and median_future_return_pct > 0
-            and positive_rate_pct is not None
-            and positive_rate_pct >= 50
+        sample_gate_passed = _passes_absolute_minimum_gate(
+            sample_count=sample_count,
+            labeled_count=labeled_count,
+            coverage_pct=coverage_pct,
+            median_future_return_pct=median_future_return_pct,
         )
 
         if not sample_gate_passed:
@@ -475,14 +473,35 @@ def _extract_edge_candidate(report: Any) -> dict[str, Any]:
     }
 
 
+def _passes_absolute_minimum_gate(
+    *,
+    sample_count: float | None,
+    labeled_count: float | None,
+    coverage_pct: float | None,
+    median_future_return_pct: float | None,
+) -> bool:
+    has_label_support = (
+        (labeled_count is not None and labeled_count > 0)
+        or (coverage_pct is not None and coverage_pct > 0)
+    )
+    return (
+        sample_count is not None
+        and sample_count >= MIN_EDGE_CANDIDATE_SAMPLE_COUNT
+        and has_label_support
+        and median_future_return_pct is not None
+        and median_future_return_pct > 0
+    )
+
+
 def _score_candidate_strength(
     sample_count: float,
     median_future_return_pct: float,
-    positive_rate_pct: float,
+    positive_rate_pct: float | None,
     robustness_value: float | None,
 ) -> str:
     if (
-        sample_count >= EDGE_STRONG_SAMPLE_COUNT
+        positive_rate_pct is not None
+        and sample_count >= EDGE_STRONG_SAMPLE_COUNT
         and median_future_return_pct >= EDGE_STRONG_MEDIAN_RETURN_PCT
         and positive_rate_pct >= EDGE_STRONG_POSITIVE_RATE_PCT
         and (robustness_value is None or robustness_value >= EDGE_STRONG_ROBUSTNESS_PCT)
@@ -490,7 +509,8 @@ def _score_candidate_strength(
         return "strong"
 
     if (
-        sample_count >= EDGE_MODERATE_SAMPLE_COUNT
+        positive_rate_pct is not None
+        and sample_count >= EDGE_MODERATE_SAMPLE_COUNT
         and median_future_return_pct >= EDGE_MODERATE_MEDIAN_RETURN_PCT
         and positive_rate_pct >= EDGE_MODERATE_POSITIVE_RATE_PCT
         and (
@@ -519,14 +539,14 @@ def _select_robustness_signal(metrics: dict[str, Any]) -> tuple[str, float | Non
 def _build_candidate_metric_summary(
     sample_count: int,
     median_future_return_pct: float,
-    positive_rate_pct: float,
+    positive_rate_pct: float | None,
     robustness_label: str,
     robustness_value: float | None,
 ) -> str:
     parts = [
         f"sample={sample_count}",
         f"median={median_future_return_pct}",
-        f"positive_rate={positive_rate_pct}",
+        f"positive_rate={positive_rate_pct if positive_rate_pct is not None else 'n/a'}",
     ]
     if robustness_label != "n/a" and robustness_value is not None:
         parts.append(f"{robustness_label}={robustness_value}")
