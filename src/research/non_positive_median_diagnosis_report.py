@@ -16,17 +16,38 @@ TARGET_CATEGORIES = ("strategy", "symbol", "alignment_state")
 
 
 @dataclass(frozen=True)
-class NormalizedRankingRow:
+class MetricRow:
     source: str
     horizon: str
     category: str
     group: str
     rank: int | None
-    median_future_return_pct: float | None
-    avg_future_return_pct: float | None
-    positive_rate_pct: float | None
-    flat_rate_pct: float | None
+    median_future_return_pct: float
+    avg_future_return_pct: float
+    positive_rate_pct: float
+    flat_rate_pct: float
     labeled_count: int | None
+    origin_file: str
+    path_hint: str
+    raw: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PairRow:
+    horizon: str
+    category: str
+    group: str
+    rank: int | None
+    latest_median_future_return_pct: float | None
+    cumulative_median_future_return_pct: float | None
+    latest_avg_future_return_pct: float | None
+    cumulative_avg_future_return_pct: float | None
+    latest_positive_rate_pct: float | None
+    cumulative_positive_rate_pct: float | None
+    latest_flat_rate_pct: float | None
+    cumulative_flat_rate_pct: float | None
+    latest_labeled_count: int | None
+    cumulative_labeled_count: int | None
     origin_file: str
     path_hint: str
     raw: dict[str, Any]
@@ -72,172 +93,14 @@ def _ratio(numerator: int, denominator: int) -> float:
     return round(numerator / denominator, 4)
 
 
-def _path_hint(path_parts: list[str]) -> str:
-    return " > ".join(path_parts[-8:])
+def _path_hint(parts: list[str]) -> str:
+    return " > ".join(parts[-8:])
 
 
-def _key_updates_context(key: str, context: dict[str, Any]) -> dict[str, Any]:
-    next_context = dict(context)
-
-    if key in TARGET_HORIZONS:
-        next_context["horizon"] = key
-    if key in TARGET_CATEGORIES:
-        next_context["category"] = key
-
-    lowered = key.lower()
-
-    if lowered in {"latest", "cumulative"}:
-        next_context["source"] = lowered
-
-    if lowered.startswith("latest_"):
-        next_context["source"] = "latest"
-    elif lowered.startswith("cumulative_"):
-        next_context["source"] = "cumulative"
-
-    if lowered in {
-        "latest_top_candidates",
-        "latest_candidates",
-        "latest_candidate_rows",
-        "latest_rankings",
-    }:
-        next_context["source"] = "latest"
-
-    if lowered in {
-        "cumulative_top_candidates",
-        "cumulative_candidates",
-        "cumulative_candidate_rows",
-        "cumulative_rankings",
-    }:
-        next_context["source"] = "cumulative"
-
-    return next_context
-
-
-def _extract_source(raw: dict[str, Any], context: dict[str, Any], path: Path) -> str:
-    explicit_candidates = (
-        raw.get("source"),
-        raw.get("window_type"),
-        raw.get("profile_type"),
-        context.get("source"),
-    )
-    for candidate in explicit_candidates:
-        if isinstance(candidate, str):
-            lowered = candidate.strip().lower()
-            if lowered in {"latest", "cumulative"}:
-                return lowered
-
-    path_lower = str(path).lower()
-    if "/latest/" in path_lower or "\\latest\\" in path_lower:
-        return "latest"
-    if "/cumulative/" in path_lower or "\\cumulative\\" in path_lower:
-        return "cumulative"
-
-    stem = path.stem.lower()
-    if "cumulative" in stem:
-        return "cumulative"
-    if "latest" in stem:
-        return "latest"
-
-    if path.parent.name.lower() == "latest":
-        return "latest"
-    if path.parent.name.lower() == "cumulative":
-        return "cumulative"
-
-    return "unknown"
-
-
-def _extract_horizon(raw: dict[str, Any], context: dict[str, Any]) -> str | None:
-    candidates = (
-        raw.get("horizon"),
-        raw.get("time_horizon"),
-        raw.get("label_horizon"),
-        raw.get("future_horizon"),
-        raw.get("value"),
-        context.get("horizon"),
-    )
-    for candidate in candidates:
-        if isinstance(candidate, str) and candidate in TARGET_HORIZONS:
-            return candidate
-    return None
-
-
-def _extract_category_from_group_keys(raw: dict[str, Any]) -> tuple[str | None, str | None]:
-    for category in TARGET_CATEGORIES:
-        plain_key = f"{category}_group"
-        latest_key = f"latest_top_{category}_group"
-        cumulative_key = f"cumulative_top_{category}_group"
-
-        for key in (plain_key, latest_key, cumulative_key):
-            value = raw.get(key)
-            if value is not None:
-                return category, str(value)
-
-    return None, None
-
-
-def _extract_category(raw: dict[str, Any], context: dict[str, Any]) -> str | None:
-    candidates = (
-        raw.get("category"),
-        raw.get("grouping_category"),
-        raw.get("dimension"),
-        context.get("category"),
-    )
-    for candidate in candidates:
-        if isinstance(candidate, str) and candidate in TARGET_CATEGORIES:
-            return candidate
-
-    inferred_category, _ = _extract_category_from_group_keys(raw)
-    return inferred_category
-
-
-def _extract_group(raw: dict[str, Any], category: str | None) -> str:
-    if category is not None:
-        preferred = raw.get(f"{category}_group")
-        if preferred is not None:
-            return str(preferred)
-
-    inferred_category, inferred_group = _extract_category_from_group_keys(raw)
-    if inferred_category is not None and inferred_group is not None:
-        return inferred_group
-
-    candidates = (
-        raw.get("group"),
-        raw.get("group_name"),
-        raw.get("candidate_group"),
-        raw.get("bucket"),
-        raw.get("name"),
-        raw.get("label"),
-        raw.get("value"),
-    )
-    for candidate in candidates:
-        if candidate is not None and not isinstance(candidate, (dict, list)):
-            return str(candidate)
-
-    return "unknown"
-
-
-def _extract_rank(raw: dict[str, Any], context: dict[str, Any]) -> int | None:
-    direct = (
-        raw.get("rank"),
-        raw.get("position"),
-        raw.get("top_rank"),
-        raw.get("candidate_rank"),
-        context.get("rank"),
-    )
-    for candidate in direct:
-        value = _safe_int(candidate)
-        if value is not None:
-            return value
-
-    list_index = _safe_int(context.get("list_index"))
-    if list_index is not None:
-        return list_index + 1
-
-    metric_prefixed_keys = [key for key in raw if key.startswith("latest_top_") or key.startswith("cumulative_top_")]
-    if metric_prefixed_keys:
-        return 1
-
-    return None
+def _format_pct(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.6f}"
 
 
 def _extract_metric(raw: dict[str, Any], *keys: str) -> float | None:
@@ -249,15 +112,8 @@ def _extract_metric(raw: dict[str, Any], *keys: str) -> float | None:
     return None
 
 
-def _extract_labeled_count(raw: dict[str, Any]) -> int | None:
-    for key in (
-        "labeled_count",
-        "label_count",
-        "count",
-        "sample_size",
-        "observations",
-        "sufficient_labeled_count",
-    ):
+def _extract_labeled_count(raw: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
         if key in raw:
             value = _safe_int(raw.get(key))
             if value is not None:
@@ -265,202 +121,128 @@ def _extract_labeled_count(raw: dict[str, Any]) -> int | None:
     return None
 
 
-def _looks_like_plain_metric_row(raw: dict[str, Any]) -> bool:
-    metric_keys = {
-        "median_future_return_pct",
-        "avg_future_return_pct",
-        "mean_future_return_pct",
-        "positive_rate_pct",
-        "flat_rate_pct",
-        "labeled_count",
-        "label_count",
-        "sample_size",
-        "count",
-    }
-    return any(key in raw for key in metric_keys)
+def _normalize_group(value: Any) -> str:
+    if value is None:
+        return "unknown"
+    return str(value)
 
 
-def _looks_like_prefixed_comparison_row(raw: dict[str, Any]) -> bool:
-    return any(
-        key in raw
-        for key in (
-            "latest_top_median_future_return_pct",
-            "cumulative_top_median_future_return_pct",
-            "latest_top_avg_future_return_pct",
-            "cumulative_top_avg_future_return_pct",
-        )
+def _metric_complete(raw: dict[str, Any]) -> bool:
+    return (
+        _extract_metric(raw, "median_future_return_pct") is not None
+        and _extract_metric(raw, "avg_future_return_pct", "mean_future_return_pct") is not None
+        and _extract_metric(raw, "positive_rate_pct", "positive_rate") is not None
+        and _extract_metric(raw, "flat_rate_pct", "flat_rate") is not None
     )
 
 
-def _walk_nodes(
+def _walk_summary_rows(
     node: Any,
-    context: dict[str, Any],
+    horizon: str | None,
+    category: str | None,
     path_parts: list[str],
-    instrumentation: dict[str, int],
-) -> list[tuple[dict[str, Any], dict[str, Any], list[str]]]:
-    results: list[tuple[dict[str, Any], dict[str, Any], list[str]]] = []
-
+    out_rows: list[tuple[dict[str, Any], str, str, int | None, list[str]]],
+) -> None:
     if isinstance(node, dict):
-        instrumentation["dict_nodes_seen"] += 1
-
-        if _looks_like_plain_metric_row(node) or _looks_like_prefixed_comparison_row(node):
-            instrumentation["candidate_dict_nodes_seen"] += 1
-            results.append((node, context, path_parts))
+        if horizon is not None and category is not None and _metric_complete(node):
+            out_rows.append((node, horizon, category, None, path_parts))
+            return
 
         for key, value in node.items():
-            next_context = _key_updates_context(key, context)
-            if isinstance(value, list):
-                for index, item in enumerate(value):
-                    indexed_context = dict(next_context)
-                    indexed_context["list_index"] = index
-                    results.extend(
-                        _walk_nodes(
-                            item,
-                            indexed_context,
-                            [*path_parts, key, f"[{index}]"],
-                            instrumentation,
-                        )
-                    )
-            else:
-                results.extend(
-                    _walk_nodes(
-                        value,
-                        next_context,
-                        [*path_parts, key],
-                        instrumentation,
-                    )
-                )
+            next_horizon = horizon
+            next_category = category
+
+            if key in TARGET_HORIZONS:
+                next_horizon = key
+            if key in TARGET_CATEGORIES:
+                next_category = key
+
+            _walk_summary_rows(
+                value,
+                next_horizon,
+                next_category,
+                [*path_parts, key],
+                out_rows,
+            )
 
     elif isinstance(node, list):
         for index, item in enumerate(node):
-            indexed_context = dict(context)
-            indexed_context["list_index"] = index
-            results.extend(
-                _walk_nodes(
+            rank = index + 1 if horizon is not None and category is not None else None
+            if isinstance(item, dict) and horizon is not None and category is not None and _metric_complete(item):
+                out_rows.append((item, horizon, category, rank, [*path_parts, f"[{index}]"]))
+            else:
+                _walk_summary_rows(
                     item,
-                    indexed_context,
+                    horizon,
+                    category,
                     [*path_parts, f"[{index}]"],
-                    instrumentation,
+                    out_rows,
                 )
-            )
-
-    return results
 
 
-def _normalize_plain_row(
-    raw: dict[str, Any],
-    context: dict[str, Any],
-    path: Path,
-    path_parts: list[str],
-    instrumentation: dict[str, int],
-) -> NormalizedRankingRow | None:
-    horizon = _extract_horizon(raw, context)
-    if horizon is None:
-        instrumentation["skipped_missing_horizon_count"] += 1
-        return None
-
-    category = _extract_category(raw, context)
-    if category is None:
-        instrumentation["skipped_missing_category_count"] += 1
-        return None
-
-    median = _extract_metric(raw, "median_future_return_pct", "median_return_pct", "median_pct")
-    avg = _extract_metric(
-        raw,
-        "avg_future_return_pct",
-        "mean_future_return_pct",
-        "avg_return_pct",
-        "mean_return_pct",
-    )
-    positive_rate = _extract_metric(raw, "positive_rate_pct", "positive_rate")
-    flat_rate = _extract_metric(raw, "flat_rate_pct", "flat_rate")
-    labeled_count = _extract_labeled_count(raw)
-
-    has_signal_metric = any(
-        metric is not None for metric in (median, avg, positive_rate, flat_rate)
-    ) or labeled_count is not None
-    if not has_signal_metric:
-        instrumentation["skipped_missing_metric_count"] += 1
-        return None
-
-    source = _extract_source(raw, context, path)
-    row = NormalizedRankingRow(
-        source=source,
-        horizon=horizon,
-        category=category,
-        group=_extract_group(raw, category),
-        rank=_extract_rank(raw, context),
-        median_future_return_pct=median,
-        avg_future_return_pct=avg,
-        positive_rate_pct=positive_rate,
-        flat_rate_pct=flat_rate,
-        labeled_count=labeled_count,
-        origin_file=path.name,
-        path_hint=_path_hint(path_parts),
-        raw=raw,
-    )
-    return row
+def _load_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _normalize_prefixed_rows(
-    raw: dict[str, Any],
-    context: dict[str, Any],
-    path: Path,
-    path_parts: list[str],
-    instrumentation: dict[str, int],
-) -> list[NormalizedRankingRow]:
-    horizon = _extract_horizon(raw, context)
-    if horizon is None:
-        instrumentation["skipped_missing_horizon_count"] += 1
-        return []
+def load_main_metric_rows(input_dir: Path) -> tuple[list[MetricRow], dict[str, int]]:
+    instrumentation = {
+        "summary_json_found": 0,
+        "summary_candidate_rows_seen": 0,
+        "main_rows_count": 0,
+        "metric_complete_rows_count": 0,
+        "summary_read_error_count": 0,
+        "summary_json_decode_error_count": 0,
+    }
 
-    category = _extract_category(raw, context)
-    if category is None:
-        instrumentation["skipped_missing_category_count"] += 1
-        return []
+    summary_path = input_dir / "summary.json"
+    rows: list[MetricRow] = []
 
-    group = _extract_group(raw, category)
-    rank = _extract_rank(raw, context)
+    if not summary_path.exists():
+        return rows, instrumentation
 
-    normalized: list[NormalizedRankingRow] = []
+    instrumentation["summary_json_found"] = 1
 
-    for prefix in ("latest", "cumulative"):
-        median = _extract_metric(
-            raw,
-            f"{prefix}_top_median_future_return_pct",
-            f"{prefix}_median_future_return_pct",
-        )
-        avg = _extract_metric(
-            raw,
-            f"{prefix}_top_avg_future_return_pct",
-            f"{prefix}_avg_future_return_pct",
-        )
-        positive_rate = _extract_metric(
-            raw,
-            f"{prefix}_top_positive_rate_pct",
-            f"{prefix}_positive_rate_pct",
-        )
-        flat_rate = _extract_metric(
-            raw,
-            f"{prefix}_top_flat_rate_pct",
-            f"{prefix}_flat_rate_pct",
-        )
-        labeled_count = None
-        for key in (
-            f"{prefix}_top_labeled_count",
-            f"{prefix}_labeled_count",
+    try:
+        payload = _load_json(summary_path)
+    except json.JSONDecodeError:
+        instrumentation["summary_json_decode_error_count"] += 1
+        return rows, instrumentation
+    except OSError:
+        instrumentation["summary_read_error_count"] += 1
+        return rows, instrumentation
+
+    discovered: list[tuple[dict[str, Any], str, str, int | None, list[str]]] = []
+    _walk_summary_rows(payload, None, None, [summary_path.name], discovered)
+
+    instrumentation["summary_candidate_rows_seen"] = len(discovered)
+
+    for raw, horizon, category, rank, path_parts in discovered:
+        median = _extract_metric(raw, "median_future_return_pct")
+        avg = _extract_metric(raw, "avg_future_return_pct", "mean_future_return_pct")
+        positive_rate = _extract_metric(raw, "positive_rate_pct", "positive_rate")
+        flat_rate = _extract_metric(raw, "flat_rate_pct", "flat_rate")
+
+        if (
+            median is None
+            or avg is None
+            or positive_rate is None
+            or flat_rate is None
         ):
-            value = _safe_int(raw.get(key))
-            if value is not None:
-                labeled_count = value
-                break
-
-        if all(metric is None for metric in (median, avg, positive_rate, flat_rate)) and labeled_count is None:
             continue
 
-        normalized.append(
-            NormalizedRankingRow(
-                source=prefix,
+        instrumentation["metric_complete_rows_count"] += 1
+
+        group = _normalize_group(
+            raw.get("group")
+            or raw.get("group_name")
+            or raw.get("candidate_group")
+            or raw.get("name")
+            or raw.get("label")
+        )
+
+        rows.append(
+            MetricRow(
+                source="latest",
                 horizon=horizon,
                 category=category,
                 group=group,
@@ -469,139 +251,175 @@ def _normalize_prefixed_rows(
                 avg_future_return_pct=avg,
                 positive_rate_pct=positive_rate,
                 flat_rate_pct=flat_rate,
-                labeled_count=labeled_count,
-                origin_file=path.name,
+                labeled_count=_extract_labeled_count(
+                    raw,
+                    "labeled_count",
+                    "label_count",
+                    "count",
+                    "sample_size",
+                    "observations",
+                ),
+                origin_file=summary_path.name,
                 path_hint=_path_hint(path_parts),
                 raw=raw,
             )
         )
 
-    if not normalized:
-        instrumentation["skipped_missing_metric_count"] += 1
-
-    return normalized
-
-
-def load_normalized_rows(
-    input_dir: Path,
-) -> tuple[list[NormalizedRankingRow], dict[str, int]]:
-    instrumentation: dict[str, int] = {
-        "scanned_json_files": 0,
-        "dict_nodes_seen": 0,
-        "candidate_dict_nodes_seen": 0,
-        "normalized_rows_count": 0,
-        "latest_rows_count": 0,
-        "cumulative_rows_count": 0,
-        "unknown_source_rows_count": 0,
-        "skipped_missing_horizon_count": 0,
-        "skipped_missing_category_count": 0,
-        "skipped_missing_metric_count": 0,
-        "json_decode_error_count": 0,
-        "read_error_count": 0,
-    }
-
-    rows: list[NormalizedRankingRow] = []
-
-    if not input_dir.exists():
-        return rows, instrumentation
-
-    for path in sorted(input_dir.glob("*.json")):
-        if path.name == DEFAULT_JSON_OUTPUT.name:
-            continue
-
-        instrumentation["scanned_json_files"] += 1
-
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            instrumentation["json_decode_error_count"] += 1
-            continue
-        except OSError:
-            instrumentation["read_error_count"] += 1
-            continue
-
-        nodes = _walk_nodes(
-            node=payload,
-            context={},
-            path_parts=[path.name],
-            instrumentation=instrumentation,
-        )
-
-        for raw, context, path_parts in nodes:
-            normalized_batch: list[NormalizedRankingRow] = []
-
-            if _looks_like_prefixed_comparison_row(raw):
-                normalized_batch.extend(
-                    _normalize_prefixed_rows(
-                        raw=raw,
-                        context=context,
-                        path=path,
-                        path_parts=path_parts,
-                        instrumentation=instrumentation,
-                    )
-                )
-            else:
-                normalized = _normalize_plain_row(
-                    raw=raw,
-                    context=context,
-                    path=path,
-                    path_parts=path_parts,
-                    instrumentation=instrumentation,
-                )
-                if normalized is not None:
-                    normalized_batch.append(normalized)
-
-            for row in normalized_batch:
-                rows.append(row)
-                instrumentation["normalized_rows_count"] += 1
-                if row.source == "latest":
-                    instrumentation["latest_rows_count"] += 1
-                elif row.source == "cumulative":
-                    instrumentation["cumulative_rows_count"] += 1
-                else:
-                    instrumentation["unknown_source_rows_count"] += 1
-
+    instrumentation["main_rows_count"] = len(rows)
     return rows, instrumentation
 
 
-def _is_non_positive_median(row: NormalizedRankingRow) -> bool:
-    return row.median_future_return_pct is not None and row.median_future_return_pct <= 0.0
+def load_probe_pair_rows(input_dir: Path) -> tuple[list[PairRow], dict[str, int]]:
+    instrumentation = {
+        "probe_json_found": 0,
+        "auxiliary_probe_rows_count": 0,
+        "pair_rows_count": 0,
+        "probe_read_error_count": 0,
+        "probe_json_decode_error_count": 0,
+        "probe_rows_missing_horizon_or_category_count": 0,
+    }
+
+    probe_path = input_dir / "latest_cumulative_fallback_probe_summary.json"
+    rows: list[PairRow] = []
+
+    if not probe_path.exists():
+        return rows, instrumentation
+
+    instrumentation["probe_json_found"] = 1
+
+    try:
+        payload = _load_json(probe_path)
+    except json.JSONDecodeError:
+        instrumentation["probe_json_decode_error_count"] += 1
+        return rows, instrumentation
+    except OSError:
+        instrumentation["probe_read_error_count"] += 1
+        return rows, instrumentation
+
+    representative_examples = payload.get("representative_examples", {})
+    if not isinstance(representative_examples, dict):
+        return rows, instrumentation
+
+    for horizon, examples in representative_examples.items():
+        if horizon not in TARGET_HORIZONS or not isinstance(examples, list):
+            continue
+
+        for index, raw in enumerate(examples):
+            if not isinstance(raw, dict):
+                continue
+
+            category = raw.get("category")
+            if category not in TARGET_CATEGORIES:
+                instrumentation["probe_rows_missing_horizon_or_category_count"] += 1
+                continue
+
+            rows.append(
+                PairRow(
+                    horizon=horizon,
+                    category=category,
+                    group=_normalize_group(
+                        raw.get("group")
+                        or raw.get("latest_top_group")
+                        or raw.get(f"latest_top_{category}_group")
+                        or raw.get("latest_group")
+                        or raw.get("cumulative_group")
+                    ),
+                    rank=index + 1,
+                    latest_median_future_return_pct=_extract_metric(
+                        raw,
+                        "latest_top_median_future_return_pct",
+                        "latest_median_future_return_pct",
+                    ),
+                    cumulative_median_future_return_pct=_extract_metric(
+                        raw,
+                        "cumulative_top_median_future_return_pct",
+                        "cumulative_median_future_return_pct",
+                    ),
+                    latest_avg_future_return_pct=_extract_metric(
+                        raw,
+                        "latest_top_avg_future_return_pct",
+                        "latest_avg_future_return_pct",
+                    ),
+                    cumulative_avg_future_return_pct=_extract_metric(
+                        raw,
+                        "cumulative_top_avg_future_return_pct",
+                        "cumulative_avg_future_return_pct",
+                    ),
+                    latest_positive_rate_pct=_extract_metric(
+                        raw,
+                        "latest_top_positive_rate_pct",
+                        "latest_positive_rate_pct",
+                    ),
+                    cumulative_positive_rate_pct=_extract_metric(
+                        raw,
+                        "cumulative_top_positive_rate_pct",
+                        "cumulative_positive_rate_pct",
+                    ),
+                    latest_flat_rate_pct=_extract_metric(
+                        raw,
+                        "latest_top_flat_rate_pct",
+                        "latest_flat_rate_pct",
+                    ),
+                    cumulative_flat_rate_pct=_extract_metric(
+                        raw,
+                        "cumulative_top_flat_rate_pct",
+                        "cumulative_flat_rate_pct",
+                    ),
+                    latest_labeled_count=_extract_labeled_count(
+                        raw,
+                        "latest_top_labeled_count",
+                        "latest_labeled_count",
+                        "latest_labeled_observation_count",
+                    ),
+                    cumulative_labeled_count=_extract_labeled_count(
+                        raw,
+                        "cumulative_top_labeled_count",
+                        "cumulative_labeled_count",
+                        "cumulative_labeled_observation_count",
+                    ),
+                    origin_file=probe_path.name,
+                    path_hint=_path_hint(
+                        [probe_path.name, "representative_examples", horizon, f"[{index}]"]
+                    ),
+                    raw=raw,
+                )
+            )
+
+    instrumentation["auxiliary_probe_rows_count"] = len(rows)
+    instrumentation["pair_rows_count"] = len(rows)
+    return rows, instrumentation
 
 
-def _is_positive_median(row: NormalizedRankingRow) -> bool:
-    return row.median_future_return_pct is not None and row.median_future_return_pct > 0.0
+def _is_non_positive_median(row: MetricRow) -> bool:
+    return row.median_future_return_pct <= 0.0
 
 
-def _rank_within(row: NormalizedRankingRow, top_n: int) -> bool:
+def _is_positive_median(row: MetricRow) -> bool:
+    return row.median_future_return_pct > 0.0
+
+
+def _rank_within(row: MetricRow, top_n: int) -> bool:
     return row.rank is not None and row.rank <= top_n
 
 
-def _flat_rate_dominant(row: NormalizedRankingRow) -> bool:
-    flat_rate = row.flat_rate_pct
-    positive_rate = row.positive_rate_pct
-
-    if flat_rate is None:
-        return False
-    if positive_rate is None:
-        return flat_rate >= 50.0
-
-    negative_rate = max(0.0, 100.0 - positive_rate - flat_rate)
-    return flat_rate >= positive_rate and flat_rate >= negative_rate
+def _flat_rate_dominant(row: MetricRow) -> bool:
+    negative_rate = max(0.0, 100.0 - row.positive_rate_pct - row.flat_rate_pct)
+    return row.flat_rate_pct >= row.positive_rate_pct and row.flat_rate_pct >= negative_rate
 
 
-def _has_mean_positive_conflict(row: NormalizedRankingRow) -> bool:
-    return _is_non_positive_median(row) and (row.avg_future_return_pct or 0.0) > 0.0
+def _has_mean_positive_conflict(row: MetricRow) -> bool:
+    return _is_non_positive_median(row) and row.avg_future_return_pct > 0.0
 
 
-def _has_positive_rate_conflict(row: NormalizedRankingRow, threshold: float = 50.0) -> bool:
-    return _is_non_positive_median(row) and (row.positive_rate_pct or 0.0) >= threshold
+def _has_positive_rate_conflict(row: MetricRow, threshold: float = 50.0) -> bool:
+    return _is_non_positive_median(row) and row.positive_rate_pct >= threshold
 
 
-def _has_sufficient_labels(row: NormalizedRankingRow, min_count: int = 5) -> bool:
+def _has_sufficient_labels(row: MetricRow, min_count: int = 5) -> bool:
     return _is_non_positive_median(row) and (row.labeled_count or 0) >= min_count
 
 
-def _build_rank_scope_breakdown(rows: list[NormalizedRankingRow], top_n: int = 3) -> dict[str, Any]:
+def _build_rank_scope_breakdown(rows: list[MetricRow], top_n: int = 3) -> dict[str, Any]:
     top1_rows = [row for row in rows if row.rank == 1]
     topn_rows = [row for row in rows if _rank_within(row, top_n)]
     beyond_top1_rows = [row for row in topn_rows if row.rank is not None and row.rank > 1]
@@ -629,7 +447,7 @@ def _build_rank_scope_breakdown(rows: list[NormalizedRankingRow], top_n: int = 3
     }
 
 
-def _breakdown_by_horizon_and_category(rows: list[NormalizedRankingRow]) -> dict[str, Any]:
+def _breakdown_by_horizon_and_category(rows: list[MetricRow]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for horizon in TARGET_HORIZONS:
         horizon_rows = [row for row in rows if row.horizon == horizon]
@@ -658,7 +476,7 @@ def _breakdown_by_horizon_and_category(rows: list[NormalizedRankingRow]) -> dict
     return result
 
 
-def _breakdown_by_category(rows: list[NormalizedRankingRow]) -> dict[str, Any]:
+def _breakdown_by_category(rows: list[MetricRow]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for category in TARGET_CATEGORIES:
         category_rows = [row for row in rows if row.category == category]
@@ -673,7 +491,7 @@ def _breakdown_by_category(rows: list[NormalizedRankingRow]) -> dict[str, Any]:
     return result
 
 
-def _build_metric_interaction_breakdown(rows: list[NormalizedRankingRow]) -> dict[str, Any]:
+def _build_metric_interaction_breakdown(rows: list[MetricRow]) -> dict[str, Any]:
     non_positive_rows = [row for row in rows if _is_non_positive_median(row)]
     mean_positive_conflict = [row for row in non_positive_rows if _has_mean_positive_conflict(row)]
     positive_rate_conflict = [row for row in non_positive_rows if _has_positive_rate_conflict(row)]
@@ -693,50 +511,38 @@ def _build_metric_interaction_breakdown(rows: list[NormalizedRankingRow]) -> dic
     }
 
 
-def _build_latest_vs_cumulative_pairs(
-    rows: list[NormalizedRankingRow],
-) -> list[dict[str, Any]]:
-    latest_index: dict[tuple[str, str, str, int | None], NormalizedRankingRow] = {}
-    cumulative_index: dict[tuple[str, str, str, int | None], NormalizedRankingRow] = {}
+def _build_latest_vs_cumulative_summary(pair_rows: list[PairRow]) -> dict[str, Any]:
+    noisy_but_healthy: list[dict[str, Any]] = []
 
-    for row in rows:
-        key = (row.horizon, row.category, row.group, row.rank)
-        if row.source == "latest":
-            latest_index[key] = row
-        elif row.source == "cumulative":
-            cumulative_index[key] = row
-
-    pairs: list[dict[str, Any]] = []
-    for key, latest_row in latest_index.items():
-        cumulative_row = cumulative_index.get(key)
-        if cumulative_row is None:
-            continue
-
-        latest_non_positive = _is_non_positive_median(latest_row)
-        cumulative_positive = _is_positive_median(cumulative_row)
-
-        pairs.append(
-            {
-                "horizon": latest_row.horizon,
-                "category": latest_row.category,
-                "group": latest_row.group,
-                "rank": latest_row.rank,
-                "latest_median_future_return_pct": latest_row.median_future_return_pct,
-                "cumulative_median_future_return_pct": cumulative_row.median_future_return_pct,
-                "latest_non_positive": latest_non_positive,
-                "cumulative_positive": cumulative_positive,
-                "latest_window_noisy_but_cumulative_healthy": latest_non_positive and cumulative_positive,
-                "latest_origin_file": latest_row.origin_file,
-                "cumulative_origin_file": cumulative_row.origin_file,
-            }
+    for row in pair_rows:
+        latest_non_positive = (
+            row.latest_median_future_return_pct is not None
+            and row.latest_median_future_return_pct <= 0.0
+        )
+        cumulative_positive = (
+            row.cumulative_median_future_return_pct is not None
+            and row.cumulative_median_future_return_pct > 0.0
         )
 
-    return pairs
-
-
-def _build_latest_vs_cumulative_summary(rows: list[NormalizedRankingRow]) -> dict[str, Any]:
-    pairs = _build_latest_vs_cumulative_pairs(rows)
-    noisy_but_healthy = [pair for pair in pairs if pair["latest_window_noisy_but_cumulative_healthy"]]
+        if latest_non_positive and cumulative_positive:
+            noisy_but_healthy.append(
+                {
+                    "horizon": row.horizon,
+                    "category": row.category,
+                    "group": row.group,
+                    "rank": row.rank,
+                    "latest_median_future_return_pct": row.latest_median_future_return_pct,
+                    "cumulative_median_future_return_pct": row.cumulative_median_future_return_pct,
+                    "latest_avg_future_return_pct": row.latest_avg_future_return_pct,
+                    "cumulative_avg_future_return_pct": row.cumulative_avg_future_return_pct,
+                    "latest_positive_rate_pct": row.latest_positive_rate_pct,
+                    "cumulative_positive_rate_pct": row.cumulative_positive_rate_pct,
+                    "latest_flat_rate_pct": row.latest_flat_rate_pct,
+                    "cumulative_flat_rate_pct": row.cumulative_flat_rate_pct,
+                    "origin_file": row.origin_file,
+                    "path_hint": row.path_hint,
+                }
+            )
 
     horizon_breakdown: dict[str, Any] = {}
     for horizon in TARGET_HORIZONS:
@@ -753,21 +559,24 @@ def _build_latest_vs_cumulative_summary(rows: list[NormalizedRankingRow]) -> dic
         }
 
     return {
-        "pair_count": len(pairs),
+        "pair_count": len(pair_rows),
         "latest_non_positive_while_cumulative_positive_count": len(noisy_but_healthy),
-        "latest_non_positive_while_cumulative_positive_ratio": _ratio(len(noisy_but_healthy), len(pairs)),
+        "latest_non_positive_while_cumulative_positive_ratio": _ratio(
+            len(noisy_but_healthy),
+            len(pair_rows),
+        ),
         "by_horizon": horizon_breakdown,
         "by_category": category_breakdown,
         "examples": noisy_but_healthy[:10],
     }
 
 
-def _representative_examples(rows: list[NormalizedRankingRow], limit: int = 10) -> list[dict[str, Any]]:
+def _representative_examples(rows: list[MetricRow], limit: int = 10) -> list[dict[str, Any]]:
     candidates = [row for row in rows if _is_non_positive_median(row)]
     candidates.sort(
         key=lambda row: (
             row.rank if row.rank is not None else 9999,
-            row.median_future_return_pct if row.median_future_return_pct is not None else 9999.0,
+            row.median_future_return_pct,
         )
     )
 
@@ -826,25 +635,29 @@ def _build_final_diagnosis(
 ) -> dict[str, Any]:
     labels: list[str] = []
 
-    top1_ratio = rank_scope["top1"]["non_positive_median_ratio"]
-    top3_ratio = rank_scope["top3"]["non_positive_median_ratio"]
-    beyond_top1_ratio = rank_scope["beyond_top1_within_topn"]["non_positive_median_ratio"]
-
-    flat_dominant_ratio = metric_interactions["median_le_zero_and_flat_rate_dominant_ratio"]
-    mean_positive_conflict_ratio = metric_interactions["median_le_zero_and_avg_gt_zero_ratio"]
-    latest_noise_ratio = latest_vs_cumulative["latest_non_positive_while_cumulative_positive_ratio"]
-
     if overall["total_evaluated_rows"] == 0:
-        labels.append("normalization_failure_or_schema_mismatch")
+        labels.append("main_latest_metric_rows_not_found")
     else:
-        if top1_ratio >= 0.5 and beyond_top1_ratio < 0.35:
-            labels.append("non_positive_median_is_top_rank_specific")
+        top1_ratio = rank_scope["top1"]["non_positive_median_ratio"]
+        top3_ratio = rank_scope["top3"]["non_positive_median_ratio"]
+        beyond_top1_ratio = rank_scope["beyond_top1_within_topn"]["non_positive_median_ratio"]
+
+        flat_dominant_ratio = metric_interactions["median_le_zero_and_flat_rate_dominant_ratio"]
+        mean_positive_conflict_ratio = metric_interactions["median_le_zero_and_avg_gt_zero_ratio"]
+        positive_rate_conflict_ratio = metric_interactions["median_le_zero_and_positive_rate_ge_50_ratio"]
+        latest_noise_ratio = latest_vs_cumulative["latest_non_positive_while_cumulative_positive_ratio"]
+
         if top1_ratio >= 0.5 and top3_ratio >= 0.5:
             labels.append("non_positive_median_is_broad_across_rankings")
+        elif top1_ratio >= 0.5 and beyond_top1_ratio < 0.35:
+            labels.append("non_positive_median_is_top_rank_specific")
+
         if flat_dominant_ratio >= 0.4:
             labels.append("flat_heavy_distribution_is_primary_median_suppressor")
         if mean_positive_conflict_ratio > 0.0:
             labels.append("mean_positive_but_median_non_positive_conflict_exists")
+        if positive_rate_conflict_ratio > 0.0:
+            labels.append("positive_rate_strength_conflicts_with_non_positive_median")
         if latest_noise_ratio >= 0.3:
             labels.append("latest_window_noise_dominates_median_signal")
 
@@ -854,21 +667,16 @@ def _build_final_diagnosis(
     worst_horizon = _worst_horizon(horizon_breakdown)
     worst_category = _worst_category(category_breakdown)
 
-    primary_finding = labels[0]
-    secondary_finding = worst_horizon or "unknown_horizon"
-
     summary = (
         f"evaluated_rows={overall['total_evaluated_rows']}, "
         f"non_positive_median_count={overall['non_positive_median_count']}, "
-        f"top1_ratio={top1_ratio}, "
-        f"top3_ratio={top3_ratio}, "
         f"worst_horizon={worst_horizon}, "
         f"worst_category={worst_category}."
     )
 
     return {
-        "primary_finding": primary_finding,
-        "secondary_finding": secondary_finding,
+        "primary_finding": labels[0],
+        "secondary_finding": worst_horizon or "unknown_horizon",
         "worst_horizon": worst_horizon,
         "worst_category": worst_category,
         "diagnosis_labels": labels,
@@ -877,26 +685,25 @@ def _build_final_diagnosis(
 
 
 def build_non_positive_median_diagnosis_report(input_dir: Path) -> dict[str, Any]:
-    rows, instrumentation = load_normalized_rows(input_dir)
-    evaluated_rows = [row for row in rows if row.source == "latest"]
+    main_rows, main_stats = load_main_metric_rows(input_dir)
+    pair_rows, pair_stats = load_probe_pair_rows(input_dir)
 
     overall = {
-        "total_normalized_rows": len(rows),
-        "total_evaluated_rows": len(evaluated_rows),
-        "non_positive_median_count": sum(1 for row in evaluated_rows if _is_non_positive_median(row)),
-        "positive_median_count": sum(1 for row in evaluated_rows if _is_positive_median(row)),
+        "total_evaluated_rows": len(main_rows),
+        "non_positive_median_count": sum(1 for row in main_rows if _is_non_positive_median(row)),
+        "positive_median_count": sum(1 for row in main_rows if _is_positive_median(row)),
     }
     overall["non_positive_median_ratio"] = _ratio(
         overall["non_positive_median_count"],
         overall["total_evaluated_rows"],
     )
 
-    rank_scope = _build_rank_scope_breakdown(evaluated_rows, top_n=3)
-    horizon_breakdown = _breakdown_by_horizon_and_category(evaluated_rows)
-    category_breakdown = _breakdown_by_category(evaluated_rows)
-    metric_interactions = _build_metric_interaction_breakdown(evaluated_rows)
-    latest_vs_cumulative = _build_latest_vs_cumulative_summary(rows)
-    representative_examples = _representative_examples(evaluated_rows, limit=10)
+    rank_scope = _build_rank_scope_breakdown(main_rows, top_n=3)
+    horizon_breakdown = _breakdown_by_horizon_and_category(main_rows)
+    category_breakdown = _breakdown_by_category(main_rows)
+    metric_interactions = _build_metric_interaction_breakdown(main_rows)
+    latest_vs_cumulative = _build_latest_vs_cumulative_summary(pair_rows)
+    representative_examples = _representative_examples(main_rows, limit=10)
     final_diagnosis = _build_final_diagnosis(
         overall=overall,
         rank_scope=rank_scope,
@@ -911,7 +718,18 @@ def build_non_positive_median_diagnosis_report(input_dir: Path) -> dict[str, Any
             "generated_at": datetime.now(UTC).isoformat(),
             "input_dir": str(input_dir),
         },
-        "parser_instrumentation": instrumentation,
+        "source_targeting": {
+            "main_diagnosis_source": "summary.json",
+            "auxiliary_pair_source": "latest_cumulative_fallback_probe_summary.json",
+            "main_rows_count": main_stats["main_rows_count"],
+            "metric_complete_rows_count": main_stats["metric_complete_rows_count"],
+            "auxiliary_probe_rows_count": pair_stats["auxiliary_probe_rows_count"],
+            "pair_rows_count": pair_stats["pair_rows_count"],
+        },
+        "parser_instrumentation": {
+            **main_stats,
+            **pair_stats,
+        },
         "overall_median_blocker_overview": overall,
         "rank_scope_breakdown": rank_scope,
         "horizon_breakdown": horizon_breakdown,
@@ -923,29 +741,32 @@ def build_non_positive_median_diagnosis_report(input_dir: Path) -> dict[str, Any
     }
 
 
-def _format_pct(value: float | None) -> str:
-    if value is None:
-        return "n/a"
-    return f"{value:.6f}"
-
-
 def build_non_positive_median_diagnosis_markdown(summary: dict[str, Any]) -> str:
+    source_targeting = summary["source_targeting"]
+    parser_stats = summary["parser_instrumentation"]
     overall = summary["overall_median_blocker_overview"]
     rank_scope = summary["rank_scope_breakdown"]
     metric_interactions = summary["metric_interaction_breakdown"]
     final_diagnosis = summary["final_diagnosis"]
-    parser_stats = summary["parser_instrumentation"]
+    latest_vs_cumulative = summary["latest_vs_cumulative_summary"]
 
     lines: list[str] = []
     lines.append("Non-Positive Median Diagnosis")
     lines.append(f"Generated: {summary['metadata']['generated_at']}")
+    lines.append("")
+    lines.append("Source Targeting")
+    lines.append(f"- main_diagnosis_source: {source_targeting['main_diagnosis_source']}")
+    lines.append(f"- auxiliary_pair_source: {source_targeting['auxiliary_pair_source']}")
+    lines.append(f"- main_rows_count: {source_targeting['main_rows_count']}")
+    lines.append(f"- metric_complete_rows_count: {source_targeting['metric_complete_rows_count']}")
+    lines.append(f"- auxiliary_probe_rows_count: {source_targeting['auxiliary_probe_rows_count']}")
+    lines.append(f"- pair_rows_count: {source_targeting['pair_rows_count']}")
     lines.append("")
     lines.append("Parser Instrumentation")
     for key, value in parser_stats.items():
         lines.append(f"- {key}: {value}")
     lines.append("")
     lines.append("Overall Median Blocker Overview")
-    lines.append(f"- total_normalized_rows: {overall['total_normalized_rows']}")
     lines.append(f"- total_evaluated_rows: {overall['total_evaluated_rows']}")
     lines.append(f"- non_positive_median_count: {overall['non_positive_median_count']}")
     lines.append(f"- positive_median_count: {overall['positive_median_count']}")
@@ -1006,7 +827,6 @@ def build_non_positive_median_diagnosis_markdown(summary: dict[str, Any]) -> str
     )
     lines.append("")
     lines.append("Latest vs Cumulative Summary")
-    latest_vs_cumulative = summary["latest_vs_cumulative_summary"]
     lines.append(f"- pair_count: {latest_vs_cumulative['pair_count']}")
     lines.append(
         f"- latest_non_positive_while_cumulative_positive_count: "
@@ -1117,6 +937,7 @@ def main() -> None:
         json.dumps(
             {
                 **outputs,
+                "source_targeting": summary["source_targeting"],
                 "parser_instrumentation": summary["parser_instrumentation"],
                 "final_diagnosis": summary["final_diagnosis"],
             },

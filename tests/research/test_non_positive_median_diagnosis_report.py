@@ -6,7 +6,8 @@ from pathlib import Path
 from src.research.non_positive_median_diagnosis_report import (
     build_non_positive_median_diagnosis_markdown,
     build_non_positive_median_diagnosis_report,
-    load_normalized_rows,
+    load_main_metric_rows,
+    load_probe_pair_rows,
     write_non_positive_median_diagnosis_report,
 )
 
@@ -16,70 +17,81 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def test_load_normalized_rows_defaults_summary_json_in_latest_dir_to_latest_source(tmp_path: Path) -> None:
+def test_load_main_metric_rows_reads_only_metric_complete_summary_rows(tmp_path: Path) -> None:
     latest_dir = tmp_path / "latest"
+
     _write_json(
         latest_dir / "summary.json",
         {
-            "15m": {
-                "strategy": [
+            "latest_candidate_rankings": {
+                "15m": {
+                    "strategy": [
+                        {
+                            "group": "swing",
+                            "median_future_return_pct": -0.10,
+                            "avg_future_return_pct": 0.03,
+                            "positive_rate_pct": 51.0,
+                            "flat_rate_pct": 44.0,
+                            "labeled_count": 10,
+                        },
+                        {
+                            "group": "intraday",
+                            "median_future_return_pct": -0.02,
+                            "labeled_count": 7,
+                        },
+                    ]
+                }
+            }
+        },
+    )
+
+    rows, stats = load_main_metric_rows(latest_dir)
+
+    assert len(rows) == 1
+    assert rows[0].source == "latest"
+    assert rows[0].origin_file == "summary.json"
+    assert rows[0].horizon == "15m"
+    assert rows[0].category == "strategy"
+    assert rows[0].group == "swing"
+    assert rows[0].rank == 1
+    assert stats["main_rows_count"] == 1
+    assert stats["metric_complete_rows_count"] == 1
+
+
+def test_load_probe_pair_rows_reads_probe_only_as_auxiliary_pairs(tmp_path: Path) -> None:
+    latest_dir = tmp_path / "latest"
+
+    _write_json(
+        latest_dir / "latest_cumulative_fallback_probe_summary.json",
+        {
+            "representative_examples": {
+                "1h": [
                     {
-                        "group": "swing",
-                        "median_future_return_pct": -0.10,
-                        "avg_future_return_pct": 0.02,
-                        "positive_rate_pct": 52.0,
-                        "flat_rate_pct": 40.0,
-                        "labeled_count": 12,
+                        "category": "symbol",
+                        "group": "BTCUSDT",
+                        "latest_top_median_future_return_pct": -0.05,
+                        "cumulative_top_median_future_return_pct": 0.12,
+                        "latest_top_avg_future_return_pct": 0.01,
+                        "cumulative_top_avg_future_return_pct": 0.16,
                     }
                 ]
             }
         },
     )
 
-    rows, instrumentation = load_normalized_rows(latest_dir)
+    rows, stats = load_probe_pair_rows(latest_dir)
 
     assert len(rows) == 1
-    assert rows[0].source == "latest"
-    assert rows[0].horizon == "15m"
-    assert rows[0].category == "strategy"
-    assert rows[0].group == "swing"
-    assert rows[0].rank == 1
-    assert instrumentation["latest_rows_count"] == 1
-    assert instrumentation["normalized_rows_count"] == 1
+    assert rows[0].horizon == "1h"
+    assert rows[0].category == "symbol"
+    assert rows[0].group == "BTCUSDT"
+    assert rows[0].latest_median_future_return_pct == -0.05
+    assert rows[0].cumulative_median_future_return_pct == 0.12
+    assert stats["auxiliary_probe_rows_count"] == 1
+    assert stats["pair_rows_count"] == 1
 
 
-def test_load_normalized_rows_supports_prefixed_latest_and_cumulative_comparison_rows(tmp_path: Path) -> None:
-    latest_dir = tmp_path / "latest"
-    _write_json(
-        latest_dir / "latest_cumulative_fallback_probe_summary.json",
-        {
-            "cases": [
-                {
-                    "horizon": "1h",
-                    "category": "symbol",
-                    "group": "BTCUSDT",
-                    "latest_top_median_future_return_pct": -0.05,
-                    "latest_top_avg_future_return_pct": 0.01,
-                    "latest_top_positive_rate_pct": 55.0,
-                    "latest_top_flat_rate_pct": 35.0,
-                    "cumulative_top_median_future_return_pct": 0.12,
-                    "cumulative_top_avg_future_return_pct": 0.16,
-                    "cumulative_top_positive_rate_pct": 58.0,
-                    "cumulative_top_flat_rate_pct": 22.0,
-                }
-            ]
-        },
-    )
-
-    rows, instrumentation = load_normalized_rows(latest_dir)
-
-    assert len(rows) == 2
-    assert {row.source for row in rows} == {"latest", "cumulative"}
-    assert instrumentation["latest_rows_count"] == 1
-    assert instrumentation["cumulative_rows_count"] == 1
-
-
-def test_build_non_positive_median_diagnosis_report_computes_required_sections(tmp_path: Path) -> None:
+def test_build_report_uses_summary_for_main_diagnosis_and_probe_for_pairs(tmp_path: Path) -> None:
     latest_dir = tmp_path / "latest"
 
     _write_json(
@@ -98,7 +110,7 @@ def test_build_non_positive_median_diagnosis_report_computes_required_sections(t
                         },
                         {
                             "group": "intraday",
-                            "median_future_return_pct": -0.04,
+                            "median_future_return_pct": -0.03,
                             "avg_future_return_pct": -0.01,
                             "positive_rate_pct": 41.0,
                             "flat_rate_pct": 47.0,
@@ -137,74 +149,75 @@ def test_build_non_positive_median_diagnosis_report_computes_required_sections(t
     _write_json(
         latest_dir / "latest_cumulative_fallback_probe_summary.json",
         {
-            "cases": [
-                {
-                    "horizon": "15m",
-                    "category": "strategy",
-                    "group": "swing",
-                    "latest_top_median_future_return_pct": -0.10,
-                    "latest_top_avg_future_return_pct": 0.20,
-                    "latest_top_positive_rate_pct": 55.0,
-                    "latest_top_flat_rate_pct": 35.0,
-                    "cumulative_top_median_future_return_pct": 0.25,
-                    "cumulative_top_avg_future_return_pct": 0.40,
-                    "cumulative_top_positive_rate_pct": 62.0,
-                    "cumulative_top_flat_rate_pct": 18.0,
-                },
-                {
-                    "horizon": "1h",
-                    "category": "symbol",
-                    "group": "BTCUSDT",
-                    "latest_top_median_future_return_pct": -0.20,
-                    "latest_top_avg_future_return_pct": 0.10,
-                    "latest_top_positive_rate_pct": 52.0,
-                    "latest_top_flat_rate_pct": 38.0,
-                    "cumulative_top_median_future_return_pct": 0.15,
-                    "cumulative_top_avg_future_return_pct": 0.22,
-                    "cumulative_top_positive_rate_pct": 57.0,
-                    "cumulative_top_flat_rate_pct": 28.0,
-                },
-            ]
+            "representative_examples": {
+                "15m": [
+                    {
+                        "category": "strategy",
+                        "group": "swing",
+                        "latest_top_median_future_return_pct": -0.10,
+                        "cumulative_top_median_future_return_pct": 0.25,
+                        "latest_top_avg_future_return_pct": 0.20,
+                        "cumulative_top_avg_future_return_pct": 0.40,
+                        "latest_top_positive_rate_pct": 55.0,
+                        "cumulative_top_positive_rate_pct": 62.0,
+                        "latest_top_flat_rate_pct": 35.0,
+                        "cumulative_top_flat_rate_pct": 18.0,
+                    }
+                ],
+                "1h": [
+                    {
+                        "category": "symbol",
+                        "group": "BTCUSDT",
+                        "latest_top_median_future_return_pct": -0.20,
+                        "cumulative_top_median_future_return_pct": 0.15,
+                        "latest_top_avg_future_return_pct": 0.10,
+                        "cumulative_top_avg_future_return_pct": 0.22,
+                    }
+                ],
+            }
         },
     )
 
     summary = build_non_positive_median_diagnosis_report(latest_dir)
 
+    source_targeting = summary["source_targeting"]
+    assert source_targeting["main_diagnosis_source"] == "summary.json"
+    assert source_targeting["auxiliary_pair_source"] == "latest_cumulative_fallback_probe_summary.json"
+    assert source_targeting["main_rows_count"] == 4
+    assert source_targeting["metric_complete_rows_count"] == 4
+    assert source_targeting["pair_rows_count"] == 2
+
     overall = summary["overall_median_blocker_overview"]
-    assert overall["total_normalized_rows"] >= 6
-    assert overall["total_evaluated_rows"] >= 4
-    assert overall["non_positive_median_count"] >= 3
-    assert overall["positive_median_count"] >= 1
-
-    horizon_breakdown = summary["horizon_breakdown"]
-    assert horizon_breakdown["15m"]["non_positive_median_count"] >= 2
-    assert horizon_breakdown["1h"]["non_positive_median_count"] >= 1
-    assert horizon_breakdown["4h"]["positive_median_count"] >= 1
-
-    category_breakdown = summary["category_breakdown"]
-    assert category_breakdown["strategy"]["non_positive_median_count"] >= 2
-    assert category_breakdown["symbol"]["non_positive_median_count"] >= 1
-    assert category_breakdown["alignment_state"]["positive_median_count"] >= 1
+    assert overall["total_evaluated_rows"] == 4
+    assert overall["non_positive_median_count"] == 3
+    assert overall["positive_median_count"] == 1
+    assert overall["non_positive_median_ratio"] == 0.75
 
     metric_interactions = summary["metric_interaction_breakdown"]
-    assert metric_interactions["median_le_zero_and_avg_gt_zero_count"] >= 2
-    assert metric_interactions["median_le_zero_and_positive_rate_ge_50_count"] >= 2
-    assert metric_interactions["median_le_zero_and_labeled_count_sufficient_count"] >= 3
+    assert metric_interactions["median_le_zero_and_avg_gt_zero_count"] == 2
+    assert metric_interactions["median_le_zero_and_positive_rate_ge_50_count"] == 2
+    assert metric_interactions["median_le_zero_and_flat_rate_dominant_count"] == 1
+    assert metric_interactions["median_le_zero_and_labeled_count_sufficient_count"] == 3
 
     latest_vs_cumulative = summary["latest_vs_cumulative_summary"]
-    assert latest_vs_cumulative["pair_count"] >= 2
-    assert latest_vs_cumulative["latest_non_positive_while_cumulative_positive_count"] >= 2
+    assert latest_vs_cumulative["pair_count"] == 2
+    assert latest_vs_cumulative["latest_non_positive_while_cumulative_positive_count"] == 2
+    assert latest_vs_cumulative["latest_non_positive_while_cumulative_positive_ratio"] == 1.0
 
-    parser_stats = summary["parser_instrumentation"]
-    assert parser_stats["normalized_rows_count"] == overall["total_normalized_rows"]
-    assert parser_stats["latest_rows_count"] == overall["total_evaluated_rows"]
+    examples = summary["representative_examples"]
+    assert len(examples) == 3
+    assert all(example["origin_file"] == "summary.json" for example in examples)
 
     final_diagnosis = summary["final_diagnosis"]
-    assert final_diagnosis["primary_finding"] != "normalization_failure_or_schema_mismatch"
+    assert "non_positive_median_is_broad_across_rankings" in final_diagnosis["diagnosis_labels"]
+    assert "mean_positive_but_median_non_positive_conflict_exists" in final_diagnosis["diagnosis_labels"]
+    assert "positive_rate_strength_conflicts_with_non_positive_median" in final_diagnosis["diagnosis_labels"]
+    assert "latest_window_noise_dominates_median_signal" in final_diagnosis["diagnosis_labels"]
 
 
-def test_markdown_and_write_outputs_include_parser_stats(tmp_path: Path) -> None:
+def test_markdown_and_write_outputs_include_source_targeting(tmp_path: Path) -> None:
     latest_dir = tmp_path / "latest"
+
     _write_json(
         latest_dir / "summary.json",
         {
@@ -226,7 +239,8 @@ def test_markdown_and_write_outputs_include_parser_stats(tmp_path: Path) -> None
     summary = build_non_positive_median_diagnosis_report(latest_dir)
     markdown = build_non_positive_median_diagnosis_markdown(summary)
 
-    assert "Parser Instrumentation" in markdown
+    assert "Source Targeting" in markdown
+    assert "main_diagnosis_source: summary.json" in markdown
     assert "Overall Median Blocker Overview" in markdown
     assert "Final Diagnosis" in markdown
 
@@ -242,5 +256,5 @@ def test_markdown_and_write_outputs_include_parser_stats(tmp_path: Path) -> None
     written_json = json.loads(Path(outputs["summary_json"]).read_text(encoding="utf-8"))
     written_md = Path(outputs["summary_md"]).read_text(encoding="utf-8")
 
-    assert written_json["parser_instrumentation"]["normalized_rows_count"] >= 1
+    assert written_json["source_targeting"]["main_rows_count"] == 1
     assert "Representative Examples" in written_md
