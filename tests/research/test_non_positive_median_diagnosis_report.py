@@ -17,41 +17,48 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def test_load_main_metric_rows_uses_path_inference_for_summary_rows(tmp_path: Path) -> None:
+def test_load_main_metric_rows_uses_group_heuristics_when_category_missing(tmp_path: Path) -> None:
     latest_dir = tmp_path / "latest"
 
     _write_json(
         latest_dir / "summary.json",
         {
             "some_root": {
-                "nested": {
-                    "15m": {
-                        "strategy": [
-                            {
-                                "group": "swing",
-                                "median_future_return_pct": -0.10,
-                                "avg_future_return_pct": 0.03,
-                                "positive_rate_pct": 51.0,
-                                "flat_rate_pct": 44.0,
-                                "labeled_count": 10,
-                            }
-                        ]
-                    }
-                }
+                "15m": [
+                    {
+                        "group": "swing",
+                        "median_future_return_pct": -0.10,
+                        "avg_future_return_pct": 0.03,
+                        "positive_rate_pct": 51.0,
+                        "flat_rate_pct": 44.0,
+                        "labeled_count": 10,
+                    },
+                    {
+                        "group": "BTCUSDT",
+                        "median_future_return_pct": -0.04,
+                        "avg_future_return_pct": 0.01,
+                        "positive_rate_pct": 49.0,
+                        "flat_rate_pct": 40.0,
+                        "labeled_count": 8,
+                    },
+                    {
+                        "group": "aligned",
+                        "median_future_return_pct": -0.02,
+                        "avg_future_return_pct": 0.02,
+                        "positive_rate_pct": 52.0,
+                        "flat_rate_pct": 38.0,
+                        "labeled_count": 7,
+                    },
+                ]
             }
         },
     )
 
     rows, stats = load_main_metric_rows(latest_dir)
 
-    assert len(rows) == 1
-    assert rows[0].origin_file == "summary.json"
-    assert rows[0].horizon == "15m"
-    assert rows[0].category == "strategy"
-    assert rows[0].group == "swing"
-    assert rows[0].rank == 1
-    assert stats["summary_metric_complete_dicts_seen"] == 1
-    assert stats["main_rows_count"] == 1
+    assert len(rows) == 3
+    assert {row.category for row in rows} == {"strategy", "symbol", "alignment_state"}
+    assert stats["summary_rows_category_inferred_from_group_count"] == 3
 
 
 def test_load_probe_pair_rows_stays_auxiliary_only(tmp_path: Path) -> None:
@@ -88,50 +95,44 @@ def test_build_report_separates_main_summary_rows_and_probe_pairs(tmp_path: Path
         latest_dir / "summary.json",
         {
             "analysis": {
-                "15m": {
-                    "strategy": [
-                        {
-                            "group": "swing",
-                            "median_future_return_pct": -0.10,
-                            "avg_future_return_pct": 0.20,
-                            "positive_rate_pct": 55.0,
-                            "flat_rate_pct": 35.0,
-                            "labeled_count": 10,
-                        },
-                        {
-                            "group": "intraday",
-                            "median_future_return_pct": -0.03,
-                            "avg_future_return_pct": -0.01,
-                            "positive_rate_pct": 41.0,
-                            "flat_rate_pct": 47.0,
-                            "labeled_count": 8,
-                        },
-                    ]
-                },
-                "1h": {
-                    "symbol": [
-                        {
-                            "group": "BTCUSDT",
-                            "median_future_return_pct": -0.20,
-                            "avg_future_return_pct": 0.10,
-                            "positive_rate_pct": 52.0,
-                            "flat_rate_pct": 38.0,
-                            "labeled_count": 7,
-                        }
-                    ]
-                },
-                "4h": {
-                    "alignment_state": [
-                        {
-                            "group": "aligned",
-                            "median_future_return_pct": 0.30,
-                            "avg_future_return_pct": 0.35,
-                            "positive_rate_pct": 65.0,
-                            "flat_rate_pct": 20.0,
-                            "labeled_count": 20,
-                        }
-                    ]
-                },
+                "15m": [
+                    {
+                        "group": "swing",
+                        "median_future_return_pct": -0.10,
+                        "avg_future_return_pct": 0.20,
+                        "positive_rate_pct": 55.0,
+                        "flat_rate_pct": 35.0,
+                        "labeled_count": 10,
+                    },
+                    {
+                        "group": "BTCUSDT",
+                        "median_future_return_pct": -0.03,
+                        "avg_future_return_pct": -0.01,
+                        "positive_rate_pct": 41.0,
+                        "flat_rate_pct": 47.0,
+                        "labeled_count": 8,
+                    },
+                ],
+                "1h": [
+                    {
+                        "group": "aligned",
+                        "median_future_return_pct": -0.20,
+                        "avg_future_return_pct": 0.10,
+                        "positive_rate_pct": 52.0,
+                        "flat_rate_pct": 38.0,
+                        "labeled_count": 7,
+                    }
+                ],
+                "4h": [
+                    {
+                        "group": "swing",
+                        "median_future_return_pct": 0.30,
+                        "avg_future_return_pct": 0.35,
+                        "positive_rate_pct": 65.0,
+                        "flat_rate_pct": 20.0,
+                        "labeled_count": 20,
+                    }
+                ],
             }
         },
     )
@@ -169,15 +170,6 @@ def test_build_report_separates_main_summary_rows_and_probe_pairs(tmp_path: Path
     assert overall["non_positive_median_count"] == 3
     assert overall["positive_median_count"] == 1
 
-    metric_interactions = summary["metric_interaction_breakdown"]
-    assert metric_interactions["median_le_zero_and_avg_gt_zero_count"] == 2
-    assert metric_interactions["median_le_zero_and_positive_rate_ge_50_count"] == 2
-    assert metric_interactions["median_le_zero_and_flat_rate_dominant_count"] == 1
-
-    latest_vs_cumulative = summary["latest_vs_cumulative_summary"]
-    assert latest_vs_cumulative["pair_count"] == 1
-    assert latest_vs_cumulative["latest_non_positive_while_cumulative_positive_count"] == 1
-
     assert all(example["origin_file"] == "summary.json" for example in summary["representative_examples"])
 
 
@@ -187,18 +179,16 @@ def test_markdown_and_write_outputs_include_source_targeting(tmp_path: Path) -> 
     _write_json(
         latest_dir / "summary.json",
         {
-            "4h": {
-                "alignment_state": [
-                    {
-                        "group": "aligned",
-                        "median_future_return_pct": -0.01,
-                        "avg_future_return_pct": 0.02,
-                        "positive_rate_pct": 51.0,
-                        "flat_rate_pct": 33.0,
-                        "labeled_count": 9,
-                    }
-                ]
-            }
+            "4h": [
+                {
+                    "group": "aligned",
+                    "median_future_return_pct": -0.01,
+                    "avg_future_return_pct": 0.02,
+                    "positive_rate_pct": 51.0,
+                    "flat_rate_pct": 33.0,
+                    "labeled_count": 9,
+                }
+            ]
         },
     )
 

@@ -15,6 +15,25 @@ DEFAULT_MD_OUTPUT = DEFAULT_INPUT_DIR / "non_positive_median_diagnosis_summary.m
 TARGET_HORIZONS = ("15m", "1h", "4h")
 TARGET_CATEGORIES = ("strategy", "symbol", "alignment_state")
 
+STRATEGY_GROUP_HINTS = {
+    "swing",
+    "intraday",
+    "scalping",
+    "scalp",
+    "trend",
+    "mean_reversion",
+    "breakout",
+    "momentum",
+}
+ALIGNMENT_STATE_HINTS = {
+    "aligned",
+    "misaligned",
+    "partially_aligned",
+    "partial_aligned",
+    "neutral",
+    "conflicted",
+}
+
 
 @dataclass(frozen=True)
 class MetricRow:
@@ -142,27 +161,7 @@ def _metric_complete(raw: dict[str, Any]) -> bool:
 
 
 def _looks_like_metric_row(raw: dict[str, Any]) -> bool:
-    if not _metric_complete(raw):
-        return False
-
-    # 노이즈성 config/threshold dict 제외를 위한 최소한의 row-like 신호
-    row_like_keys = {
-        "group",
-        "group_name",
-        "candidate_group",
-        "name",
-        "label",
-        "labeled_count",
-        "label_count",
-        "count",
-        "sample_size",
-        "observations",
-    }
-    if any(key in raw for key in row_like_keys):
-        return True
-
-    # 그래도 metric row일 수 있으므로 4개 핵심 metric만 있어도 허용
-    return True
+    return _metric_complete(raw)
 
 
 def _infer_horizon_from_path_or_raw(path_parts: list[str], raw: dict[str, Any]) -> str | None:
@@ -172,17 +171,6 @@ def _infer_horizon_from_path_or_raw(path_parts: list[str], raw: dict[str, Any]) 
 
     for part in reversed(path_parts):
         if part in TARGET_HORIZONS:
-            return part
-    return None
-
-
-def _infer_category_from_path_or_raw(path_parts: list[str], raw: dict[str, Any]) -> str | None:
-    raw_category = raw.get("category")
-    if isinstance(raw_category, str) and raw_category in TARGET_CATEGORIES:
-        return raw_category
-
-    for part in reversed(path_parts):
-        if part in TARGET_CATEGORIES:
             return part
     return None
 
@@ -197,9 +185,17 @@ def _infer_rank_from_path(path_parts: list[str]) -> int | None:
 
 def _infer_group_from_row(raw: dict[str, Any], category: str | None) -> str:
     if category is not None:
-        key = f"{category}_group"
-        if key in raw:
-            return _normalize_group(raw.get(key))
+        preferred_key = f"{category}_group"
+        if preferred_key in raw:
+            return _normalize_group(raw.get(preferred_key))
+
+        latest_key = f"latest_top_{category}_group"
+        if latest_key in raw:
+            return _normalize_group(raw.get(latest_key))
+
+        cumulative_key = f"cumulative_top_{category}_group"
+        if cumulative_key in raw:
+            return _normalize_group(raw.get(cumulative_key))
 
     candidates = (
         raw.get("group"),
@@ -214,6 +210,74 @@ def _infer_group_from_row(raw: dict[str, Any], category: str | None) -> str:
             return _normalize_group(candidate)
 
     return "unknown"
+
+
+def _infer_category_from_group_value(group: str) -> str | None:
+    lowered = group.strip().lower()
+
+    if lowered in STRATEGY_GROUP_HINTS:
+        return "strategy"
+    if lowered in ALIGNMENT_STATE_HINTS:
+        return "alignment_state"
+    if re.fullmatch(r"[A-Z0-9]{2,20}USDT", group.upper()):
+        return "symbol"
+    if re.fullmatch(r"[a-z0-9]{2,20}usdt", lowered):
+        return "symbol"
+    return None
+
+
+def _infer_category_from_path_substrings(path_parts: list[str]) -> str | None:
+    lowered_parts = [part.lower() for part in path_parts]
+
+    for part in reversed(lowered_parts):
+        if "alignment_state" in part:
+            return "alignment_state"
+        if "strategy" in part:
+            return "strategy"
+        if "symbol" in part:
+            return "symbol"
+
+    return None
+
+
+def _infer_category_from_raw_keys(raw: dict[str, Any]) -> str | None:
+    explicit_candidates = (
+        raw.get("category"),
+        raw.get("grouping_category"),
+        raw.get("dimension"),
+    )
+    for candidate in explicit_candidates:
+        if isinstance(candidate, str) and candidate in TARGET_CATEGORIES:
+            return candidate
+
+    for key in raw.keys():
+        lowered = key.lower()
+        if "alignment_state" in lowered:
+            return "alignment_state"
+        if "strategy" in lowered:
+            return "strategy"
+        if "symbol" in lowered:
+            return "symbol"
+
+    return None
+
+
+def _infer_category(path_parts: list[str], raw: dict[str, Any]) -> str | None:
+    from_raw_keys = _infer_category_from_raw_keys(raw)
+    if from_raw_keys is not None:
+        return from_raw_keys
+
+    from_path = _infer_category_from_path_substrings(path_parts)
+    if from_path is not None:
+        return from_path
+
+    inferred_group = _infer_group_from_row(raw, None)
+    if inferred_group != "unknown":
+        from_group = _infer_category_from_group_value(inferred_group)
+        if from_group is not None:
+            return from_group
+
+    return None
 
 
 def _collect_metric_complete_dicts(
@@ -239,6 +303,9 @@ def load_main_metric_rows(input_dir: Path) -> tuple[list[MetricRow], dict[str, i
         "summary_rows_missing_horizon_count": 0,
         "summary_rows_missing_category_count": 0,
         "summary_rows_missing_group_count": 0,
+        "summary_rows_category_inferred_from_raw_keys_count": 0,
+        "summary_rows_category_inferred_from_path_count": 0,
+        "summary_rows_category_inferred_from_group_count": 0,
         "main_rows_count": 0,
         "metric_complete_rows_count": 0,
         "summary_read_error_count": 0,
@@ -273,10 +340,19 @@ def load_main_metric_rows(input_dir: Path) -> tuple[list[MetricRow], dict[str, i
             instrumentation["summary_rows_missing_horizon_count"] += 1
             continue
 
-        category = _infer_category_from_path_or_raw(path_parts, raw)
+        category = _infer_category(raw=raw, path_parts=path_parts)
         if category is None:
             instrumentation["summary_rows_missing_category_count"] += 1
             continue
+
+        if _infer_category_from_raw_keys(raw) == category:
+            instrumentation["summary_rows_category_inferred_from_raw_keys_count"] += 1
+        elif _infer_category_from_path_substrings(path_parts) == category:
+            instrumentation["summary_rows_category_inferred_from_path_count"] += 1
+        else:
+            group_guess = _infer_group_from_row(raw, None)
+            if _infer_category_from_group_value(group_guess) == category:
+                instrumentation["summary_rows_category_inferred_from_group_count"] += 1
 
         median = _extract_metric(raw, "median_future_return_pct")
         avg = _extract_metric(raw, "avg_future_return_pct", "mean_future_return_pct")
@@ -755,7 +831,7 @@ def build_non_positive_median_diagnosis_report(input_dir: Path) -> dict[str, Any
         overall["total_evaluated_rows"],
     )
 
-    rank_scope = _build_rankScope_breakdown(main_rows, top_n=3)  # type: ignore[name-defined]
+    rank_scope = _build_rank_scope_breakdown(main_rows, top_n=3)
     horizon_breakdown = _breakdown_by_horizon_and_category(main_rows)
     category_breakdown = _breakdown_by_category(main_rows)
     metric_interactions = _build_metric_interaction_breakdown(main_rows)
@@ -1002,10 +1078,6 @@ def main() -> None:
             ensure_ascii=False,
         )
     )
-
-
-def _build_rankScope_breakdown(rows: list[MetricRow], top_n: int = 3) -> dict[str, Any]:
-    return _build_rank_scope_breakdown(rows, top_n=top_n)
 
 
 if __name__ == "__main__":
