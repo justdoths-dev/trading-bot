@@ -16,7 +16,12 @@ from src.research.strategy_lab.comparison_report import (
     compare_by_strategy,
     compare_by_symbol,
 )
-from src.research.strategy_lab.dataset_builder import build_dataset
+from src.research.strategy_lab.dataset_builder import (
+    DEFAULT_LATEST_MAX_ROWS,
+    DEFAULT_LATEST_WINDOW_HOURS,
+    build_dataset,
+    load_jsonl_records_with_metadata,
+)
 from src.research.strategy_lab.edge_detector import (
     detect_ai_execution_state_edges,
     detect_alignment_state_edges,
@@ -47,12 +52,19 @@ EDGE_STRONG_ROBUSTNESS_PCT = 55.0
 
 def load_jsonl_records(input_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Load JSONL records, keeping only schema-valid objects for analysis."""
-    if not input_path.exists():
-        raise FileNotFoundError(f"Input file does not exist: {input_path}")
+    raw_records, source_metadata = load_jsonl_records_with_metadata(input_path)
 
     records: list[dict[str, Any]] = []
     validation_summary = {
         "input_path": str(input_path),
+        "rotation_aware": source_metadata.get("rotation_aware", False),
+        "source_files": source_metadata.get("source_files", []),
+        "source_file_count": source_metadata.get("source_file_count", 0),
+        "source_row_counts": source_metadata.get("source_row_counts", {}),
+        "max_age_hours": source_metadata.get("max_age_hours"),
+        "max_rows": source_metadata.get("max_rows"),
+        "raw_record_count": source_metadata.get("raw_record_count", 0),
+        "windowed_record_count": source_metadata.get("windowed_record_count", 0),
         "total_records": 0,
         "valid_records": 0,
         "invalid_records": 0,
@@ -61,52 +73,34 @@ def load_jsonl_records(input_path: Path) -> tuple[list[dict[str, Any]], dict[str
         "invalid_examples": [],
     }
 
-    with input_path.open("r", encoding="utf-8") as file:
-        for line_number, line in enumerate(file, start=1):
-            content = line.strip()
-            if not content:
-                continue
+    for index, parsed in enumerate(raw_records, start=1):
+        validation_summary["total_records"] += 1
 
-            validation_summary["total_records"] += 1
+        result = validate_record(parsed, line_number=index)
+        validation_summary["error_count"] += len(result["errors"])
+        validation_summary["warning_count"] += len(result["warnings"])
 
-            try:
-                parsed = json.loads(content)
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"Malformed JSON in {input_path} at line {line_number}: {exc.msg}"
-                ) from exc
+        if result["is_valid"]:
+            validation_summary["valid_records"] += 1
+            records.append(parsed)
+            continue
 
-            if not isinstance(parsed, dict):
-                raise ValueError(
-                    f"Expected JSON object in {input_path} at line {line_number}, "
-                    f"got {type(parsed).__name__}"
-                )
+        validation_summary["invalid_records"] += 1
 
-            result = validate_record(parsed, line_number=line_number)
-            validation_summary["error_count"] += len(result["errors"])
-            validation_summary["warning_count"] += len(result["warnings"])
-
-            if result["is_valid"]:
-                validation_summary["valid_records"] += 1
-                records.append(parsed)
-                continue
-
-            validation_summary["invalid_records"] += 1
-
-            if len(validation_summary["invalid_examples"]) < 5:
-                validation_summary["invalid_examples"].append(
-                    {
-                        "line_number": line_number,
-                        "errors": result["errors"],
-                        "warnings": result["warnings"],
-                    }
-                )
-
-            LOGGER.warning(
-                "Skipping invalid research record at line %s: %s",
-                line_number,
-                "; ".join(result["errors"]),
+        if len(validation_summary["invalid_examples"]) < 5:
+            validation_summary["invalid_examples"].append(
+                {
+                    "line_number": index,
+                    "errors": result["errors"],
+                    "warnings": result["warnings"],
+                }
             )
+
+        LOGGER.warning(
+            "Skipping invalid research record at synthetic line %s: %s",
+            index,
+            "; ".join(result["errors"]),
+        )
 
     return records, validation_summary
 
@@ -173,7 +167,7 @@ def _empty_strategy_lab_metrics() -> dict[str, Any]:
 
 def _build_strategy_lab_metrics(input_path: Path) -> dict[str, Any]:
     """Build full Strategy Research Lab metrics bundle."""
-    dataset = build_dataset(input_path)
+    dataset = build_dataset(path=input_path)
 
     performance: dict[str, Any] = {}
     comparison: dict[str, Any] = {}
@@ -658,6 +652,13 @@ def _build_markdown(metrics: dict[str, Any]) -> str:
 
     lines.append("## Schema Validation")
     lines.append("")
+    lines.append(f"- input_path: {schema_validation.get('input_path', 'unknown')}")
+    lines.append(f"- rotation_aware: {schema_validation.get('rotation_aware', False)}")
+    lines.append(f"- source_file_count: {schema_validation.get('source_file_count', 0)}")
+    lines.append(f"- max_age_hours: {schema_validation.get('max_age_hours', 'n/a')}")
+    lines.append(f"- max_rows: {schema_validation.get('max_rows', 'n/a')}")
+    lines.append(f"- raw_record_count: {schema_validation.get('raw_record_count', 0)}")
+    lines.append(f"- windowed_record_count: {schema_validation.get('windowed_record_count', 0)}")
     lines.append(f"- total_records: {schema_validation.get('total_records', 0)}")
     lines.append(f"- valid_records: {schema_validation.get('valid_records', 0)}")
     lines.append(f"- invalid_records: {schema_validation.get('invalid_records', 0)}")
@@ -1173,6 +1174,18 @@ def _parse_args() -> argparse.Namespace:
         default=_default_output_dir(),
         help="Directory to write summary.json and summary.md",
     )
+    parser.add_argument(
+        "--latest-window-hours",
+        type=int,
+        default=DEFAULT_LATEST_WINDOW_HOURS,
+        help="Recent window in hours for rotation-aware latest analysis",
+    )
+    parser.add_argument(
+        "--latest-max-rows",
+        type=int,
+        default=DEFAULT_LATEST_MAX_ROWS,
+        help="Maximum number of rows to keep for rotation-aware latest analysis",
+    )
     return parser.parse_args()
 
 
@@ -1181,6 +1194,7 @@ def main() -> None:
     reporter = CronHealthReporter("research_analyzer")
 
     try:
+        # CLI args retained for observability; dataset_builder defaults already apply
         metrics = run_research_analyzer(
             input_path=args.input,
             output_dir=args.output_dir,

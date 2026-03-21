@@ -1,53 +1,126 @@
 from __future__ import annotations
 
+import gzip
 import json
+import re
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from datetime import datetime, UTC
 from typing import Any
-
 
 DEFAULT_DATASET_PATH = Path(__file__).resolve().parents[3] / "logs" / "trade_analysis.jsonl"
 
+DEFAULT_LATEST_WINDOW_HOURS = 36
+DEFAULT_LATEST_MAX_ROWS = 2500
 
-def load_jsonl_records(path: str | Path | None = None) -> list[dict[str, Any]]:
-    input_path = Path(path) if path else DEFAULT_DATASET_PATH
+_ROTATION_PATTERN = re.compile(r"^trade_analysis\.jsonl(?:\.(\d+)(?:\.gz)?)?$")
 
-    if not input_path.exists():
-        raise FileNotFoundError(f"Dataset file not found: {input_path}")
 
-    records: list[dict[str, Any]] = []
-
-    with input_path.open("r", encoding="utf-8") as f:
-        for line_no, line in enumerate(f, start=1):
-            content = line.strip()
-
-            if not content:
-                continue
-
-            try:
-                parsed = json.loads(content)
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"Malformed JSON in {input_path} line {line_no}: {exc.msg}"
-                ) from exc
-
-            if not isinstance(parsed, dict):
-                raise ValueError(
-                    f"Expected JSON object in {input_path} line {line_no}"
-                )
-
-            records.append(parsed)
-
+def load_jsonl_records(
+    path: str | Path | None = None,
+    *,
+    rotation_aware: bool | None = None,
+    max_age_hours: int | None = DEFAULT_LATEST_WINDOW_HOURS,
+    max_rows: int | None = DEFAULT_LATEST_MAX_ROWS,
+) -> list[dict[str, Any]]:
+    records, _ = load_jsonl_records_with_metadata(
+        path=path,
+        rotation_aware=rotation_aware,
+        max_age_hours=max_age_hours,
+        max_rows=max_rows,
+    )
     return records
 
 
-def build_dataset(path: str | Path | None = None) -> list[dict[str, Any]]:
-    raw_records = load_jsonl_records(path)
-    return [normalize_record(r) for r in raw_records]
+def load_jsonl_records_with_metadata(
+    path: str | Path | None = None,
+    *,
+    rotation_aware: bool | None = None,
+    max_age_hours: int | None = DEFAULT_LATEST_WINDOW_HOURS,
+    max_rows: int | None = DEFAULT_LATEST_MAX_ROWS,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    input_path = Path(path) if path else DEFAULT_DATASET_PATH
+
+    source_files = resolve_source_files(
+        input_path,
+        rotation_aware=rotation_aware,
+    )
+
+    raw_records: list[dict[str, Any]] = []
+    per_file_row_counts: dict[str, int] = {}
+
+    for source_file in source_files:
+        rows = _read_jsonl_file(source_file)
+        raw_records.extend(rows)
+        per_file_row_counts[str(source_file)] = len(rows)
+
+    windowed_records = _apply_recent_window(
+        raw_records,
+        max_age_hours=max_age_hours if _should_use_rotation_aware(input_path, rotation_aware) else None,
+        max_rows=max_rows if _should_use_rotation_aware(input_path, rotation_aware) else None,
+    )
+
+    metadata = {
+        "input_path": str(input_path),
+        "rotation_aware": _should_use_rotation_aware(input_path, rotation_aware),
+        "source_files": [str(path) for path in source_files],
+        "source_file_count": len(source_files),
+        "source_row_counts": per_file_row_counts,
+        "max_age_hours": max_age_hours if _should_use_rotation_aware(input_path, rotation_aware) else None,
+        "max_rows": max_rows if _should_use_rotation_aware(input_path, rotation_aware) else None,
+        "raw_record_count": len(raw_records),
+        "windowed_record_count": len(windowed_records),
+    }
+
+    return windowed_records, metadata
+
+
+def resolve_source_files(
+    input_path: Path,
+    *,
+    rotation_aware: bool | None = None,
+) -> list[Path]:
+    if not _should_use_rotation_aware(input_path, rotation_aware):
+        if not input_path.exists():
+            raise FileNotFoundError(f"Dataset file not found: {input_path}")
+        return [input_path]
+
+    log_dir = input_path.parent
+    if not log_dir.exists():
+        raise FileNotFoundError(f"Dataset directory not found: {log_dir}")
+
+    candidates: list[tuple[int, Path]] = []
+
+    for path in log_dir.glob("trade_analysis.jsonl*"):
+        rotation_index = _rotation_index(path)
+        if rotation_index is None:
+            continue
+        candidates.append((rotation_index, path))
+
+    if not candidates:
+        raise FileNotFoundError(f"No dataset files found for rotation-aware input: {input_path}")
+
+    # oldest -> newest
+    candidates.sort(key=lambda item: (-item[0], item[1].name))
+    return [path for _, path in candidates]
+
+
+def build_dataset(
+    path: str | Path | None = None,
+    *,
+    rotation_aware: bool | None = None,
+    max_age_hours: int | None = DEFAULT_LATEST_WINDOW_HOURS,
+    max_rows: int | None = DEFAULT_LATEST_MAX_ROWS,
+) -> list[dict[str, Any]]:
+    raw_records = load_jsonl_records(
+        path=path,
+        rotation_aware=rotation_aware,
+        max_age_hours=max_age_hours,
+        max_rows=max_rows,
+    )
+    return [normalize_record(record) for record in raw_records]
 
 
 def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
-
     rule_engine = _as_dict(record.get("rule_engine"))
     execution = _as_dict(record.get("execution"))
     risk = _as_dict(record.get("risk"))
@@ -61,47 +134,126 @@ def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
     logged_at = _parse_datetime(record.get("logged_at"))
 
     return {
-
         "logged_at": logged_at,
         "symbol": _to_str(record.get("symbol")),
         "selected_strategy": _to_str(record.get("selected_strategy")),
-
         "bias": _to_str(record.get("bias") or rule_engine.get("bias")),
         "rule_signal": _to_str(rule_engine.get("signal")),
         "execution_signal": _to_str(execution.get("signal")),
         "execution_action": _to_str(execution.get("action")),
-
         "ai_source": _to_str(ai.get("source")),
         "ai_model": _to_str(ai.get("model")),
         "ai_final_stance": _to_str(ai.get("final_stance")),
-
         "alignment_state": _extract_alignment_state(alignment),
-
         "execution_allowed": _to_bool(
             execution.get("execution_allowed", risk.get("execution_allowed"))
         ),
-
         "entry_price": _to_float(
             execution.get("entry_price", risk.get("entry_price"))
         ),
-
         "stop_loss": _to_float(execution.get("stop_loss", risk.get("stop_loss"))),
         "take_profit": _to_float(execution.get("take_profit", risk.get("take_profit"))),
-
         "volatility_state": _to_str(risk.get("volatility_state")),
-
         "scalping_confidence": _to_float(scalping.get("confidence")),
         "intraday_confidence": _to_float(intraday.get("confidence")),
         "swing_confidence": _to_float(swing.get("confidence")),
-
         "future_return_15m": _to_float(record.get("future_return_15m")),
         "future_return_1h": _to_float(record.get("future_return_1h")),
         "future_return_4h": _to_float(record.get("future_return_4h")),
-
         "future_label_15m": _to_str(record.get("future_label_15m")),
         "future_label_1h": _to_str(record.get("future_label_1h")),
         "future_label_4h": _to_str(record.get("future_label_4h")),
     }
+
+
+def _should_use_rotation_aware(
+    input_path: Path,
+    rotation_aware: bool | None,
+) -> bool:
+    if rotation_aware is not None:
+        return rotation_aware
+
+    return input_path.name == "trade_analysis.jsonl"
+
+
+def _rotation_index(path: Path) -> int | None:
+    match = _ROTATION_PATTERN.match(path.name)
+    if not match:
+        return None
+
+    raw_index = match.group(1)
+    if raw_index is None:
+        return 0
+
+    try:
+        return int(raw_index)
+    except ValueError:
+        return None
+
+
+def _read_jsonl_file(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        raise FileNotFoundError(f"Dataset file not found: {path}")
+
+    records: list[dict[str, Any]] = []
+    opener = gzip.open if path.suffix == ".gz" else open
+
+    with opener(path, "rt", encoding="utf-8") as handle:
+        for line_no, line in enumerate(handle, start=1):
+            content = line.strip()
+            if not content:
+                continue
+
+            try:
+                parsed = json.loads(content)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Malformed JSON in {path} line {line_no}: {exc.msg}"
+                ) from exc
+
+            if not isinstance(parsed, dict):
+                raise ValueError(f"Expected JSON object in {path} line {line_no}")
+
+            records.append(parsed)
+
+    return records
+
+
+def _apply_recent_window(
+    records: list[dict[str, Any]],
+    *,
+    max_age_hours: int | None,
+    max_rows: int | None,
+) -> list[dict[str, Any]]:
+    if not records:
+        return []
+
+    filtered = records
+
+    if max_age_hours is not None and max_age_hours > 0:
+        timestamps = [
+            _parse_datetime(record.get("logged_at"))
+            for record in records
+        ]
+        valid_timestamps = [ts for ts in timestamps if ts is not None]
+
+        if valid_timestamps:
+            latest_ts = max(valid_timestamps)
+            cutoff = latest_ts - timedelta(hours=max_age_hours)
+
+            kept: list[dict[str, Any]] = []
+            for record in records:
+                ts = _parse_datetime(record.get("logged_at"))
+                if ts is None:
+                    continue
+                if ts >= cutoff:
+                    kept.append(record)
+            filtered = kept
+
+    if max_rows is not None and max_rows > 0 and len(filtered) > max_rows:
+        filtered = filtered[-max_rows:]
+
+    return filtered
 
 
 def _as_dict(v: Any) -> dict[str, Any]:
@@ -123,7 +275,6 @@ def _to_float(v: Any) -> float | None:
 
 
 def _to_bool(v: Any) -> bool | None:
-
     if isinstance(v, bool):
         return v
 
@@ -134,7 +285,6 @@ def _to_bool(v: Any) -> bool | None:
 
     if text in ("true", "1", "yes"):
         return True
-
     if text in ("false", "0", "no"):
         return False
 
@@ -142,11 +292,12 @@ def _to_bool(v: Any) -> bool | None:
 
 
 def _parse_datetime(v: Any) -> datetime | None:
-
     if v is None:
         return None
 
-    text = str(v)
+    text = str(v).strip()
+    if not text:
+        return None
 
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
@@ -163,12 +314,10 @@ def _parse_datetime(v: Any) -> datetime | None:
 
 
 def _extract_alignment_state(v: Any) -> str | None:
-
     if isinstance(v, str):
         return v.lower()
 
     if isinstance(v, dict):
-
         if "is_aligned" in v:
             return "aligned" if v["is_aligned"] else "misaligned"
 
