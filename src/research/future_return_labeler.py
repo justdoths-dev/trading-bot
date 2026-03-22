@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 from datetime import UTC, datetime, timedelta
@@ -18,21 +19,41 @@ HORIZONS: dict[str, timedelta] = {
     "4h": timedelta(hours=4),
 }
 
+DEFAULT_LABEL_THRESHOLDS_PCT: dict[str, float] = {
+    "15m": 0.05,
+    "1h": 0.10,
+    "4h": 0.15,
+}
 
-def label_dataset() -> dict[str, int]:
-    log_path = Path(__file__).resolve().parents[2] / "logs" / "trade_analysis.jsonl"
 
-    if not log_path.exists():
-        LOGGER.info("Log file not found: %s", log_path)
+def label_dataset(
+    *,
+    log_path: Path | None = None,
+    force_relabel: bool = False,
+    label_thresholds_pct: dict[str, float] | None = None,
+) -> dict[str, int]:
+    """Label or relabel future returns for the research dataset."""
+    resolved_log_path = (
+        log_path
+        if log_path is not None
+        else Path(__file__).resolve().parents[2] / "logs" / "trade_analysis.jsonl"
+    )
+
+    if not resolved_log_path.exists():
+        LOGGER.info("Log file not found: %s", resolved_log_path)
         return {
             "total_records": 0,
             "updated_records": 0,
             "skipped_records": 0,
+            "force_relabel": force_relabel,
+            "thresholds_pct": label_thresholds_pct or DEFAULT_LABEL_THRESHOLDS_PCT,
         }
+
+    resolved_thresholds = _resolve_label_thresholds(label_thresholds_pct)
 
     exchange = ccxt.binance({"enableRateLimit": True})
 
-    lines = log_path.read_text(encoding="utf-8").splitlines()
+    lines = resolved_log_path.read_text(encoding="utf-8").splitlines()
     updated_lines: list[str] = []
 
     total_records = 0
@@ -45,7 +66,7 @@ def label_dataset() -> dict[str, int]:
         total_records += 1
         record = json.loads(line)
 
-        if _is_fully_labeled(record):
+        if _is_fully_labeled(record) and not force_relabel:
             updated_lines.append(json.dumps(record, ensure_ascii=False))
             continue
 
@@ -71,34 +92,71 @@ def label_dataset() -> dict[str, int]:
             future_return = ((future_price - entry_price) / entry_price) * 100
 
             record[f"future_return_{horizon}"] = round(future_return, 6)
-            record[f"future_label_{horizon}"] = _to_label(future_return)
+            record[f"future_label_{horizon}"] = _to_label(
+                future_return=future_return,
+                horizon=horizon,
+                label_thresholds_pct=resolved_thresholds,
+            )
 
         updated_records += 1
         updated_lines.append(json.dumps(record, ensure_ascii=False))
 
-    tmp_path = log_path.with_suffix(".jsonl.tmp")
+    tmp_path = resolved_log_path.with_suffix(".jsonl.tmp")
 
     tmp_path.write_text(
         "\n".join(updated_lines) + ("\n" if updated_lines else ""),
         encoding="utf-8",
     )
 
-    tmp_path.replace(log_path)
+    tmp_path.replace(resolved_log_path)
 
     skipped_records = total_records - updated_records
 
     LOGGER.info(
-        "Labeling complete: total=%s updated=%s skipped=%s",
+        "Labeling complete: total=%s updated=%s skipped=%s force_relabel=%s thresholds=%s",
         total_records,
         updated_records,
         skipped_records,
+        force_relabel,
+        resolved_thresholds,
     )
 
     return {
         "total_records": total_records,
         "updated_records": updated_records,
         "skipped_records": skipped_records,
+        "force_relabel": force_relabel,
+        "thresholds_pct": resolved_thresholds,
     }
+
+
+def _resolve_label_thresholds(
+    provided: dict[str, float] | None,
+) -> dict[str, float]:
+    """Resolve per-horizon label thresholds with validation."""
+    thresholds = dict(DEFAULT_LABEL_THRESHOLDS_PCT)
+
+    if provided is not None:
+        thresholds.update(provided)
+
+    for horizon in HORIZONS:
+        value = thresholds.get(horizon)
+        if value is None:
+            raise ValueError(f"Missing threshold for horizon: {horizon}")
+
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid threshold for horizon {horizon}: {value}") from exc
+
+        if numeric_value < 0:
+            raise ValueError(
+                f"Threshold must be non-negative for horizon {horizon}: {numeric_value}"
+            )
+
+        thresholds[horizon] = numeric_value
+
+    return thresholds
 
 
 def _is_fully_labeled(record: dict[str, Any]) -> bool:
@@ -192,7 +250,12 @@ def _fetch_horizon_prices(
         since_ms = int(target_dt.timestamp() * 1000)
 
         try:
-            candles = exchange.fetch_ohlcv(symbol, timeframe="1m", since=since_ms, limit=1)
+            candles = exchange.fetch_ohlcv(
+                symbol,
+                timeframe="1m",
+                since=since_ms,
+                limit=1,
+            )
         except Exception as exc:
             LOGGER.warning(
                 "Failed to fetch OHLCV for %s horizon=%s: %s",
@@ -213,22 +276,76 @@ def _fetch_horizon_prices(
     return prices
 
 
-def _to_label(future_return: float) -> str:
-    if future_return > 0.2:
+def _to_label(
+    *,
+    future_return: float,
+    horizon: str,
+    label_thresholds_pct: dict[str, float],
+) -> str:
+    """Assign up/down/flat label using horizon-specific absolute return threshold."""
+    threshold_pct = label_thresholds_pct[horizon]
+
+    if future_return > threshold_pct:
         return "up"
 
-    if future_return < -0.2:
+    if future_return < -threshold_pct:
         return "down"
 
     return "flat"
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Label or relabel future returns in trade_analysis.jsonl"
+    )
+    parser.add_argument(
+        "--input-path",
+        type=Path,
+        default=Path(__file__).resolve().parents[2] / "logs" / "trade_analysis.jsonl",
+        help="Path to the trade analysis JSONL file.",
+    )
+    parser.add_argument(
+        "--force-relabel",
+        action="store_true",
+        help="Recompute future returns and relabel rows even if labels already exist.",
+    )
+    parser.add_argument(
+        "--threshold-15m",
+        type=float,
+        default=DEFAULT_LABEL_THRESHOLDS_PCT["15m"],
+        help="Absolute return threshold percentage for 15m flat labeling.",
+    )
+    parser.add_argument(
+        "--threshold-1h",
+        type=float,
+        default=DEFAULT_LABEL_THRESHOLDS_PCT["1h"],
+        help="Absolute return threshold percentage for 1h flat labeling.",
+    )
+    parser.add_argument(
+        "--threshold-4h",
+        type=float,
+        default=DEFAULT_LABEL_THRESHOLDS_PCT["4h"],
+        help="Absolute return threshold percentage for 4h flat labeling.",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
     reporter = CronHealthReporter("future_return_labeler")
+    args = _parse_args()
 
     try:
-        result = label_dataset()
+        result = label_dataset(
+            log_path=args.input_path,
+            force_relabel=args.force_relabel,
+            label_thresholds_pct={
+                "15m": args.threshold_15m,
+                "1h": args.threshold_1h,
+                "4h": args.threshold_4h,
+            },
+        )
         reporter.success(result)
+        print(json.dumps(result, indent=2, ensure_ascii=False))
     except Exception as exc:
         reporter.failure(
             error=exc,
