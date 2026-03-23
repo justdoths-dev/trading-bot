@@ -45,12 +45,12 @@ DEFAULT_MD_OUTPUT = DEFAULT_OUTPUT_DIR / "candidate_c_topn_weak_strength_diagnos
 DEFAULT_ANALYZER_TRACE_DIR = DEFAULT_OUTPUT_DIR / "topn_weak_strength_trace"
 REPRESENTATIVE_LIMIT = 5
 
-# Must stay aligned with src/research/research_analyzer.py (banded_weighted_v3)
+# Must stay aligned with src/research/research_analyzer.py scoring policy.
 CRITICAL_MAJOR_DEFICIT_LABELS = {
     "sample_count_below_emerging_moderate",
-    "median_return_below_emerging_moderate",
 }
 SUPPORTING_MAJOR_DEFICIT_LABELS = {
+    "median_return_below_emerging_moderate",
     "positive_rate_below_emerging_moderate",
     "robustness_below_emerging_moderate",
 }
@@ -211,7 +211,9 @@ def _aggregate_score_summary(candidates: list[dict[str, Any]]) -> dict[str, Any]
     scores = [
         float(value)
         for value in (
-            _safe_float(_safe_dict(item.get("candidate_strength_diagnostics")).get("aggregate_score"))
+            _safe_float(
+                _safe_dict(item.get("candidate_strength_diagnostics")).get("aggregate_score")
+            )
             for item in candidates
         )
         if value is not None
@@ -244,6 +246,45 @@ def _aggregate_score_summary(candidates: list[dict[str, Any]]) -> dict[str, Any]
         "max": max(scores),
         "avg": round(sum(scores) / len(scores), 6),
         "bucket_counts": _sorted_counter(bucket_counts, key_name="score_bucket"),
+    }
+
+
+def _aggregate_consistency_debug(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    debug_candidates: list[dict[str, Any]] = []
+    count_above_59_5 = 0
+
+    for candidate in candidates:
+        diagnostics = _safe_dict(candidate.get("candidate_strength_diagnostics"))
+        aggregate_score = _safe_float(candidate.get("aggregate_score"))
+        if aggregate_score is None:
+            aggregate_score = _safe_float(diagnostics.get("aggregate_score"))
+
+        if aggregate_score is not None and aggregate_score >= 59.5:
+            count_above_59_5 += 1
+
+        debug_candidates.append(
+            {
+                "symbol": candidate.get("symbol"),
+                "strategy": candidate.get("strategy"),
+                "horizon": candidate.get("horizon"),
+                "support_category": candidate.get("support_category"),
+                "support_group": candidate.get("support_group"),
+                "sample_count": candidate.get("sample_count"),
+                "final_classification": candidate.get("final_classification"),
+                "classification_reason": candidate.get("classification_reason"),
+                "aggregate_score": aggregate_score,
+                "major_deficits": candidate.get("major_deficits") or [],
+                "major_deficit_breakdown": candidate.get("major_deficit_breakdown") or {},
+                "hard_blockers": candidate.get("hard_blockers") or [],
+                "soft_penalties": candidate.get("soft_penalties") or [],
+                "positive_rate_pct": candidate.get("positive_rate_pct"),
+                "robustness_value": candidate.get("robustness_value"),
+            }
+        )
+
+    return {
+        "candidates": debug_candidates,
+        "count_above_59_5": count_above_59_5,
     }
 
 
@@ -537,6 +578,7 @@ def build_experimental_candidate_c_topn_weak_strength_diagnosis_summary(
         ),
         "component_band_counts": component_band_counts,
         "aggregate_score_summary": _aggregate_score_summary(candidate_strength_details),
+        "aggregate_consistency_debug": _aggregate_consistency_debug(candidate_strength_details),
         "representative_weak_candidates": representative_weak_candidates,
         "root_assessment": {
             "dominant_classification_reason": dominant_reason,
@@ -566,6 +608,7 @@ def render_experimental_candidate_c_topn_weak_strength_diagnosis_markdown(
     hard_blocker_counts = _safe_list(summary.get("hard_blocker_counts"))
     critical_major_deficit_counts = _safe_list(summary.get("critical_major_deficit_counts"))
     supporting_major_deficit_counts = _safe_list(summary.get("supporting_major_deficit_counts"))
+    aggregate_debug = _safe_dict(summary.get("aggregate_consistency_debug"))
 
     lines = [
         "# Candidate C2 Top-N Weak Strength Diagnosis Report",
@@ -581,6 +624,9 @@ def render_experimental_candidate_c_topn_weak_strength_diagnosis_markdown(
         f"- Dominant metric pattern: {root.get('dominant_metric_pattern', 'n/a')}",
         f"- Recommended next change: {root.get('recommended_next_change', 'n/a')}",
         f"- Root assessment: {root.get('summary', 'n/a')}",
+        "",
+        "## Aggregate Consistency Debug",
+        f"- count_above_59_5: {aggregate_debug.get('count_above_59_5', 0)}",
         "",
         "## Classification Reasons",
     ]

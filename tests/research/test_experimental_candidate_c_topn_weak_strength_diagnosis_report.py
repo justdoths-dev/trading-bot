@@ -23,9 +23,22 @@ def _candidate_detail(
 
     return {
         "group": group,
+        "symbol": group,
+        "strategy": "intraday",
+        "horizon": "15m",
+        "support_category": "symbol",
+        "support_group": group,
         "sample_count": sample_count,
         "median_future_return_pct": median_future_return_pct,
         "positive_rate_pct": positive_rate_pct,
+        "robustness_value": robustness_value,
+        "aggregate_score": diagnostics["aggregate_score"],
+        "classification_reason": diagnostics["classification_reason"],
+        "final_classification": diagnostics["final_classification"],
+        "hard_blockers": diagnostics["hard_blockers"],
+        "soft_penalties": diagnostics["soft_penalties"],
+        "major_deficits": diagnostics["major_deficits"],
+        "major_deficit_breakdown": diagnostics["major_deficit_breakdown"],
         "robustness_signal_pct": robustness_value,
         "candidate_strength": diagnostics["final_classification"],
         "candidate_strength_diagnostics": diagnostics,
@@ -65,6 +78,41 @@ def test_aggregate_score_summary_reports_count_min_max_avg_and_bucket_counts() -
     assert isinstance(summary["avg"], float)
     assert isinstance(summary["bucket_counts"], list)
     assert len(summary["bucket_counts"]) >= 1
+
+
+def test_aggregate_consistency_debug_reports_threshold_count_and_fields() -> None:
+    candidates = [
+        _candidate_detail(
+            group="candidate_above_threshold",
+            sample_count=55,
+            median_future_return_pct=0.17,
+            positive_rate_pct=49.0,
+            robustness_value=45.0,
+        ),
+        _candidate_detail(
+            group="candidate_below_threshold",
+            sample_count=55,
+            median_future_return_pct=0.17,
+            positive_rate_pct=49.0,
+            robustness_value=44.0,
+        ),
+    ]
+
+    debug = diagnosis_report._aggregate_consistency_debug(candidates)
+
+    assert debug["count_above_59_5"] == 1
+    assert len(debug["candidates"]) == 2
+
+    first = debug["candidates"][0]
+    assert first["sample_count"] == 55
+    assert first["final_classification"] == "moderate"
+    assert first["classification_reason"] == "cleared_weighted_moderate_profile_with_three_supporting_deficits"
+    assert first["support_category"] == "symbol"
+    assert first["support_group"] == "candidate_above_threshold"
+    assert "major_deficits" in first
+    assert "major_deficit_breakdown" in first
+    assert "hard_blockers" in first
+    assert "soft_penalties" in first
 
 
 def test_candidate_strength_summary_uses_v5_2_scoring_model() -> None:
@@ -108,7 +156,7 @@ def test_candidate_strength_summary_three_supporting_deficits_recover_under_v5_3
     )
 
 
-def test_candidate_strength_summary_three_supporting_deficits_with_lower_positive_rate_still_fail_on_guard() -> None:
+def test_candidate_strength_summary_three_supporting_deficits_with_lower_positive_rate_fail_on_positive_rate_guard() -> None:
     diagnostics = research_analyzer._score_candidate_strength_diagnostics(
         sample_count=55,
         median_future_return_pct=0.17,
@@ -123,7 +171,7 @@ def test_candidate_strength_summary_three_supporting_deficits_with_lower_positiv
     )
 
 
-def test_candidate_strength_summary_three_supporting_deficits_with_lower_robustness_still_fail_on_aggregate_first() -> None:
+def test_candidate_strength_summary_three_supporting_deficits_with_lower_robustness_fail_on_aggregate_first() -> None:
     diagnostics = research_analyzer._score_candidate_strength_diagnostics(
         sample_count=55,
         median_future_return_pct=0.17,
@@ -148,14 +196,14 @@ def test_candidate_strength_summary_three_supporting_deficits_reason_distributio
             robustness_value=53.0,
         ),
         _candidate_detail(
-            group="candidate_moderate_three_a",
+            group="candidate_moderate_three",
             sample_count=55,
             median_future_return_pct=0.17,
             positive_rate_pct=49.0,
             robustness_value=45.0,
         ),
         _candidate_detail(
-            group="candidate_weak_three_b",
+            group="candidate_weak_three_positive_guard",
             sample_count=55,
             median_future_return_pct=0.17,
             positive_rate_pct=48.0,
