@@ -93,7 +93,7 @@ def test_candidate_strength_summary_recovers_two_supporting_deficits_as_moderate
     )
 
 
-def test_candidate_strength_summary_three_supporting_deficits_currently_remain_weak_due_to_aggregate_guard() -> None:
+def test_candidate_strength_summary_three_supporting_deficits_recover_under_v5_3_threshold() -> None:
     diagnostics = research_analyzer._score_candidate_strength_diagnostics(
         sample_count=55,
         median_future_return_pct=0.17,
@@ -101,14 +101,14 @@ def test_candidate_strength_summary_three_supporting_deficits_currently_remain_w
         robustness_value=45.0,
     )
 
-    assert diagnostics["final_classification"] == "weak"
+    assert diagnostics["final_classification"] == "moderate"
     assert (
         diagnostics["classification_reason"]
-        == "three_supporting_deficits_but_aggregate_too_low"
+        == "cleared_weighted_moderate_profile_with_three_supporting_deficits"
     )
 
 
-def test_candidate_strength_summary_three_supporting_deficits_with_lower_positive_rate_still_fail_on_aggregate_first() -> None:
+def test_candidate_strength_summary_three_supporting_deficits_with_lower_positive_rate_still_fail_on_guard() -> None:
     diagnostics = research_analyzer._score_candidate_strength_diagnostics(
         sample_count=55,
         median_future_return_pct=0.17,
@@ -119,7 +119,7 @@ def test_candidate_strength_summary_three_supporting_deficits_with_lower_positiv
     assert diagnostics["final_classification"] == "weak"
     assert (
         diagnostics["classification_reason"]
-        == "three_supporting_deficits_but_aggregate_too_low"
+        == "three_supporting_deficits_but_positive_rate_too_low"
     )
 
 
@@ -148,7 +148,7 @@ def test_candidate_strength_summary_three_supporting_deficits_reason_distributio
             robustness_value=53.0,
         ),
         _candidate_detail(
-            group="candidate_weak_three_a",
+            group="candidate_moderate_three_a",
             sample_count=55,
             median_future_return_pct=0.17,
             positive_rate_pct=49.0,
@@ -172,7 +172,8 @@ def test_candidate_strength_summary_three_supporting_deficits_reason_distributio
     assert (
         count_map["cleared_weighted_moderate_profile_with_two_supporting_deficits"] == 1
     )
-    assert count_map["three_supporting_deficits_but_aggregate_too_low"] == 2
+    assert count_map["cleared_weighted_moderate_profile_with_three_supporting_deficits"] == 1
+    assert count_map["three_supporting_deficits_but_positive_rate_too_low"] == 1
 
 
 def test_strength_counts_split_weak_and_non_weak_correctly() -> None:
@@ -185,7 +186,7 @@ def test_strength_counts_split_weak_and_non_weak_correctly() -> None:
             robustness_value=53.0,
         ),
         _candidate_detail(
-            group="candidate_weak_three",
+            group="candidate_moderate_three",
             sample_count=55,
             median_future_return_pct=0.17,
             positive_rate_pct=49.0,
@@ -209,7 +210,7 @@ def test_strength_counts_split_weak_and_non_weak_correctly() -> None:
         1 for item in candidates if item["candidate_strength"] in {"moderate", "strong"}
     )
 
-    assert weak_count == 2
-    assert moderate_count == 1
+    assert weak_count == 1
+    assert moderate_count == 2
     assert strong_count == 0
-    assert non_weak_count == 1
+    assert non_weak_count == 2
