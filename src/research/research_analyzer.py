@@ -66,7 +66,7 @@ STRENGTH_COMPONENT_WEIGHTS = {
     "robustness_value": 0.15,
 }
 
-STRENGTH_SCORING_MODEL = "banded_weighted_v5"
+STRENGTH_SCORING_MODEL = "banded_weighted_v5_1"
 
 STRENGTH_RAW_SCORE_BANDS = {
     "strong": 1.00,
@@ -78,7 +78,7 @@ STRENGTH_RAW_SCORE_BANDS = {
 
 MODERATE_MIN_AGGREGATE_SCORE = 62.0
 MODERATE_WITH_ONE_SUPPORTING_DEFICIT_MIN_SCORE = 66.0
-MODERATE_WITH_TWO_SUPPORTING_DEFICITS_MIN_SCORE = 63.0
+MODERATE_WITH_TWO_SUPPORTING_DEFICITS_MIN_SCORE = 54.0
 STRONG_MIN_AGGREGATE_SCORE = 85.0
 
 CRITICAL_MAJOR_DEFICITS = {
@@ -644,23 +644,31 @@ def _can_classify_as_moderate(
             else "aggregate_below_moderate_threshold",
         )
 
-    if (
-        len(supporting_major_deficits) == 1
-        and aggregate_score >= MODERATE_WITH_ONE_SUPPORTING_DEFICIT_MIN_SCORE
-    ):
-        return True, "cleared_weighted_moderate_profile_with_one_supporting_deficit"
+    if len(supporting_major_deficits) == 1:
+        return (
+            aggregate_score >= MODERATE_WITH_ONE_SUPPORTING_DEFICIT_MIN_SCORE,
+            "cleared_weighted_moderate_profile_with_one_supporting_deficit"
+            if aggregate_score >= MODERATE_WITH_ONE_SUPPORTING_DEFICIT_MIN_SCORE
+            else "one_supporting_deficit_but_aggregate_too_low",
+        )
 
-    if (
-        len(supporting_major_deficits) == 2
-        and aggregate_score >= MODERATE_WITH_TWO_SUPPORTING_DEFICITS_MIN_SCORE
-        and sample_count is not None
-        and sample_count >= EDGE_MODERATE_SAMPLE_COUNT
-        and positive_rate_pct is not None
-        and positive_rate_pct >= POSITIVE_RATE_MINIMUM_FLOOR_PCT
-    ):
+    if len(supporting_major_deficits) == 2:
+        if aggregate_score < MODERATE_WITH_TWO_SUPPORTING_DEFICITS_MIN_SCORE:
+            return False, "two_supporting_deficits_but_aggregate_too_low"
+        if sample_count is None or sample_count < EDGE_MODERATE_SAMPLE_COUNT:
+            return False, "two_supporting_deficits_but_sample_not_moderate"
+        if (
+            positive_rate_pct is None
+            or positive_rate_pct < POSITIVE_RATE_MINIMUM_FLOOR_PCT
+        ):
+            return False, "two_supporting_deficits_but_positive_rate_below_floor"
+
         return True, "cleared_weighted_moderate_profile_with_two_supporting_deficits"
 
-    return False, "too_many_or_too_deep_supporting_deficits"
+    if len(supporting_major_deficits) >= 3:
+        return False, "three_or_more_supporting_deficits_present"
+
+    return False, "supporting_deficits_depth_exceeds_recovery_band"
 
 
 def _score_candidate_strength_diagnostics(
@@ -875,6 +883,10 @@ def _build_candidate_metric_summary(
     if isinstance(classification, str) and classification:
         parts.append(f"classification={classification}")
 
+    reason = diagnostics.get("classification_reason")
+    if isinstance(reason, str) and reason:
+        parts.append(f"classification_reason={reason}")
+
     penalties = diagnostics.get("soft_penalties")
     if isinstance(penalties, list) and penalties:
         parts.append(f"soft_penalties={'+'.join(str(item) for item in penalties)}")
@@ -883,6 +895,7 @@ def _build_candidate_metric_summary(
     if isinstance(deficits, dict):
         supporting = deficits.get("supporting")
         critical = deficits.get("critical")
+        other = deficits.get("other")
         if isinstance(supporting, list) and supporting:
             parts.append(
                 f"supporting_major_deficits={'+'.join(str(item) for item in supporting)}"
@@ -890,6 +903,10 @@ def _build_candidate_metric_summary(
         if isinstance(critical, list) and critical:
             parts.append(
                 f"critical_major_deficits={'+'.join(str(item) for item in critical)}"
+            )
+        if isinstance(other, list) and other:
+            parts.append(
+                f"other_major_deficits={'+'.join(str(item) for item in other)}"
             )
 
     return ", ".join(parts)
@@ -903,7 +920,9 @@ def _horizon_visibility_reason(sample_gate: str, quality_gate: str) -> str:
     return "passed_sample_gate_only"
 
 
-def _build_edge_stability_preview(edge_candidates_preview: dict[str, Any]) -> dict[str, Any]:
+def _build_edge_stability_preview(
+    edge_candidates_preview: dict[str, Any],
+) -> dict[str, Any]:
     by_horizon = edge_candidates_preview.get("by_horizon", {}) or {}
 
     return {
@@ -1020,7 +1039,9 @@ def _build_markdown(metrics: dict[str, Any]) -> str:
     lines.append(f"- max_age_hours: {schema_validation.get('max_age_hours', 'n/a')}")
     lines.append(f"- max_rows: {schema_validation.get('max_rows', 'n/a')}")
     lines.append(f"- raw_record_count: {schema_validation.get('raw_record_count', 0)}")
-    lines.append(f"- windowed_record_count: {schema_validation.get('windowed_record_count', 0)}")
+    lines.append(
+        f"- windowed_record_count: {schema_validation.get('windowed_record_count', 0)}"
+    )
     lines.append(f"- total_records: {schema_validation.get('total_records', 0)}")
     lines.append(f"- valid_records: {schema_validation.get('valid_records', 0)}")
     lines.append(f"- invalid_records: {schema_validation.get('invalid_records', 0)}")
@@ -1607,6 +1628,3 @@ if __name__ == "__main__":
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
     main()
-
-
-
