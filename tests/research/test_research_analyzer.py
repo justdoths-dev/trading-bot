@@ -605,7 +605,7 @@ def test_score_metric_component_uses_v5_2_band_values_for_thin_and_below_floor()
     )
     below_floor_component = research_analyzer._score_metric_component(
         metric_name="positive_rate_pct",
-        value=46.0,
+        value=39.0,
         weight=research_analyzer.STRENGTH_COMPONENT_WEIGHTS["positive_rate_pct"],
         strong_threshold=research_analyzer.EDGE_STRONG_POSITIVE_RATE_PCT,
         moderate_threshold=research_analyzer.EDGE_MODERATE_POSITIVE_RATE_PCT,
@@ -660,11 +660,35 @@ def test_score_candidate_strength_keeps_two_supporting_deficits_weak_when_sample
     assert diagnostics["classification_reason"] == "two_supporting_deficits_but_sample_not_moderate"
 
 
-def test_score_candidate_strength_keeps_two_supporting_deficits_weak_when_positive_rate_below_floor() -> None:
+def test_score_candidate_strength_two_supporting_deficits_recover_at_v5_4_positive_rate_floor() -> None:
     diagnostics = research_analyzer._score_candidate_strength_diagnostics(
         sample_count=55,
         median_future_return_pct=0.17,
-        positive_rate_pct=46.0,
+        positive_rate_pct=40.0,
+        robustness_value=53.0,
+    )
+
+    assert diagnostics["major_deficit_breakdown"]["critical"] == []
+    assert diagnostics["major_deficit_breakdown"]["supporting"] == [
+        "median_return_below_emerging_moderate",
+        "positive_rate_below_emerging_moderate",
+    ]
+    assert (
+        diagnostics["aggregate_score"]
+        >= research_analyzer.MODERATE_WITH_TWO_SUPPORTING_DEFICITS_MIN_SCORE
+    )
+    assert diagnostics["final_classification"] == "moderate"
+    assert (
+        diagnostics["classification_reason"]
+        == "cleared_weighted_moderate_profile_with_two_supporting_deficits"
+    )
+
+
+def test_score_candidate_strength_two_supporting_deficits_remain_weak_below_v5_4_positive_rate_floor() -> None:
+    diagnostics = research_analyzer._score_candidate_strength_diagnostics(
+        sample_count=55,
+        median_future_return_pct=0.17,
+        positive_rate_pct=39.0,
         robustness_value=53.0,
     )
 
@@ -697,10 +721,13 @@ def test_score_candidate_strength_three_supporting_deficits_recover_to_moderate_
         >= research_analyzer.MODERATE_WITH_THREE_SUPPORTING_DEFICITS_MIN_SCORE
     )
     assert diagnostics["final_classification"] == "moderate"
-    assert diagnostics["classification_reason"] == "cleared_weighted_moderate_profile_with_three_supporting_deficits"
+    assert (
+        diagnostics["classification_reason"]
+        == "cleared_weighted_moderate_profile_with_three_supporting_deficits"
+    )
 
 
-def test_score_candidate_strength_three_supporting_deficits_with_lower_positive_rate_still_fail_on_aggregate_first() -> None:
+def test_score_candidate_strength_three_supporting_deficits_with_lower_positive_rate_still_fail_on_positive_rate_guard() -> None:
     diagnostics = research_analyzer._score_candidate_strength_diagnostics(
         sample_count=55,
         median_future_return_pct=0.17,
@@ -715,18 +742,6 @@ def test_score_candidate_strength_three_supporting_deficits_with_lower_positive_
     ]
     assert diagnostics["final_classification"] == "weak"
     assert diagnostics["classification_reason"] == "three_supporting_deficits_but_positive_rate_too_low"
-
-
-def test_score_candidate_strength_two_supporting_deficits_blocked_by_positive_rate_floor_remain_weak() -> None:
-    diagnostics = research_analyzer._score_candidate_strength_diagnostics(
-        sample_count=55,
-        median_future_return_pct=0.17,
-        positive_rate_pct=46.0,
-        robustness_value=53.0,
-    )
-
-    assert diagnostics["final_classification"] == "weak"
-    assert diagnostics["classification_reason"] == "two_supporting_deficits_but_positive_rate_below_floor"
 
 
 def test_score_candidate_strength_three_supporting_deficits_with_lower_robustness_remain_weak_below_v5_3_threshold() -> None:

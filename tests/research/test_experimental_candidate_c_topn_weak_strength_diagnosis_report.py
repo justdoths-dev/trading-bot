@@ -141,6 +141,36 @@ def test_candidate_strength_summary_recovers_two_supporting_deficits_as_moderate
     )
 
 
+def test_candidate_strength_summary_two_supporting_deficits_recover_at_v5_4_positive_rate_floor() -> None:
+    diagnostics = research_analyzer._score_candidate_strength_diagnostics(
+        sample_count=55,
+        median_future_return_pct=0.17,
+        positive_rate_pct=40.0,
+        robustness_value=53.0,
+    )
+
+    assert diagnostics["final_classification"] == "moderate"
+    assert (
+        diagnostics["classification_reason"]
+        == "cleared_weighted_moderate_profile_with_two_supporting_deficits"
+    )
+
+
+def test_candidate_strength_summary_two_supporting_deficits_below_v5_4_positive_rate_floor_remain_weak() -> None:
+    diagnostics = research_analyzer._score_candidate_strength_diagnostics(
+        sample_count=55,
+        median_future_return_pct=0.17,
+        positive_rate_pct=39.0,
+        robustness_value=53.0,
+    )
+
+    assert diagnostics["final_classification"] == "weak"
+    assert (
+        diagnostics["classification_reason"]
+        == "two_supporting_deficits_but_positive_rate_below_floor"
+    )
+
+
 def test_candidate_strength_summary_three_supporting_deficits_recover_under_v5_3_threshold() -> None:
     diagnostics = research_analyzer._score_candidate_strength_diagnostics(
         sample_count=55,
@@ -156,7 +186,7 @@ def test_candidate_strength_summary_three_supporting_deficits_recover_under_v5_3
     )
 
 
-def test_candidate_strength_summary_three_supporting_deficits_with_lower_positive_rate_fail_on_positive_rate_guard() -> None:
+def test_candidate_strength_summary_three_supporting_deficits_with_lower_positive_rate_still_fail_on_positive_rate_guard() -> None:
     diagnostics = research_analyzer._score_candidate_strength_diagnostics(
         sample_count=55,
         median_future_return_pct=0.17,
@@ -171,7 +201,7 @@ def test_candidate_strength_summary_three_supporting_deficits_with_lower_positiv
     )
 
 
-def test_candidate_strength_summary_three_supporting_deficits_with_lower_robustness_fail_on_aggregate_first() -> None:
+def test_candidate_strength_summary_three_supporting_deficits_with_lower_robustness_still_fail_on_aggregate_first() -> None:
     diagnostics = research_analyzer._score_candidate_strength_diagnostics(
         sample_count=55,
         median_future_return_pct=0.17,
@@ -209,6 +239,20 @@ def test_candidate_strength_summary_three_supporting_deficits_reason_distributio
             positive_rate_pct=48.0,
             robustness_value=45.0,
         ),
+        _candidate_detail(
+            group="candidate_moderate_two_floor40",
+            sample_count=55,
+            median_future_return_pct=0.17,
+            positive_rate_pct=40.0,
+            robustness_value=53.0,
+        ),
+        _candidate_detail(
+            group="candidate_weak_two_below_floor40",
+            sample_count=55,
+            median_future_return_pct=0.17,
+            positive_rate_pct=39.0,
+            robustness_value=53.0,
+        ),
     ]
 
     count_map: dict[str, int] = {}
@@ -218,10 +262,11 @@ def test_candidate_strength_summary_three_supporting_deficits_reason_distributio
         count_map[reason] = count_map.get(reason, 0) + 1
 
     assert (
-        count_map["cleared_weighted_moderate_profile_with_two_supporting_deficits"] == 1
+        count_map["cleared_weighted_moderate_profile_with_two_supporting_deficits"] == 2
     )
     assert count_map["cleared_weighted_moderate_profile_with_three_supporting_deficits"] == 1
     assert count_map["three_supporting_deficits_but_positive_rate_too_low"] == 1
+    assert count_map["two_supporting_deficits_but_positive_rate_below_floor"] == 1
 
 
 def test_strength_counts_split_weak_and_non_weak_correctly() -> None:
@@ -239,6 +284,13 @@ def test_strength_counts_split_weak_and_non_weak_correctly() -> None:
             median_future_return_pct=0.17,
             positive_rate_pct=49.0,
             robustness_value=45.0,
+        ),
+        _candidate_detail(
+            group="candidate_moderate_two_floor40",
+            sample_count=55,
+            median_future_return_pct=0.17,
+            positive_rate_pct=40.0,
+            robustness_value=53.0,
         ),
         _candidate_detail(
             group="candidate_weak",
@@ -259,6 +311,6 @@ def test_strength_counts_split_weak_and_non_weak_correctly() -> None:
     )
 
     assert weak_count == 1
-    assert moderate_count == 2
+    assert moderate_count == 3
     assert strong_count == 0
-    assert non_weak_count == 2
+    assert non_weak_count == 3
