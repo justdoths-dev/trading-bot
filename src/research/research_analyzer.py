@@ -66,10 +66,19 @@ STRENGTH_COMPONENT_WEIGHTS = {
     "robustness_value": 0.15,
 }
 
-STRENGTH_SCORING_MODEL = "banded_weighted_v4"
+STRENGTH_SCORING_MODEL = "banded_weighted_v5"
+
+STRENGTH_RAW_SCORE_BANDS = {
+    "strong": 1.00,
+    "moderate": 0.82,
+    "emerging": 0.66,
+    "thin": 0.50,
+    "below_floor": 0.35,
+}
 
 MODERATE_MIN_AGGREGATE_SCORE = 62.0
-MODERATE_WITH_ONE_SUPPORTING_DEFICIT_MIN_SCORE = 68.0
+MODERATE_WITH_ONE_SUPPORTING_DEFICIT_MIN_SCORE = 66.0
+MODERATE_WITH_TWO_SUPPORTING_DEFICITS_MIN_SCORE = 63.0
 STRONG_MIN_AGGREGATE_SCORE = 85.0
 
 CRITICAL_MAJOR_DEFICITS = {
@@ -394,6 +403,7 @@ def _build_edge_candidates_preview(strategy_lab: dict[str, Any]) -> dict[str, An
         "minimum_sample_count": MIN_EDGE_CANDIDATE_SAMPLE_COUNT,
         "strength_thresholds": {
             "scoring_model": STRENGTH_SCORING_MODEL,
+            "raw_score_bands": STRENGTH_RAW_SCORE_BANDS,
             "hard_floors": {
                 "sample_count": MIN_EDGE_CANDIDATE_SAMPLE_COUNT,
                 "labeled_count_gt": 0,
@@ -420,6 +430,7 @@ def _build_edge_candidates_preview(strategy_lab: dict[str, Any]) -> dict[str, An
             "classification_thresholds": {
                 "moderate_min_aggregate_score": MODERATE_MIN_AGGREGATE_SCORE,
                 "moderate_with_one_supporting_deficit_min_score": MODERATE_WITH_ONE_SUPPORTING_DEFICIT_MIN_SCORE,
+                "moderate_with_two_supporting_deficits_min_score": MODERATE_WITH_TWO_SUPPORTING_DEFICITS_MIN_SCORE,
                 "strong_min_aggregate_score": STRONG_MIN_AGGREGATE_SCORE,
             },
             "component_weights": STRENGTH_COMPONENT_WEIGHTS,
@@ -569,19 +580,19 @@ def _score_metric_component(
 
     if value >= strong_threshold:
         band = "strong"
-        raw_score = 1.0
+        raw_score = STRENGTH_RAW_SCORE_BANDS["strong"]
     elif value >= moderate_threshold:
         band = "moderate"
-        raw_score = 0.8
+        raw_score = STRENGTH_RAW_SCORE_BANDS["moderate"]
     elif value >= emerging_threshold:
         band = "emerging"
-        raw_score = 0.6
+        raw_score = STRENGTH_RAW_SCORE_BANDS["emerging"]
     elif minimum_threshold is None or value >= minimum_threshold:
         band = "thin"
-        raw_score = 0.4
+        raw_score = STRENGTH_RAW_SCORE_BANDS["thin"]
     else:
         band = "below_floor"
-        raw_score = 0.2
+        raw_score = STRENGTH_RAW_SCORE_BANDS["below_floor"]
 
     return {
         "metric": metric_name,
@@ -615,6 +626,8 @@ def _can_classify_as_moderate(
     *,
     aggregate_score: float,
     major_deficits: list[str],
+    sample_count: float | None,
+    positive_rate_pct: float | None,
 ) -> tuple[bool, str]:
     critical_major_deficits, supporting_major_deficits, other_major_deficits = (
         _split_major_deficits(major_deficits)
@@ -636,6 +649,16 @@ def _can_classify_as_moderate(
         and aggregate_score >= MODERATE_WITH_ONE_SUPPORTING_DEFICIT_MIN_SCORE
     ):
         return True, "cleared_weighted_moderate_profile_with_one_supporting_deficit"
+
+    if (
+        len(supporting_major_deficits) == 2
+        and aggregate_score >= MODERATE_WITH_TWO_SUPPORTING_DEFICITS_MIN_SCORE
+        and sample_count is not None
+        and sample_count >= EDGE_MODERATE_SAMPLE_COUNT
+        and positive_rate_pct is not None
+        and positive_rate_pct >= POSITIVE_RATE_MINIMUM_FLOOR_PCT
+    ):
+        return True, "cleared_weighted_moderate_profile_with_two_supporting_deficits"
 
     return False, "too_many_or_too_deep_supporting_deficits"
 
@@ -772,6 +795,8 @@ def _score_candidate_strength_diagnostics(
         can_moderate, moderate_reason = _can_classify_as_moderate(
             aggregate_score=aggregate_score,
             major_deficits=major_deficits,
+            sample_count=sample_count,
+            positive_rate_pct=positive_rate_pct,
         )
         if can_moderate:
             final_classification = "moderate"
