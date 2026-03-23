@@ -503,7 +503,10 @@ def test_score_candidate_strength_allows_one_supporting_major_deficit_when_score
         robustness_value=45.0,
     )
 
-    assert diagnostics["aggregate_score"] >= research_analyzer.MODERATE_WITH_ONE_SUPPORTING_DEFICIT_MIN_SCORE
+    assert (
+        diagnostics["aggregate_score"]
+        >= research_analyzer.MODERATE_WITH_ONE_SUPPORTING_DEFICIT_MIN_SCORE
+    )
     assert diagnostics["major_deficits"] == ["robustness_below_emerging_moderate"]
     assert diagnostics["major_deficit_breakdown"]["critical"] == []
     assert diagnostics["major_deficit_breakdown"]["supporting"] == [
@@ -516,7 +519,23 @@ def test_score_candidate_strength_allows_one_supporting_major_deficit_when_score
     )
 
 
-def test_score_candidate_strength_keeps_critical_major_deficit_weak_even_with_good_supporting_metrics() -> None:
+def test_score_candidate_strength_keeps_sample_count_critical_even_with_good_supporting_metrics() -> None:
+    diagnostics = research_analyzer._score_candidate_strength_diagnostics(
+        sample_count=35,
+        median_future_return_pct=0.35,
+        positive_rate_pct=57.0,
+        robustness_value=53.0,
+    )
+
+    assert "sample_count_below_emerging_moderate" in diagnostics["major_deficits"]
+    assert diagnostics["major_deficit_breakdown"]["critical"] == [
+        "sample_count_below_emerging_moderate"
+    ]
+    assert diagnostics["final_classification"] == "weak"
+    assert diagnostics["classification_reason"] == "critical_or_unknown_major_deficit_present"
+
+
+def test_score_candidate_strength_treats_sub_emerging_positive_median_as_supporting_not_critical() -> None:
     diagnostics = research_analyzer._score_candidate_strength_diagnostics(
         sample_count=55,
         median_future_return_pct=0.15,
@@ -525,11 +544,19 @@ def test_score_candidate_strength_keeps_critical_major_deficit_weak_even_with_go
     )
 
     assert "median_return_below_emerging_moderate" in diagnostics["major_deficits"]
-    assert diagnostics["major_deficit_breakdown"]["critical"] == [
+    assert diagnostics["major_deficit_breakdown"]["critical"] == []
+    assert diagnostics["major_deficit_breakdown"]["supporting"] == [
         "median_return_below_emerging_moderate"
     ]
-    assert diagnostics["final_classification"] == "weak"
-    assert diagnostics["classification_reason"] == "critical_or_unknown_major_deficit_present"
+    assert (
+        diagnostics["aggregate_score"]
+        >= research_analyzer.MODERATE_WITH_ONE_SUPPORTING_DEFICIT_MIN_SCORE
+    )
+    assert diagnostics["final_classification"] == "moderate"
+    assert (
+        diagnostics["classification_reason"]
+        == "cleared_weighted_moderate_profile_with_one_supporting_deficit"
+    )
 
 
 def test_score_candidate_strength_uses_emerging_robustness_threshold_consistently() -> None:
@@ -542,6 +569,9 @@ def test_score_candidate_strength_uses_emerging_robustness_threshold_consistentl
 
     robustness_component = diagnostics["component_scores"]["robustness_value"]
 
-    assert robustness_component["emerging_threshold"] == research_analyzer.EDGE_EARLY_MODERATE_ROBUSTNESS_PCT
+    assert (
+        robustness_component["emerging_threshold"]
+        == research_analyzer.EDGE_EARLY_MODERATE_ROBUSTNESS_PCT
+    )
     assert robustness_component["band"] == "emerging"
     assert "robustness_below_emerging_moderate" not in diagnostics["major_deficits"]

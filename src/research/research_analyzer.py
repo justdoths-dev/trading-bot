@@ -66,7 +66,7 @@ STRENGTH_COMPONENT_WEIGHTS = {
     "robustness_value": 0.15,
 }
 
-STRENGTH_SCORING_MODEL = "banded_weighted_v3"
+STRENGTH_SCORING_MODEL = "banded_weighted_v4"
 
 MODERATE_MIN_AGGREGATE_SCORE = 62.0
 MODERATE_WITH_ONE_SUPPORTING_DEFICIT_MIN_SCORE = 68.0
@@ -74,9 +74,9 @@ STRONG_MIN_AGGREGATE_SCORE = 85.0
 
 CRITICAL_MAJOR_DEFICITS = {
     "sample_count_below_emerging_moderate",
-    "median_return_below_emerging_moderate",
 }
 SUPPORTING_MAJOR_DEFICITS = {
+    "median_return_below_emerging_moderate",
     "positive_rate_below_emerging_moderate",
     "robustness_below_emerging_moderate",
 }
@@ -840,16 +840,20 @@ def _build_candidate_metric_summary(
     ]
     if robustness_label != "n/a" and robustness_value is not None:
         parts.append(f"{robustness_label}={robustness_value}")
+
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
     aggregate_score = diagnostics.get("aggregate_score")
     if isinstance(aggregate_score, (int, float)):
         parts.append(f"aggregate_score={round(float(aggregate_score), 2)}")
+
     classification = diagnostics.get("final_classification")
     if isinstance(classification, str) and classification:
         parts.append(f"classification={classification}")
+
     penalties = diagnostics.get("soft_penalties")
     if isinstance(penalties, list) and penalties:
         parts.append(f"soft_penalties={'+'.join(str(item) for item in penalties)}")
+
     deficits = diagnostics.get("major_deficit_breakdown")
     if isinstance(deficits, dict):
         supporting = deficits.get("supporting")
@@ -862,6 +866,7 @@ def _build_candidate_metric_summary(
             parts.append(
                 f"critical_major_deficits={'+'.join(str(item) for item in critical)}"
             )
+
     return ", ".join(parts)
 
 
@@ -1526,7 +1531,6 @@ def main() -> None:
     reporter = CronHealthReporter("research_analyzer")
 
     try:
-        # CLI args retained for observability; dataset_builder defaults already apply
         metrics = run_research_analyzer(
             input_path=args.input,
             output_dir=args.output_dir,
