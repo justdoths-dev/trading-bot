@@ -39,15 +39,47 @@ from src.research.strategy_lab.segment_report import build_segment_reports
 from src.services.cron_health import CronHealthReporter
 
 LOGGER = logging.getLogger(__name__)
+
 MIN_EDGE_CANDIDATE_SAMPLE_COUNT = 30
+EDGE_EARLY_MODERATE_SAMPLE_COUNT = 40
 EDGE_MODERATE_SAMPLE_COUNT = 50
 EDGE_STRONG_SAMPLE_COUNT = 80
+
+EDGE_EARLY_MODERATE_MEDIAN_RETURN_PCT = 0.18
 EDGE_MODERATE_MEDIAN_RETURN_PCT = 0.30
 EDGE_STRONG_MEDIAN_RETURN_PCT = 0.50
+
+EDGE_EARLY_MODERATE_POSITIVE_RATE_PCT = 50.0
 EDGE_MODERATE_POSITIVE_RATE_PCT = 55.0
 EDGE_STRONG_POSITIVE_RATE_PCT = 58.0
+
+EDGE_EARLY_MODERATE_ROBUSTNESS_PCT = 46.0
 EDGE_MODERATE_ROBUSTNESS_PCT = 52.0
 EDGE_STRONG_ROBUSTNESS_PCT = 55.0
+
+POSITIVE_RATE_MINIMUM_FLOOR_PCT = 48.0
+
+STRENGTH_COMPONENT_WEIGHTS = {
+    "sample_count": 0.30,
+    "median_future_return_pct": 0.30,
+    "positive_rate_pct": 0.25,
+    "robustness_value": 0.15,
+}
+
+STRENGTH_SCORING_MODEL = "banded_weighted_v3"
+
+MODERATE_MIN_AGGREGATE_SCORE = 62.0
+MODERATE_WITH_ONE_SUPPORTING_DEFICIT_MIN_SCORE = 68.0
+STRONG_MIN_AGGREGATE_SCORE = 85.0
+
+CRITICAL_MAJOR_DEFICITS = {
+    "sample_count_below_emerging_moderate",
+    "median_return_below_emerging_moderate",
+}
+SUPPORTING_MAJOR_DEFICITS = {
+    "positive_rate_below_emerging_moderate",
+    "robustness_below_emerging_moderate",
+}
 
 
 def load_jsonl_records(input_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -361,10 +393,17 @@ def _build_edge_candidates_preview(strategy_lab: dict[str, Any]) -> dict[str, An
     return {
         "minimum_sample_count": MIN_EDGE_CANDIDATE_SAMPLE_COUNT,
         "strength_thresholds": {
-            "weak": {
+            "scoring_model": STRENGTH_SCORING_MODEL,
+            "hard_floors": {
                 "sample_count": MIN_EDGE_CANDIDATE_SAMPLE_COUNT,
                 "labeled_count_gt": 0,
                 "median_future_return_pct_gt": 0,
+            },
+            "emerging_moderate": {
+                "sample_count": EDGE_EARLY_MODERATE_SAMPLE_COUNT,
+                "median_future_return_pct": EDGE_EARLY_MODERATE_MEDIAN_RETURN_PCT,
+                "positive_rate_pct": EDGE_EARLY_MODERATE_POSITIVE_RATE_PCT,
+                "robustness_pct": EDGE_EARLY_MODERATE_ROBUSTNESS_PCT,
             },
             "moderate": {
                 "sample_count": EDGE_MODERATE_SAMPLE_COUNT,
@@ -378,6 +417,12 @@ def _build_edge_candidates_preview(strategy_lab: dict[str, Any]) -> dict[str, An
                 "positive_rate_pct": EDGE_STRONG_POSITIVE_RATE_PCT,
                 "robustness_pct": EDGE_STRONG_ROBUSTNESS_PCT,
             },
+            "classification_thresholds": {
+                "moderate_min_aggregate_score": MODERATE_MIN_AGGREGATE_SCORE,
+                "moderate_with_one_supporting_deficit_min_score": MODERATE_WITH_ONE_SUPPORTING_DEFICIT_MIN_SCORE,
+                "strong_min_aggregate_score": STRONG_MIN_AGGREGATE_SCORE,
+            },
+            "component_weights": STRENGTH_COMPONENT_WEIGHTS,
         },
         "by_horizon": by_horizon,
     }
@@ -413,12 +458,13 @@ def _extract_edge_candidate(report: Any) -> dict[str, Any]:
         if not sample_gate_passed:
             continue
 
-        candidate_strength = _score_candidate_strength(
+        candidate_strength_diagnostics = _score_candidate_strength_diagnostics(
             sample_count=sample_count,
             median_future_return_pct=median_future_return_pct,
             positive_rate_pct=positive_rate_pct,
             robustness_value=robustness_value,
         )
+        candidate_strength = str(candidate_strength_diagnostics["final_classification"])
         quality_gate = (
             "passed"
             if candidate_strength in {"moderate", "strong"}
@@ -444,6 +490,7 @@ def _extract_edge_candidate(report: Any) -> dict[str, Any]:
             "sample_gate": "passed",
             "quality_gate": quality_gate,
             "candidate_strength": candidate_strength,
+            "candidate_strength_diagnostics": candidate_strength_diagnostics,
             "visibility_reason": visibility_reason,
             "chosen_metric_summary": _build_candidate_metric_summary(
                 sample_count=int(sample_count),
@@ -451,6 +498,7 @@ def _extract_edge_candidate(report: Any) -> dict[str, Any]:
                 positive_rate_pct=positive_rate_pct,
                 robustness_label=robustness_label,
                 robustness_value=robustness_value,
+                diagnostics=candidate_strength_diagnostics,
             ),
         }
 
@@ -493,34 +541,275 @@ def _passes_absolute_minimum_gate(
     )
 
 
+def _score_metric_component(
+    *,
+    metric_name: str,
+    value: float | None,
+    weight: float,
+    strong_threshold: float,
+    moderate_threshold: float,
+    emerging_threshold: float,
+    minimum_threshold: float | None = None,
+    missing_band: str = "missing",
+    missing_score: float = 0.55,
+) -> dict[str, Any]:
+    if value is None:
+        return {
+            "metric": metric_name,
+            "value": None,
+            "weight": weight,
+            "band": missing_band,
+            "raw_score": missing_score,
+            "weighted_score": round(missing_score * weight * 100.0, 6),
+            "strong_threshold": strong_threshold,
+            "moderate_threshold": moderate_threshold,
+            "emerging_threshold": emerging_threshold,
+            "minimum_threshold": minimum_threshold,
+        }
+
+    if value >= strong_threshold:
+        band = "strong"
+        raw_score = 1.0
+    elif value >= moderate_threshold:
+        band = "moderate"
+        raw_score = 0.8
+    elif value >= emerging_threshold:
+        band = "emerging"
+        raw_score = 0.6
+    elif minimum_threshold is None or value >= minimum_threshold:
+        band = "thin"
+        raw_score = 0.4
+    else:
+        band = "below_floor"
+        raw_score = 0.2
+
+    return {
+        "metric": metric_name,
+        "value": value,
+        "weight": weight,
+        "band": band,
+        "raw_score": raw_score,
+        "weighted_score": round(raw_score * weight * 100.0, 6),
+        "strong_threshold": strong_threshold,
+        "moderate_threshold": moderate_threshold,
+        "emerging_threshold": emerging_threshold,
+        "minimum_threshold": minimum_threshold,
+    }
+
+
+def _split_major_deficits(
+    major_deficits: list[str],
+) -> tuple[list[str], list[str], list[str]]:
+    critical = [item for item in major_deficits if item in CRITICAL_MAJOR_DEFICITS]
+    supporting = [item for item in major_deficits if item in SUPPORTING_MAJOR_DEFICITS]
+    other = [
+        item
+        for item in major_deficits
+        if item not in CRITICAL_MAJOR_DEFICITS
+        and item not in SUPPORTING_MAJOR_DEFICITS
+    ]
+    return critical, supporting, other
+
+
+def _can_classify_as_moderate(
+    *,
+    aggregate_score: float,
+    major_deficits: list[str],
+) -> tuple[bool, str]:
+    critical_major_deficits, supporting_major_deficits, other_major_deficits = (
+        _split_major_deficits(major_deficits)
+    )
+
+    if critical_major_deficits or other_major_deficits:
+        return False, "critical_or_unknown_major_deficit_present"
+
+    if not supporting_major_deficits:
+        return (
+            aggregate_score >= MODERATE_MIN_AGGREGATE_SCORE,
+            "cleared_weighted_moderate_profile"
+            if aggregate_score >= MODERATE_MIN_AGGREGATE_SCORE
+            else "aggregate_below_moderate_threshold",
+        )
+
+    if (
+        len(supporting_major_deficits) == 1
+        and aggregate_score >= MODERATE_WITH_ONE_SUPPORTING_DEFICIT_MIN_SCORE
+    ):
+        return True, "cleared_weighted_moderate_profile_with_one_supporting_deficit"
+
+    return False, "too_many_or_too_deep_supporting_deficits"
+
+
+def _score_candidate_strength_diagnostics(
+    *,
+    sample_count: float | None,
+    median_future_return_pct: float | None,
+    positive_rate_pct: float | None,
+    robustness_value: float | None,
+) -> dict[str, Any]:
+    hard_blockers: list[str] = []
+    soft_penalties: list[str] = []
+    major_deficits: list[str] = []
+
+    if sample_count is None or sample_count < MIN_EDGE_CANDIDATE_SAMPLE_COUNT:
+        hard_blockers.append("sample_count_below_absolute_floor")
+    if median_future_return_pct is None or median_future_return_pct <= 0:
+        hard_blockers.append("median_future_return_pct_non_positive")
+
+    sample_component = _score_metric_component(
+        metric_name="sample_count",
+        value=sample_count,
+        weight=STRENGTH_COMPONENT_WEIGHTS["sample_count"],
+        strong_threshold=EDGE_STRONG_SAMPLE_COUNT,
+        moderate_threshold=EDGE_MODERATE_SAMPLE_COUNT,
+        emerging_threshold=EDGE_EARLY_MODERATE_SAMPLE_COUNT,
+        minimum_threshold=MIN_EDGE_CANDIDATE_SAMPLE_COUNT,
+        missing_band="missing",
+        missing_score=0.0,
+    )
+    median_component = _score_metric_component(
+        metric_name="median_future_return_pct",
+        value=median_future_return_pct,
+        weight=STRENGTH_COMPONENT_WEIGHTS["median_future_return_pct"],
+        strong_threshold=EDGE_STRONG_MEDIAN_RETURN_PCT,
+        moderate_threshold=EDGE_MODERATE_MEDIAN_RETURN_PCT,
+        emerging_threshold=EDGE_EARLY_MODERATE_MEDIAN_RETURN_PCT,
+        minimum_threshold=0.0,
+        missing_band="missing",
+        missing_score=0.0,
+    )
+    positive_component = _score_metric_component(
+        metric_name="positive_rate_pct",
+        value=positive_rate_pct,
+        weight=STRENGTH_COMPONENT_WEIGHTS["positive_rate_pct"],
+        strong_threshold=EDGE_STRONG_POSITIVE_RATE_PCT,
+        moderate_threshold=EDGE_MODERATE_POSITIVE_RATE_PCT,
+        emerging_threshold=EDGE_EARLY_MODERATE_POSITIVE_RATE_PCT,
+        minimum_threshold=POSITIVE_RATE_MINIMUM_FLOOR_PCT,
+        missing_band="missing_soft",
+        missing_score=0.45,
+    )
+    robustness_component = _score_metric_component(
+        metric_name="robustness_value",
+        value=robustness_value,
+        weight=STRENGTH_COMPONENT_WEIGHTS["robustness_value"],
+        strong_threshold=EDGE_STRONG_ROBUSTNESS_PCT,
+        moderate_threshold=EDGE_MODERATE_ROBUSTNESS_PCT,
+        emerging_threshold=EDGE_EARLY_MODERATE_ROBUSTNESS_PCT,
+        minimum_threshold=EDGE_EARLY_MODERATE_ROBUSTNESS_PCT,
+        missing_band="missing_neutral",
+        missing_score=0.6,
+    )
+
+    if sample_count is not None and sample_count < EDGE_MODERATE_SAMPLE_COUNT:
+        soft_penalties.append("thin_sample_count")
+    if sample_count is not None and sample_count < EDGE_EARLY_MODERATE_SAMPLE_COUNT:
+        major_deficits.append("sample_count_below_emerging_moderate")
+
+    if (
+        median_future_return_pct is not None
+        and median_future_return_pct < EDGE_MODERATE_MEDIAN_RETURN_PCT
+    ):
+        soft_penalties.append("subscale_median_return")
+    if (
+        median_future_return_pct is not None
+        and median_future_return_pct < EDGE_EARLY_MODERATE_MEDIAN_RETURN_PCT
+    ):
+        major_deficits.append("median_return_below_emerging_moderate")
+
+    if positive_rate_pct is None:
+        soft_penalties.append("missing_positive_rate")
+    else:
+        if positive_rate_pct < EDGE_MODERATE_POSITIVE_RATE_PCT:
+            soft_penalties.append("subscale_positive_rate")
+        if positive_rate_pct < EDGE_EARLY_MODERATE_POSITIVE_RATE_PCT:
+            major_deficits.append("positive_rate_below_emerging_moderate")
+        if positive_rate_pct < 50.0:
+            soft_penalties.append("positive_rate_below_coinflip")
+
+    if robustness_value is None:
+        soft_penalties.append("missing_robustness_signal")
+    else:
+        if robustness_value < EDGE_MODERATE_ROBUSTNESS_PCT:
+            soft_penalties.append("subscale_robustness")
+        if robustness_value < EDGE_EARLY_MODERATE_ROBUSTNESS_PCT:
+            major_deficits.append("robustness_below_emerging_moderate")
+
+    component_scores = {
+        "sample_count": sample_component,
+        "median_future_return_pct": median_component,
+        "positive_rate_pct": positive_component,
+        "robustness_value": robustness_component,
+    }
+    aggregate_score = round(
+        sample_component["weighted_score"]
+        + median_component["weighted_score"]
+        + positive_component["weighted_score"]
+        + robustness_component["weighted_score"],
+        6,
+    )
+
+    critical_major_deficits, supporting_major_deficits, other_major_deficits = (
+        _split_major_deficits(major_deficits)
+    )
+
+    if hard_blockers:
+        final_classification = "insufficient_data"
+        classification_reason = "failed_absolute_floor"
+    elif (
+        aggregate_score >= STRONG_MIN_AGGREGATE_SCORE
+        and sample_count is not None
+        and sample_count >= EDGE_STRONG_SAMPLE_COUNT
+        and median_future_return_pct is not None
+        and median_future_return_pct >= EDGE_STRONG_MEDIAN_RETURN_PCT
+        and positive_rate_pct is not None
+        and positive_rate_pct >= EDGE_MODERATE_POSITIVE_RATE_PCT
+        and len(major_deficits) == 0
+    ):
+        final_classification = "strong"
+        classification_reason = "cleared_strong_weighted_profile"
+    else:
+        can_moderate, moderate_reason = _can_classify_as_moderate(
+            aggregate_score=aggregate_score,
+            major_deficits=major_deficits,
+        )
+        if can_moderate:
+            final_classification = "moderate"
+            classification_reason = moderate_reason
+        else:
+            final_classification = "weak"
+            classification_reason = moderate_reason
+
+    return {
+        "scoring_model": STRENGTH_SCORING_MODEL,
+        "component_scores": component_scores,
+        "hard_blockers": hard_blockers,
+        "soft_penalties": soft_penalties,
+        "major_deficits": major_deficits,
+        "major_deficit_breakdown": {
+            "critical": critical_major_deficits,
+            "supporting": supporting_major_deficits,
+            "other": other_major_deficits,
+        },
+        "aggregate_score": aggregate_score,
+        "final_classification": final_classification,
+        "classification_reason": classification_reason,
+    }
+
+
 def _score_candidate_strength(
     sample_count: float,
     median_future_return_pct: float,
     positive_rate_pct: float | None,
     robustness_value: float | None,
 ) -> str:
-    if (
-        positive_rate_pct is not None
-        and sample_count >= EDGE_STRONG_SAMPLE_COUNT
-        and median_future_return_pct >= EDGE_STRONG_MEDIAN_RETURN_PCT
-        and positive_rate_pct >= EDGE_STRONG_POSITIVE_RATE_PCT
-        and (robustness_value is None or robustness_value >= EDGE_STRONG_ROBUSTNESS_PCT)
-    ):
-        return "strong"
-
-    if (
-        positive_rate_pct is not None
-        and sample_count >= EDGE_MODERATE_SAMPLE_COUNT
-        and median_future_return_pct >= EDGE_MODERATE_MEDIAN_RETURN_PCT
-        and positive_rate_pct >= EDGE_MODERATE_POSITIVE_RATE_PCT
-        and (
-            robustness_value is None
-            or robustness_value >= EDGE_MODERATE_ROBUSTNESS_PCT
-        )
-    ):
-        return "moderate"
-
-    return "weak"
+    diagnostics = _score_candidate_strength_diagnostics(
+        sample_count=sample_count,
+        median_future_return_pct=median_future_return_pct,
+        positive_rate_pct=positive_rate_pct,
+        robustness_value=robustness_value,
+    )
+    return str(diagnostics["final_classification"])
 
 
 def _select_robustness_signal(metrics: dict[str, Any]) -> tuple[str, float | None]:
@@ -542,6 +831,7 @@ def _build_candidate_metric_summary(
     positive_rate_pct: float | None,
     robustness_label: str,
     robustness_value: float | None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> str:
     parts = [
         f"sample={sample_count}",
@@ -550,6 +840,28 @@ def _build_candidate_metric_summary(
     ]
     if robustness_label != "n/a" and robustness_value is not None:
         parts.append(f"{robustness_label}={robustness_value}")
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    aggregate_score = diagnostics.get("aggregate_score")
+    if isinstance(aggregate_score, (int, float)):
+        parts.append(f"aggregate_score={round(float(aggregate_score), 2)}")
+    classification = diagnostics.get("final_classification")
+    if isinstance(classification, str) and classification:
+        parts.append(f"classification={classification}")
+    penalties = diagnostics.get("soft_penalties")
+    if isinstance(penalties, list) and penalties:
+        parts.append(f"soft_penalties={'+'.join(str(item) for item in penalties)}")
+    deficits = diagnostics.get("major_deficit_breakdown")
+    if isinstance(deficits, dict):
+        supporting = deficits.get("supporting")
+        critical = deficits.get("critical")
+        if isinstance(supporting, list) and supporting:
+            parts.append(
+                f"supporting_major_deficits={'+'.join(str(item) for item in supporting)}"
+            )
+        if isinstance(critical, list) and critical:
+            parts.append(
+                f"critical_major_deficits={'+'.join(str(item) for item in critical)}"
+            )
     return ", ".join(parts)
 
 

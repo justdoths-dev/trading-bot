@@ -66,10 +66,16 @@ def _edge_candidates_preview(by_horizon: dict[str, dict[str, Any]]) -> dict[str,
     return {
         "minimum_sample_count": 30,
         "strength_thresholds": {
-            "weak": {
+            "hard_floors": {
                 "sample_count": 30,
                 "labeled_count_gt": 0,
                 "median_future_return_pct_gt": 0,
+            },
+            "emerging_moderate": {
+                "sample_count": 40,
+                "median_future_return_pct": 0.18,
+                "positive_rate_pct": 50.0,
+                "robustness_pct": 46.0,
             },
             "moderate": {
                 "sample_count": 50,
@@ -377,8 +383,8 @@ def test_edge_candidate_preview_markdown_remains_compatible_for_borderline_visib
     markdown = "\n".join(markdown_lines)
 
     fifteen = preview["by_horizon"]["15m"]
-    assert preview["strength_thresholds"]["weak"]["sample_count"] == 30
-    assert preview["strength_thresholds"]["weak"]["labeled_count_gt"] == 0
+    assert preview["strength_thresholds"]["hard_floors"]["sample_count"] == 30
+    assert preview["strength_thresholds"]["hard_floors"]["labeled_count_gt"] == 0
     assert fifteen["top_strategy"]["candidate_strength"] == "weak"
     assert fifteen["top_strategy"]["quality_gate"] == "borderline"
     assert fifteen["sample_gate"] == "passed"
@@ -436,3 +442,106 @@ def test_extract_edge_candidate_falls_back_to_second_ranked_group_when_first_fai
     assert result["quality_gate"] == "borderline"
     assert result["candidate_strength"] == "weak"
     assert result["visibility_reason"] == "passed_sample_gate_only"
+
+
+def test_score_candidate_strength_promotes_emerging_moderate_when_only_one_metric_is_subscale() -> None:
+    diagnostics = research_analyzer._score_candidate_strength_diagnostics(
+        sample_count=52,
+        median_future_return_pct=0.35,
+        positive_rate_pct=54.0,
+        robustness_value=50.0,
+    )
+
+    assert diagnostics["final_classification"] == "moderate"
+    assert diagnostics["classification_reason"] == "cleared_weighted_moderate_profile"
+    assert diagnostics["aggregate_score"] >= 62.0
+    assert "subscale_positive_rate" in diagnostics["soft_penalties"]
+    assert diagnostics["major_deficits"] == []
+
+
+def test_score_candidate_strength_keeps_truly_thin_low_edge_profiles_weak() -> None:
+    diagnostics = research_analyzer._score_candidate_strength_diagnostics(
+        sample_count=42,
+        median_future_return_pct=0.12,
+        positive_rate_pct=48.0,
+        robustness_value=57.0,
+    )
+
+    assert diagnostics["final_classification"] == "weak"
+    assert "median_return_below_emerging_moderate" in diagnostics["major_deficits"]
+    assert "positive_rate_below_emerging_moderate" in diagnostics["major_deficits"]
+    assert "positive_rate_below_coinflip" in diagnostics["soft_penalties"]
+
+
+def test_extract_edge_candidate_returns_strength_diagnostics_for_visible_candidates() -> None:
+    result = research_analyzer._extract_edge_candidate(
+        _ranked_group(
+            "near_moderate_case",
+            sample_count=52,
+            labeled_count=52,
+            coverage_pct=100.0,
+            median_future_return_pct=0.35,
+            positive_rate_pct=54.0,
+            robustness_pct=50.0,
+        )
+    )
+
+    diagnostics = result["candidate_strength_diagnostics"]
+
+    assert result["candidate_strength"] == "moderate"
+    assert diagnostics["scoring_model"] == research_analyzer.STRENGTH_SCORING_MODEL
+    assert diagnostics["component_scores"]["positive_rate_pct"]["band"] == "emerging"
+    assert diagnostics["component_scores"]["robustness_value"]["band"] == "emerging"
+    assert "aggregate_score=" in result["chosen_metric_summary"]
+
+
+def test_score_candidate_strength_allows_one_supporting_major_deficit_when_score_is_strong_enough() -> None:
+    diagnostics = research_analyzer._score_candidate_strength_diagnostics(
+        sample_count=55,
+        median_future_return_pct=0.35,
+        positive_rate_pct=56.0,
+        robustness_value=45.0,
+    )
+
+    assert diagnostics["aggregate_score"] >= research_analyzer.MODERATE_WITH_ONE_SUPPORTING_DEFICIT_MIN_SCORE
+    assert diagnostics["major_deficits"] == ["robustness_below_emerging_moderate"]
+    assert diagnostics["major_deficit_breakdown"]["critical"] == []
+    assert diagnostics["major_deficit_breakdown"]["supporting"] == [
+        "robustness_below_emerging_moderate"
+    ]
+    assert diagnostics["final_classification"] == "moderate"
+    assert (
+        diagnostics["classification_reason"]
+        == "cleared_weighted_moderate_profile_with_one_supporting_deficit"
+    )
+
+
+def test_score_candidate_strength_keeps_critical_major_deficit_weak_even_with_good_supporting_metrics() -> None:
+    diagnostics = research_analyzer._score_candidate_strength_diagnostics(
+        sample_count=55,
+        median_future_return_pct=0.15,
+        positive_rate_pct=57.0,
+        robustness_value=53.0,
+    )
+
+    assert "median_return_below_emerging_moderate" in diagnostics["major_deficits"]
+    assert diagnostics["major_deficit_breakdown"]["critical"] == [
+        "median_return_below_emerging_moderate"
+    ]
+    assert diagnostics["final_classification"] == "weak"
+    assert diagnostics["classification_reason"] == "critical_or_unknown_major_deficit_present"
+
+
+def test_score_candidate_strength_uses_emerging_robustness_threshold_consistently() -> None:
+    diagnostics = research_analyzer._score_candidate_strength_diagnostics(
+        sample_count=55,
+        median_future_return_pct=0.35,
+        positive_rate_pct=56.0,
+        robustness_value=46.0,
+    )
+
+    robustness_component = diagnostics["component_scores"]["robustness_value"]
+
+    assert robustness_component["emerging_threshold"] == research_analyzer.EDGE_EARLY_MODERATE_ROBUSTNESS_PCT
+    assert robustness_component["band"] == "emerging"
+    assert "robustness_below_emerging_moderate" not in diagnostics["major_deficits"]
