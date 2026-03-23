@@ -57,7 +57,9 @@ EDGE_EARLY_MODERATE_ROBUSTNESS_PCT = 46.0
 EDGE_MODERATE_ROBUSTNESS_PCT = 52.0
 EDGE_STRONG_ROBUSTNESS_PCT = 55.0
 
-POSITIVE_RATE_MINIMUM_FLOOR_PCT = 48.0
+POSITIVE_RATE_MINIMUM_FLOOR_PCT = 47.0
+THREE_SUPPORTING_DEFICITS_MIN_POSITIVE_RATE_PCT = 49.0
+THREE_SUPPORTING_DEFICITS_MIN_ROBUSTNESS_PCT = 45.0
 
 STRENGTH_COMPONENT_WEIGHTS = {
     "sample_count": 0.30,
@@ -66,7 +68,7 @@ STRENGTH_COMPONENT_WEIGHTS = {
     "robustness_value": 0.15,
 }
 
-STRENGTH_SCORING_MODEL = "banded_weighted_v5_1"
+STRENGTH_SCORING_MODEL = "banded_weighted_v5_2"
 
 STRENGTH_RAW_SCORE_BANDS = {
     "strong": 1.00,
@@ -79,6 +81,7 @@ STRENGTH_RAW_SCORE_BANDS = {
 MODERATE_MIN_AGGREGATE_SCORE = 62.0
 MODERATE_WITH_ONE_SUPPORTING_DEFICIT_MIN_SCORE = 66.0
 MODERATE_WITH_TWO_SUPPORTING_DEFICITS_MIN_SCORE = 54.0
+MODERATE_WITH_THREE_SUPPORTING_DEFICITS_MIN_SCORE = 62.0
 STRONG_MIN_AGGREGATE_SCORE = 85.0
 
 CRITICAL_MAJOR_DEFICITS = {
@@ -431,7 +434,13 @@ def _build_edge_candidates_preview(strategy_lab: dict[str, Any]) -> dict[str, An
                 "moderate_min_aggregate_score": MODERATE_MIN_AGGREGATE_SCORE,
                 "moderate_with_one_supporting_deficit_min_score": MODERATE_WITH_ONE_SUPPORTING_DEFICIT_MIN_SCORE,
                 "moderate_with_two_supporting_deficits_min_score": MODERATE_WITH_TWO_SUPPORTING_DEFICITS_MIN_SCORE,
+                "moderate_with_three_supporting_deficits_min_score": MODERATE_WITH_THREE_SUPPORTING_DEFICITS_MIN_SCORE,
                 "strong_min_aggregate_score": STRONG_MIN_AGGREGATE_SCORE,
+            },
+            "recovery_guards": {
+                "positive_rate_minimum_floor_pct": POSITIVE_RATE_MINIMUM_FLOOR_PCT,
+                "three_supporting_deficits_min_positive_rate_pct": THREE_SUPPORTING_DEFICITS_MIN_POSITIVE_RATE_PCT,
+                "three_supporting_deficits_min_robustness_pct": THREE_SUPPORTING_DEFICITS_MIN_ROBUSTNESS_PCT,
             },
             "component_weights": STRENGTH_COMPONENT_WEIGHTS,
         },
@@ -628,6 +637,7 @@ def _can_classify_as_moderate(
     major_deficits: list[str],
     sample_count: float | None,
     positive_rate_pct: float | None,
+    robustness_value: float | None,
 ) -> tuple[bool, str]:
     critical_major_deficits, supporting_major_deficits, other_major_deficits = (
         _split_major_deficits(major_deficits)
@@ -665,8 +675,26 @@ def _can_classify_as_moderate(
 
         return True, "cleared_weighted_moderate_profile_with_two_supporting_deficits"
 
-    if len(supporting_major_deficits) >= 3:
-        return False, "three_or_more_supporting_deficits_present"
+    if len(supporting_major_deficits) == 3:
+        if aggregate_score < MODERATE_WITH_THREE_SUPPORTING_DEFICITS_MIN_SCORE:
+            return False, "three_supporting_deficits_but_aggregate_too_low"
+        if sample_count is None or sample_count < EDGE_MODERATE_SAMPLE_COUNT:
+            return False, "three_supporting_deficits_but_sample_not_moderate"
+        if (
+            positive_rate_pct is None
+            or positive_rate_pct < THREE_SUPPORTING_DEFICITS_MIN_POSITIVE_RATE_PCT
+        ):
+            return False, "three_supporting_deficits_but_positive_rate_too_low"
+        if (
+            robustness_value is None
+            or robustness_value < THREE_SUPPORTING_DEFICITS_MIN_ROBUSTNESS_PCT
+        ):
+            return False, "three_supporting_deficits_but_robustness_too_low"
+
+        return True, "cleared_weighted_moderate_profile_with_three_supporting_deficits"
+
+    if len(supporting_major_deficits) > 3:
+        return False, "supporting_deficits_depth_exceeds_recovery_band"
 
     return False, "supporting_deficits_depth_exceeds_recovery_band"
 
@@ -727,7 +755,7 @@ def _score_candidate_strength_diagnostics(
         strong_threshold=EDGE_STRONG_ROBUSTNESS_PCT,
         moderate_threshold=EDGE_MODERATE_ROBUSTNESS_PCT,
         emerging_threshold=EDGE_EARLY_MODERATE_ROBUSTNESS_PCT,
-        minimum_threshold=EDGE_EARLY_MODERATE_ROBUSTNESS_PCT,
+        minimum_threshold=THREE_SUPPORTING_DEFICITS_MIN_ROBUSTNESS_PCT,
         missing_band="missing_neutral",
         missing_score=0.6,
     )
@@ -805,6 +833,7 @@ def _score_candidate_strength_diagnostics(
             major_deficits=major_deficits,
             sample_count=sample_count,
             positive_rate_pct=positive_rate_pct,
+            robustness_value=robustness_value,
         )
         if can_moderate:
             final_classification = "moderate"
