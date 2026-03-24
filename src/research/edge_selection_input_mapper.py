@@ -37,6 +37,12 @@ INVALID_IDENTIFIER_VALUES = {
     "null",
     "unknown",
 }
+STRENGTH_PRIORITY = {
+    "insufficient_data": 0,
+    "weak": 1,
+    "moderate": 2,
+    "strong": 3,
+}
 
 
 def map_edge_selection_input(
@@ -480,9 +486,9 @@ def _select_supporting_score(
     seed: dict[str, Any],
     score_lookup: dict[tuple[str, str], dict[str, Any]],
 ) -> tuple[str, str, dict[str, Any]] | None:
-    matches: list[tuple[float, int, str, str, dict[str, Any]]] = []
+    matches: list[tuple[str, str, dict[str, Any]]] = []
 
-    for category_index, category in enumerate(SUPPORT_CATEGORY_ORDER):
+    for category in SUPPORT_CATEGORY_ORDER:
         group = _normalize_identifier(seed.get(category))
         if group is None:
             continue
@@ -491,8 +497,37 @@ def _select_supporting_score(
         if score_item is None:
             continue
 
+        matches.append((category, group, score_item))
+
+    if not matches:
+        return None
+
+    if len(matches) == 1:
+        return matches[0]
+
+    symbol_match = next((m for m in matches if m[0] == "symbol"), None)
+    strategy_match = next((m for m in matches if m[0] == "strategy"), None)
+
+    if symbol_match is not None and strategy_match is not None:
+        symbol_strength = _resolve_score_item_selected_strength(symbol_match[2])
+        strategy_strength = _resolve_score_item_selected_strength(strategy_match[2])
+
+        # Policy override:
+        # Prefer symbol support when it has recovered to moderate/strong
+        # and strategy support remains weak/insufficient. This preserves
+        # recovered symbol-level visibility instead of letting a higher-score
+        # weak strategy support overwrite the candidate downstream.
+        if (
+            _strength_rank(symbol_strength) >= _strength_rank("moderate")
+            and _strength_rank(strategy_strength) <= _strength_rank("weak")
+        ):
+            return symbol_match
+
+    scored_matches: list[tuple[float, int, str, str, dict[str, Any]]] = []
+    for category, group, score_item in matches:
         score_value = _coerce_number(score_item.get("score"))
-        matches.append(
+        category_index = SUPPORT_CATEGORY_ORDER.index(category)
+        scored_matches.append(
             (
                 float(score_value) if score_value is not None else float("-inf"),
                 -category_index,
@@ -502,12 +537,38 @@ def _select_supporting_score(
             )
         )
 
-    if not matches:
-        return None
-
-    matches.sort(reverse=True)
-    _, _, category, group, score_item = matches[0]
+    scored_matches.sort(reverse=True)
+    _, _, category, group, score_item = scored_matches[0]
     return category, group, score_item
+
+
+def _resolve_score_item_selected_strength(score_item: dict[str, Any]) -> str:
+    source_preference = _normalize_source_preference(score_item.get("source_preference"))
+    if source_preference in {"latest", "cumulative"}:
+        field_name = SOURCE_FIELDS[source_preference]["candidate_strength"]
+        value = _normalize_text(score_item.get(field_name))
+        if value is not None:
+            return value
+
+    if source_preference == "n/a":
+        value = _first_non_empty(
+            score_item.get(SOURCE_FIELDS["latest"]["candidate_strength"]),
+            score_item.get(SOURCE_FIELDS["cumulative"]["candidate_strength"]),
+        )
+        if value is not None:
+            return value
+
+    value = _first_non_empty(
+        score_item.get(SOURCE_FIELDS["latest"]["candidate_strength"]),
+        score_item.get(SOURCE_FIELDS["cumulative"]["candidate_strength"]),
+    )
+    return value or "insufficient_data"
+
+
+def _strength_rank(value: str | None) -> int:
+    if value is None:
+        return STRENGTH_PRIORITY["insufficient_data"]
+    return STRENGTH_PRIORITY.get(value, STRENGTH_PRIORITY["insufficient_data"])
 
 
 def _resolve_strength(
