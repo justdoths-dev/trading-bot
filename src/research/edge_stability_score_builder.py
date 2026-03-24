@@ -252,6 +252,40 @@ def _select_source_preference(
     latest_subscore: float,
     cumulative_subscore: float,
 ) -> str:
+    """
+    Prefer latest when it shows a materially stronger candidate class than cumulative.
+
+    Rationale:
+    - The recovery objective is to surface newly recovered latest moderate/strong candidates.
+    - Without this override, cumulative weak + stronger stability can suppress
+      latest moderate recovery, which blocks visibility restoration downstream.
+    """
+
+    latest_strength_weight = STRENGTH_WEIGHTS[latest_candidate_strength]
+    cumulative_strength_weight = STRENGTH_WEIGHTS[cumulative_candidate_strength]
+
+    latest_is_recovered = latest_candidate_strength in {"moderate", "strong"}
+    cumulative_is_weak_or_lower = cumulative_candidate_strength in {
+        "weak",
+        "insufficient_data",
+    }
+    cumulative_is_recovered = cumulative_candidate_strength in {"moderate", "strong"}
+    latest_is_weak_or_lower = latest_candidate_strength in {
+        "weak",
+        "insufficient_data",
+    }
+
+    # Policy override:
+    # If latest has recovered to moderate/strong while cumulative is only weak/insufficient,
+    # preserve the recovery by preferring latest.
+    if latest_is_recovered and cumulative_is_weak_or_lower:
+        return "latest"
+
+    # Keep symmetric behavior in the opposite direction for consistency.
+    if cumulative_is_recovered and latest_is_weak_or_lower:
+        return "cumulative"
+
+    # Otherwise fall back to the original subscore-based policy.
     if latest_subscore > cumulative_subscore:
         return "latest"
     if cumulative_subscore > latest_subscore:
@@ -264,6 +298,12 @@ def _select_source_preference(
     )
 
     if exact_component_tie:
+        return "cumulative"
+
+    # Slightly prefer the stronger strength class on ties before defaulting.
+    if latest_strength_weight > cumulative_strength_weight:
+        return "latest"
+    if cumulative_strength_weight > latest_strength_weight:
         return "cumulative"
 
     return "latest"
