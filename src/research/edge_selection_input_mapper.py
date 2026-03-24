@@ -367,7 +367,7 @@ def _build_score_lookup(
             if not isinstance(item, dict):
                 continue
 
-            group = _normalize_identifier(item.get("group"))
+            group = _normalize_group_for_category(category, item.get("group"))
             if group is None:
                 continue
 
@@ -390,7 +390,10 @@ def _build_drift_lookup(
             continue
 
         category = _normalize_text(item.get("category"))
-        group = _normalize_identifier(item.get("group"))
+        if category not in SUPPORT_CATEGORY_ORDER:
+            continue
+
+        group = _normalize_group_for_category(category, item.get("group"))
         if category is None or group is None:
             continue
 
@@ -406,8 +409,8 @@ def _build_candidate(
     drift_lookup: dict[tuple[str, str], dict[str, Any]],
 ) -> dict[str, Any]:
     candidate: dict[str, Any] = {
-        "symbol": _normalize_identifier(seed.get("symbol")),
-        "strategy": _normalize_identifier(seed.get("strategy")),
+        "symbol": _normalize_group_for_category("symbol", seed.get("symbol")),
+        "strategy": _normalize_group_for_category("strategy", seed.get("strategy")),
         "horizon": _normalize_horizon(seed.get("horizon")),
     }
     candidate = {key: value for key, value in candidate.items() if value is not None}
@@ -489,7 +492,7 @@ def _select_supporting_score(
     matches: list[tuple[str, str, dict[str, Any]]] = []
 
     for category in SUPPORT_CATEGORY_ORDER:
-        group = _normalize_identifier(seed.get(category))
+        group = _normalize_group_for_category(category, seed.get(category))
         if group is None:
             continue
 
@@ -512,11 +515,6 @@ def _select_supporting_score(
         symbol_strength = _resolve_score_item_selected_strength(symbol_match[2])
         strategy_strength = _resolve_score_item_selected_strength(strategy_match[2])
 
-        # Policy override:
-        # Prefer symbol support when it has recovered to moderate/strong
-        # and strategy support remains weak/insufficient. This preserves
-        # recovered symbol-level visibility instead of letting a higher-score
-        # weak strategy support overwrite the candidate downstream.
         if (
             _strength_rank(symbol_strength) >= _strength_rank("moderate")
             and _strength_rank(strategy_strength) <= _strength_rank("weak")
@@ -618,9 +616,18 @@ def _resolve_stability_label(
     )
 
 
+def _normalize_group_for_category(category: str, value: Any) -> str | None:
+    normalized = _normalize_identifier(value)
+    if normalized is None:
+        return None
+    if category == "symbol":
+        return normalized.upper()
+    return normalized
+
+
 def _is_valid_candidate(candidate: dict[str, Any]) -> bool:
-    symbol = _normalize_identifier(candidate.get("symbol"))
-    strategy = _normalize_identifier(candidate.get("strategy"))
+    symbol = _normalize_group_for_category("symbol", candidate.get("symbol"))
+    strategy = _normalize_group_for_category("strategy", candidate.get("strategy"))
     horizon = _normalize_horizon(candidate.get("horizon"))
     return symbol is not None and strategy is not None and horizon is not None
 
