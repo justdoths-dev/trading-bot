@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
