@@ -1018,6 +1018,22 @@ def _build_stability_entry(
     top_group, top_horizons = ranked_candidates[0]
     top_horizons = list(top_horizons)
 
+    second_group, second_horizons = ranked_candidates[1]
+    second_horizons = list(second_horizons)
+
+    # Recovery-friendly stability rule:
+    # If a single top candidate clearly dominates visibility across multiple
+    # horizons, preserve that convergence signal instead of marking the state
+    # unstable merely because a secondary candidate appears in fewer horizons.
+    if len(top_horizons) >= 2 and len(top_horizons) > len(second_horizons):
+        return {
+            "group": top_group,
+            "visible_horizons": top_horizons,
+            "stability_label": "multi_horizon_confirmed",
+            "stability_score": 2,
+            "visibility_reason": "dominant_visible_candidate_across_multiple_horizons",
+        }
+
     return {
         "group": top_group,
         "visible_horizons": top_horizons,
