@@ -115,8 +115,28 @@ def test_shadow_tie_break_diagnosis_report(tmp_path: Path) -> None:
     assert summary["overall"]["tie_runs"] == 2
     assert summary["overall"]["tie_frequency"] == 0.666667
     assert summary["overall"]["repeated_tie_pair_count"] == 1
-    assert summary["overall"]["resolved_tie_ratio"] == 1.0
+    assert summary["overall"]["resolved_within_1_run_count"] == 1
+    assert summary["overall"]["resolved_within_3_runs_count"] == 2
+    assert summary["overall"]["resolved_within_5_runs_count"] == 2
+    assert summary["overall"]["resolved_within_10_runs_count"] == 2
+    assert summary["overall"]["resolved_within_1_run_ratio"] == 0.5
+    assert summary["overall"]["resolved_within_3_runs_ratio"] == 1.0
+    assert summary["overall"]["resolved_within_5_runs_ratio"] == 1.0
+    assert summary["overall"]["resolved_within_10_runs_ratio"] == 1.0
+    assert summary["overall"]["unresolved_tie_event_count"] == 0
     assert summary["overall"]["tie_signature_collision_count"] == 2
+    assert summary["overall"]["time_to_resolution_summary"]["count"] == 2
+    assert summary["overall"]["time_to_resolution_summary"]["min"] == 1
+    assert summary["overall"]["time_to_resolution_summary"]["max"] == 2
+    assert summary["overall"]["time_to_resolution_summary"]["median"] == 1.5
     assert summary["repeated_tie_pairs"][0]["resolved_after_any_tie"] is True
+    assert summary["repeated_tie_pairs"][0]["resolved_within_3_runs_count"] == 2
+    assert summary["repeated_tie_pairs"][0]["resolved_within_5_runs_count"] == 2
+    assert summary["repeated_tie_pairs"][0]["resolved_within_10_runs_count"] == 2
+    assert summary["repeated_tie_pairs"][0]["time_to_resolution_summary"]["count"] == 2
+    assert summary["repeated_tie_pairs"][0]["time_to_resolution_summary"]["min"] == 1
+    assert summary["repeated_tie_pairs"][0]["time_to_resolution_summary"]["max"] == 2
+    assert summary["tie_event_resolutions"][0]["time_to_resolution_runs"] == 2
+    assert summary["tie_event_resolutions"][1]["time_to_resolution_runs"] == 1
     assert summary["dominant_tie_dimensions"][0]["count"] == 2
     assert "Shadow Tie-Break Diagnosis" in markdown
