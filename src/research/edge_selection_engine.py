@@ -287,6 +287,18 @@ def _evaluate_candidate(candidate: Any) -> dict[str, Any]:
         payload.get("strategy_cumulative_support")
     )
 
+    aggregate_score = _coerce_number(payload.get("aggregate_score"))
+    sample_count = _coerce_non_negative_int(payload.get("sample_count"))
+    labeled_count = _coerce_non_negative_int(payload.get("labeled_count"))
+    coverage_pct = _coerce_number(payload.get("coverage_pct"))
+    median_future_return_pct = _coerce_number(payload.get("median_future_return_pct"))
+    avg_future_return_pct = _coerce_number(payload.get("avg_future_return_pct"))
+    positive_rate_pct = _coerce_number(payload.get("positive_rate_pct"))
+    robustness_signal_pct = _coerce_number(payload.get("robustness_signal_pct"))
+    supporting_major_deficit_count = _coerce_non_negative_int(
+        payload.get("supporting_major_deficit_count")
+    )
+
     blocked_reasons = _blocked_reasons(
         symbol=symbol,
         strategy=strategy,
@@ -324,6 +336,12 @@ def _evaluate_candidate(candidate: Any) -> dict[str, Any]:
             edge_stability_score=edge_stability_score,
             drift_direction=drift_direction,
             score_delta=score_delta,
+            aggregate_score=aggregate_score,
+            sample_count=sample_count,
+            median_future_return_pct=median_future_return_pct,
+            positive_rate_pct=positive_rate_pct,
+            robustness_signal_pct=robustness_signal_pct,
+            supporting_major_deficit_count=supporting_major_deficit_count,
             penalty_count=len(penalty_reasons),
         )
         selection_confidence = _calculate_confidence(
@@ -342,6 +360,21 @@ def _evaluate_candidate(candidate: Any) -> dict[str, Any]:
         penalty_reasons=penalty_reasons,
         advisory_reason_codes=advisory_reason_codes,
     )
+
+    ranking_signals = {
+        "aggregate_score": aggregate_score,
+        "sample_count": sample_count,
+        "labeled_count": labeled_count,
+        "coverage_pct": coverage_pct,
+        "median_future_return_pct": median_future_return_pct,
+        "avg_future_return_pct": avg_future_return_pct,
+        "positive_rate_pct": positive_rate_pct,
+        "robustness_signal_pct": robustness_signal_pct,
+        "supporting_major_deficit_count": supporting_major_deficit_count,
+    }
+    ranking_signals = {
+        key: value for key, value in ranking_signals.items() if value is not None
+    }
 
     return {
         "symbol": symbol,
@@ -365,6 +398,16 @@ def _evaluate_candidate(candidate: Any) -> dict[str, Any]:
         "cumulative_sample_size": cumulative_sample_size,
         "symbol_cumulative_support": symbol_cumulative_support,
         "strategy_cumulative_support": strategy_cumulative_support,
+        "aggregate_score": aggregate_score,
+        "sample_count": sample_count,
+        "labeled_count": labeled_count,
+        "coverage_pct": coverage_pct,
+        "median_future_return_pct": median_future_return_pct,
+        "avg_future_return_pct": avg_future_return_pct,
+        "positive_rate_pct": positive_rate_pct,
+        "robustness_signal_pct": robustness_signal_pct,
+        "supporting_major_deficit_count": supporting_major_deficit_count,
+        "ranking_signals": ranking_signals,
         "stability_gate_pass": candidate_status == "eligible",
         "drift_blocked": drift_direction == "decrease",
         "gate_diagnostics": gate_diagnostics,
@@ -484,6 +527,12 @@ def _calculate_selection_score(
     edge_stability_score: float | int | None,
     drift_direction: str,
     score_delta: float | int | None,
+    aggregate_score: float | int | None,
+    sample_count: int | None,
+    median_future_return_pct: float | int | None,
+    positive_rate_pct: float | int | None,
+    robustness_signal_pct: float | int | None,
+    supporting_major_deficit_count: int | None,
     penalty_count: int,
 ) -> float:
     strength_component = {
@@ -510,12 +559,44 @@ def _calculate_selection_score(
     if score_delta is not None:
         delta_component = max(min(float(score_delta), 1.0), -1.0) * 0.2
 
+    aggregate_component = 0.0
+    if aggregate_score is not None:
+        aggregate_component = (float(aggregate_score) - 60.0) / 10.0
+        aggregate_component = max(min(aggregate_component, 4.0), 0.0)
+
+    sample_component = 0.0
+    if sample_count is not None:
+        # reward depth lightly; keep bounded to avoid overpowering conservative gates
+        sample_component = min(max((float(sample_count) - 30.0) / 200.0, 0.0), 1.0)
+
+    median_component = 0.0
+    if median_future_return_pct is not None:
+        median_component = min(max(float(median_future_return_pct) * 2.0, 0.0), 1.0)
+
+    positive_component = 0.0
+    if positive_rate_pct is not None:
+        positive_component = min(max((float(positive_rate_pct) - 50.0) / 10.0, 0.0), 1.0)
+
+    robustness_component = 0.0
+    if robustness_signal_pct is not None:
+        robustness_component = min(max((float(robustness_signal_pct) - 45.0) / 15.0, 0.0), 0.75)
+
+    deficit_penalty = 0.0
+    if supporting_major_deficit_count is not None:
+        deficit_penalty = min(float(supporting_major_deficit_count) * 0.3, 1.2)
+
     score = (
         strength_component
         + stability_component
         + edge_component
         + drift_component
         + delta_component
+        + aggregate_component
+        + sample_component
+        + median_component
+        + positive_component
+        + robustness_component
+        - deficit_penalty
         - (penalty_count * 0.75)
     )
     return round(score, 6)
@@ -538,6 +619,38 @@ def _ranking_sort_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
         if isinstance(selection_score, (int, float))
         else float("-inf")
     )
+    aggregate_score = candidate.get("aggregate_score")
+    numeric_aggregate_score = (
+        float(aggregate_score)
+        if isinstance(aggregate_score, (int, float))
+        else float("-inf")
+    )
+    sample_count = candidate.get("sample_count")
+    numeric_sample_count = int(sample_count) if isinstance(sample_count, int) else -1
+    median_future_return_pct = candidate.get("median_future_return_pct")
+    numeric_median_future_return_pct = (
+        float(median_future_return_pct)
+        if isinstance(median_future_return_pct, (int, float))
+        else float("-inf")
+    )
+    positive_rate_pct = candidate.get("positive_rate_pct")
+    numeric_positive_rate_pct = (
+        float(positive_rate_pct)
+        if isinstance(positive_rate_pct, (int, float))
+        else float("-inf")
+    )
+    robustness_signal_pct = candidate.get("robustness_signal_pct")
+    numeric_robustness_signal_pct = (
+        float(robustness_signal_pct)
+        if isinstance(robustness_signal_pct, (int, float))
+        else float("-inf")
+    )
+    supporting_major_deficit_count = candidate.get("supporting_major_deficit_count")
+    numeric_supporting_major_deficit_count = (
+        int(supporting_major_deficit_count)
+        if isinstance(supporting_major_deficit_count, int)
+        else 10**9
+    )
     score_delta = candidate.get("score_delta")
     numeric_delta = (
         float(score_delta) if isinstance(score_delta, (int, float)) else float("-inf")
@@ -546,6 +659,12 @@ def _ranking_sort_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
     return (
         -STATUS_PRIORITY[candidate["candidate_status"]],
         -numeric_score,
+        -numeric_aggregate_score,
+        numeric_supporting_major_deficit_count,
+        -numeric_sample_count,
+        -numeric_median_future_return_pct,
+        -numeric_positive_rate_pct,
+        -numeric_robustness_signal_pct,
         -STRENGTH_PRIORITY[candidate["selected_candidate_strength"]],
         -STABILITY_PRIORITY[candidate["selected_stability_label"]],
         -DRIFT_PRIORITY[candidate["drift_direction"]],
@@ -562,16 +681,36 @@ def _is_tied(first: dict[str, Any], second: dict[str, Any]) -> bool:
 
 def _tie_signature(candidate: dict[str, Any]) -> tuple[Any, ...]:
     selection_score = candidate.get("selection_score")
+    aggregate_score = candidate.get("aggregate_score")
+    median_future_return_pct = candidate.get("median_future_return_pct")
+    positive_rate_pct = candidate.get("positive_rate_pct")
+    robustness_signal_pct = candidate.get("robustness_signal_pct")
+    edge_stability_score = candidate.get("edge_stability_score")
+
     return (
         candidate["candidate_status"],
-        round(float(selection_score), 6)
+        round(float(selection_score), 2)
         if isinstance(selection_score, (int, float))
+        else None,
+        round(float(aggregate_score), 2)
+        if isinstance(aggregate_score, (int, float))
+        else None,
+        candidate.get("supporting_major_deficit_count"),
+        candidate.get("sample_count"),
+        round(float(median_future_return_pct), 2)
+        if isinstance(median_future_return_pct, (int, float))
+        else None,
+        round(float(positive_rate_pct), 2)
+        if isinstance(positive_rate_pct, (int, float))
+        else None,
+        round(float(robustness_signal_pct), 2)
+        if isinstance(robustness_signal_pct, (int, float))
         else None,
         candidate["selected_candidate_strength"],
         candidate["selected_stability_label"],
         candidate["drift_direction"],
-        round(float(candidate["edge_stability_score"]), 6)
-        if isinstance(candidate.get("edge_stability_score"), (int, float))
+        round(float(edge_stability_score), 2)
+        if isinstance(edge_stability_score, (int, float))
         else None,
     )
 
@@ -598,6 +737,16 @@ def _build_ranking_item(candidate: dict[str, Any], *, rank: int) -> dict[str, An
         "cumulative_sample_size": candidate.get("cumulative_sample_size"),
         "symbol_cumulative_support": candidate.get("symbol_cumulative_support"),
         "strategy_cumulative_support": candidate.get("strategy_cumulative_support"),
+        "aggregate_score": candidate.get("aggregate_score"),
+        "sample_count": candidate.get("sample_count"),
+        "labeled_count": candidate.get("labeled_count"),
+        "coverage_pct": candidate.get("coverage_pct"),
+        "median_future_return_pct": candidate.get("median_future_return_pct"),
+        "avg_future_return_pct": candidate.get("avg_future_return_pct"),
+        "positive_rate_pct": candidate.get("positive_rate_pct"),
+        "robustness_signal_pct": candidate.get("robustness_signal_pct"),
+        "supporting_major_deficit_count": candidate.get("supporting_major_deficit_count"),
+        "ranking_signals": candidate.get("ranking_signals"),
         "stability_gate_pass": candidate.get("stability_gate_pass"),
         "drift_blocked": candidate.get("drift_blocked"),
         "gate_diagnostics": candidate.get("gate_diagnostics"),
@@ -750,6 +899,13 @@ def _build_diagnostic_candidate_snapshot(
         "selection_confidence": candidate.get("selection_confidence"),
         "reason_codes": list(candidate.get("reason_codes") or []),
         "advisory_reason_codes": list(candidate.get("advisory_reason_codes") or []),
+        "aggregate_score": candidate.get("aggregate_score"),
+        "sample_count": candidate.get("sample_count"),
+        "median_future_return_pct": candidate.get("median_future_return_pct"),
+        "positive_rate_pct": candidate.get("positive_rate_pct"),
+        "robustness_signal_pct": candidate.get("robustness_signal_pct"),
+        "supporting_major_deficit_count": candidate.get("supporting_major_deficit_count"),
+        "ranking_signals": candidate.get("ranking_signals") or {},
         "gate_diagnostics": candidate.get("gate_diagnostics") or {},
     }
 

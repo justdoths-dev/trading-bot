@@ -48,6 +48,19 @@ STRENGTH_PRIORITY = {
     "moderate": 2,
     "strong": 3,
 }
+RESEARCH_SIGNAL_INT_FIELDS = (
+    "sample_count",
+    "labeled_count",
+    "supporting_major_deficit_count",
+)
+RESEARCH_SIGNAL_NUMBER_FIELDS = (
+    "aggregate_score",
+    "coverage_pct",
+    "median_future_return_pct",
+    "avg_future_return_pct",
+    "positive_rate_pct",
+    "robustness_signal_pct",
+)
 
 
 def map_edge_selection_input(
@@ -108,7 +121,10 @@ def map_edge_selection_input(
     score_lookup = _build_score_lookup(edge_scores_summary)
     drift_lookup = _build_drift_lookup(score_drift_summary)
 
-    seeds, candidate_seed_diagnostics = _build_candidate_seeds(latest_summary)
+    seeds, candidate_seed_diagnostics = _build_candidate_seeds(
+        latest_summary,
+        comparison_summary=comparison_summary,
+    )
 
     candidates = [
         _build_candidate(
@@ -212,10 +228,17 @@ def _extract_cumulative_record_count(comparison_summary: dict[str, Any]) -> int 
     return _coerce_non_negative_int(comparison_overview.get("cumulative_total_records"))
 
 
-def _build_candidate_seeds(latest_summary: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _build_candidate_seeds(
+    latest_summary: dict[str, Any],
+    *,
+    comparison_summary: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     edge_candidate_rows = _coerce_dict(latest_summary.get("edge_candidate_rows"))
     raw_rows = edge_candidate_rows.get("rows")
     rows = [row for row in raw_rows if isinstance(row, dict)] if isinstance(raw_rows, list) else []
+
+    if not rows:
+        return _build_legacy_candidate_seeds(comparison_summary)
 
     seeds: list[dict[str, Any]] = []
     dropped_rows: list[dict[str, Any]] = []
@@ -279,6 +302,111 @@ def _build_candidate_seeds(latest_summary: dict[str, Any]) -> tuple[list[dict[st
     return seeds, diagnostics
 
 
+def _build_legacy_candidate_seeds(
+    comparison_summary: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    comparison = _coerce_dict(_coerce_dict(comparison_summary).get("edge_candidates_comparison"))
+
+    seeds: list[dict[str, Any]] = []
+    dropped_rows: list[dict[str, Any]] = []
+    dropped_reason_counts: dict[str, int] = {}
+
+    for horizon, item in comparison.items():
+        if not isinstance(item, dict):
+            continue
+
+        seed, drop_reasons = _normalize_legacy_candidate_seed(horizon, item)
+        if seed is None:
+            dropped_rows.append(
+                {
+                    "horizon": horizon,
+                    "symbol": item.get("latest_top_symbol_group"),
+                    "strategy": item.get("latest_top_strategy_group"),
+                    "drop_reasons": drop_reasons,
+                }
+            )
+            for reason in drop_reasons:
+                dropped_reason_counts[reason] = dropped_reason_counts.get(reason, 0) + 1
+            continue
+
+        seeds.append(seed)
+
+    diagnostics = {
+        "seed_source": "comparison.edge_candidates_comparison",
+        "joined_candidate_row_count": 0,
+        "candidate_seed_count": len(seeds),
+        "dropped_candidate_row_count": len(dropped_rows),
+        "dropped_candidate_row_reasons": dropped_reason_counts,
+        "dropped_candidate_rows": dropped_rows,
+        "horizons_with_seed": sorted(
+            {str(seed.get("horizon")) for seed in seeds if seed.get("horizon") is not None}
+        ),
+        "horizons_without_seed": [
+            horizon for horizon in sorted(VALID_HORIZONS)
+            if not any(seed.get("horizon") == horizon for seed in seeds)
+        ],
+        "horizon_diagnostics": [
+            {
+                "horizon": horizon,
+                "joined_candidate_rows_seen": 0,
+                "seed_generated_count": sum(1 for seed in seeds if seed.get("horizon") == horizon),
+                "dropped_count": sum(
+                    1 for row in dropped_rows if _normalize_horizon(row.get("horizon")) == horizon
+                ),
+                "seed_generated": any(seed.get("horizon") == horizon for seed in seeds),
+            }
+            for horizon in sorted(VALID_HORIZONS)
+        ],
+    }
+    return seeds, diagnostics
+
+
+def _normalize_legacy_candidate_seed(
+    horizon_value: Any,
+    item: dict[str, Any],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    symbol = _first_valid_identifier(
+        item.get("latest_top_symbol_group"),
+        item.get("cumulative_top_symbol_group"),
+    )
+    strategy = _first_valid_identifier(
+        item.get("latest_top_strategy_group"),
+        item.get("cumulative_top_strategy_group"),
+    )
+    horizon = _normalize_horizon(horizon_value)
+
+    reasons: list[str] = []
+    if symbol is None:
+        reasons.append("MISSING_SYMBOL")
+    if strategy is None:
+        reasons.append("MISSING_STRATEGY")
+    if horizon is None:
+        reasons.append("MISSING_OR_INVALID_HORIZON")
+
+    if not reasons and not _is_strategy_horizon_compatible(strategy, horizon):
+        reasons.append("INVALID_STRATEGY_HORIZON_COMBINATION")
+
+    if reasons:
+        return None, reasons
+
+    seed = {
+        "symbol": _normalize_group_for_category("symbol", symbol),
+        "strategy": _normalize_group_for_category("strategy", strategy),
+        "horizon": horizon,
+        "selected_candidate_strength": _first_non_empty(
+            item.get("latest_candidate_strength"),
+            item.get("cumulative_candidate_strength"),
+        ),
+        "selected_stability_label": None,
+        "source_preference": None,
+        "edge_stability_score": None,
+        "drift_direction": None,
+        "score_delta": None,
+        "selected_visible_horizons": None,
+    }
+    return seed, []
+
+
 def _normalize_candidate_row_seed(row: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
     symbol = _normalize_group_for_category("symbol", row.get("symbol"))
     strategy = _normalize_group_for_category("strategy", row.get("strategy"))
@@ -310,6 +438,7 @@ def _normalize_candidate_row_seed(row: dict[str, Any]) -> tuple[dict[str, Any] |
         "score_delta": _coerce_number(row.get("score_delta")),
         "selected_visible_horizons": _normalize_horizon_list(row.get("selected_visible_horizons")),
     }
+    _copy_research_signal_fields(source=row, target=seed)
     return seed, []
 
 
@@ -404,6 +533,8 @@ def _build_candidate(
     if selected_visible_horizons:
         candidate["selected_visible_horizons"] = selected_visible_horizons
 
+    _copy_research_signal_fields(source=seed, target=candidate)
+
     support = _select_supporting_score(seed, score_lookup)
     if support is not None:
         category, group, score_item = support
@@ -464,6 +595,22 @@ def _build_candidate(
         candidate["source_preference"] = "n/a"
 
     return candidate
+
+
+def _copy_research_signal_fields(
+    *,
+    source: dict[str, Any],
+    target: dict[str, Any],
+) -> None:
+    for field_name in RESEARCH_SIGNAL_INT_FIELDS:
+        field_value = _coerce_non_negative_int(source.get(field_name))
+        if field_value is not None:
+            target[field_name] = field_value
+
+    for field_name in RESEARCH_SIGNAL_NUMBER_FIELDS:
+        field_value = _coerce_number(source.get(field_name))
+        if field_value is not None:
+            target[field_name] = field_value
 
 
 def _select_supporting_score(

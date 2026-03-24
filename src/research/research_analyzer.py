@@ -1078,6 +1078,14 @@ def _extract_joined_edge_candidate(
     if candidate_strength not in {"moderate", "strong"}:
         return None
 
+    major_deficit_breakdown = diagnostics.get("major_deficit_breakdown")
+    supporting_major_deficit_count = (
+        len(major_deficit_breakdown.get("supporting", []))
+        if isinstance(major_deficit_breakdown, dict)
+        and isinstance(major_deficit_breakdown.get("supporting"), list)
+        else 0
+    )
+
     return {
         "symbol": symbol,
         "strategy": strategy,
@@ -1100,6 +1108,8 @@ def _extract_joined_edge_candidate(
         "flat_rate_pct": _to_float(metrics.get("flat_rate_pct")),
         "robustness_signal": robustness_label,
         "robustness_signal_pct": robustness_value,
+        "aggregate_score": _to_float(diagnostics.get("aggregate_score")),
+        "supporting_major_deficit_count": supporting_major_deficit_count,
         "visibility_reason": "passed_sample_and_quality_gate",
         "chosen_metric_summary": _build_candidate_metric_summary(
             sample_count=int(sample_count or 0),
