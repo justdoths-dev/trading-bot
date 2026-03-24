@@ -87,8 +87,8 @@ def build_shadow_selection_stability_diagnosis_summary(
         key=lambda row: (
             -row["selected_recurrence_count"],
             -row["eligible_recurrence_count"],
-            -row["recent_persistence_window_summary"]["selected"]["last_5"]["count"],
-            -row["recent_persistence_window_summary"]["eligible"]["last_5"]["count"],
+            -row["recent_persistence_window_summary"]["selected"]["last_10"]["count"],
+            -row["recent_persistence_window_summary"]["eligible"]["last_10"]["count"],
             row["symbol"],
             row["strategy"],
             row["horizon"],
@@ -144,9 +144,7 @@ def render_shadow_selection_stability_diagnosis_markdown(summary: dict[str, Any]
         "",
     ]
     for row in summary.get("overall", {}).get("convergence_label_distribution", []):
-        lines.append(
-            f"- {row.get('label')}: {row.get('count')} ({row.get('rate')})"
-        )
+        lines.append(f"- {row.get('label')}: {row.get('count')} ({row.get('rate')})")
     if not summary.get("overall", {}).get("convergence_label_distribution"):
         lines.append("- none")
     lines.append("")
@@ -158,8 +156,8 @@ def render_shadow_selection_stability_diagnosis_markdown(summary: dict[str, Any]
             f"{row.get('symbol')}/{row.get('strategy')}/{row.get('horizon')}: "
             f"selected={row.get('selected_recurrence_count')}, "
             f"eligible={row.get('eligible_recurrence_count')}, "
-            f"selected_streak={row.get('repeat_streak', {}).get('selected', 0)}, "
-            f"eligible_streak={row.get('repeat_streak', {}).get('eligible', 0)}, "
+            f"selected_last_10={row.get('recent_persistence_window_summary', {}).get('selected', {}).get('last_10', {}).get('count', 0)}, "
+            f"eligible_last_10={row.get('recent_persistence_window_summary', {}).get('eligible', {}).get('last_10', {}).get('count', 0)}, "
             f"label={row.get('convergence_label')}"
         )
     if not summary.get("candidates"):
@@ -176,6 +174,7 @@ def _build_candidate_row(
     symbol, strategy, horizon = identity
     selected_positions = sorted(series.get("selected", []))
     eligible_positions = sorted(series.get("eligible", []))
+
     selected_recent = _recent_window_summary(selected_positions, analyzed_runs)
     eligible_recent = _recent_window_summary(eligible_positions, analyzed_runs)
 
@@ -225,6 +224,7 @@ def _recent_window_summary(
     return {
         "last_5": _window_count(positions, analyzed_runs, 5),
         "last_10": _window_count(positions, analyzed_runs, 10),
+        "last_20": _window_count(positions, analyzed_runs, 20),
     }
 
 
@@ -278,6 +278,16 @@ def _convergence_label(
         and eligible_recent_10 >= 4
     ):
         return "persistent_emergence"
+
+    if (
+        selected_count >= 10
+        and eligible_count >= 15
+        and selected_streak >= 5
+        and eligible_streak >= 10
+        and selected_recent_10 == 0
+        and eligible_recent_10 == 0
+    ):
+        return "historically_dominant_recently_inactive"
 
     if (
         eligible_count >= 4

@@ -5,6 +5,7 @@ import json
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 from src.research.candidate_seed_failure_diagnosis_report import load_shadow_records
@@ -100,15 +101,30 @@ def build_shadow_tie_break_diagnosis_summary(
     )
 
     event_resolution_rows: list[dict[str, Any]] = []
-    resolved_tie_event_count = 0
-    unresolved_tie_event_count = 0
+    time_to_resolution_runs: list[int] = []
+
+    resolved_within_1 = 0
+    resolved_within_3 = 0
+    resolved_within_5 = 0
+    resolved_within_10 = 0
+    unresolved_total = 0
 
     for event in tie_events:
         resolution = _resolve_event(event, selected_by_index)
-        if resolution["resolved_after_tie"]:
-            resolved_tie_event_count += 1
+
+        delta = resolution["time_to_resolution_runs"]
+        if delta is None:
+            unresolved_total += 1
         else:
-            unresolved_tie_event_count += 1
+            time_to_resolution_runs.append(delta)
+            if delta <= 1:
+                resolved_within_1 += 1
+            if delta <= 3:
+                resolved_within_3 += 1
+            if delta <= 5:
+                resolved_within_5 += 1
+            if delta <= 10:
+                resolved_within_10 += 1
 
         event_resolution_rows.append(
             {
@@ -124,13 +140,19 @@ def build_shadow_tie_break_diagnosis_summary(
                     else None
                 ),
                 "resolution_selected_run_index": resolution["resolution_selected_run_index"],
+                "time_to_resolution_runs": resolution["time_to_resolution_runs"],
             }
         )
 
     pair_rows: list[dict[str, Any]] = []
     for pair_key, count in sorted(repeated_pairs.items(), key=lambda item: (-item[1], item[0])):
         related = [event for event in tie_events if event["pair"]["pair_key"] == pair_key]
-        resolution = _resolve_pair_aggregate(related, selected_by_index)
+        pair_time_values: list[int] = []
+        for event in related:
+            resolution = _resolve_event(event, selected_by_index)
+            if resolution["time_to_resolution_runs"] is not None:
+                pair_time_values.append(resolution["time_to_resolution_runs"])
+
         pair_rows.append(
             {
                 "candidates": [
@@ -138,12 +160,11 @@ def build_shadow_tie_break_diagnosis_summary(
                     _identity_row(pair_key[1]),
                 ],
                 "count": count,
-                "resolved_after_any_tie": resolution["resolved_after_any_tie"],
-                "resolved_winner": (
-                    _identity_row(resolution["resolved_winner"])
-                    if resolution["resolved_winner"] is not None
-                    else None
-                ),
+                "resolved_after_any_tie": len(pair_time_values) > 0,
+                "resolved_within_3_runs_count": sum(1 for value in pair_time_values if value <= 3),
+                "resolved_within_5_runs_count": sum(1 for value in pair_time_values if value <= 5),
+                "resolved_within_10_runs_count": sum(1 for value in pair_time_values if value <= 10),
+                "time_to_resolution_summary": _numeric_summary_int(pair_time_values),
             }
         )
 
@@ -160,15 +181,21 @@ def build_shadow_tie_break_diagnosis_summary(
         "overall": {
             "tie_runs": tie_runs,
             "tie_frequency": _safe_ratio(tie_runs, len(runs)),
-            "resolved_tie_event_count": resolved_tie_event_count,
-            "unresolved_tie_event_count": unresolved_tie_event_count,
-            "resolved_tie_ratio": _safe_ratio(resolved_tie_event_count, tie_runs),
-            "unresolved_tie_ratio": _safe_ratio(unresolved_tie_event_count, tie_runs),
+            "resolved_within_1_run_count": resolved_within_1,
+            "resolved_within_3_runs_count": resolved_within_3,
+            "resolved_within_5_runs_count": resolved_within_5,
+            "resolved_within_10_runs_count": resolved_within_10,
+            "unresolved_tie_event_count": unresolved_total,
+            "resolved_within_1_run_ratio": _safe_ratio(resolved_within_1, tie_runs),
+            "resolved_within_3_runs_ratio": _safe_ratio(resolved_within_3, tie_runs),
+            "resolved_within_5_runs_ratio": _safe_ratio(resolved_within_5, tie_runs),
+            "resolved_within_10_runs_ratio": _safe_ratio(resolved_within_10, tie_runs),
             "repeated_tie_pair_count": sum(1 for count in repeated_pairs.values() if count > 1),
             "tie_signature_collision_count": sum(
                 count for count in repeated_signatures.values() if count > 1
             ),
             "same_candidate_tuple_repetition": any(count > 1 for count in repeated_pairs.values()),
+            "time_to_resolution_summary": _numeric_summary_int(time_to_resolution_runs),
         },
         "repeated_tie_pairs": pair_rows,
         "tie_event_resolutions": event_resolution_rows,
@@ -203,10 +230,12 @@ def render_shadow_tie_break_diagnosis_markdown(summary: dict[str, Any]) -> str:
         "",
         f"- tie_runs: {overall.get('tie_runs', 0)}",
         f"- tie_frequency: {overall.get('tie_frequency', 0.0)}",
-        f"- resolved_tie_event_count: {overall.get('resolved_tie_event_count', 0)}",
+        f"- resolved_within_1_run_ratio: {overall.get('resolved_within_1_run_ratio', 0.0)}",
+        f"- resolved_within_3_runs_ratio: {overall.get('resolved_within_3_runs_ratio', 0.0)}",
+        f"- resolved_within_5_runs_ratio: {overall.get('resolved_within_5_runs_ratio', 0.0)}",
+        f"- resolved_within_10_runs_ratio: {overall.get('resolved_within_10_runs_ratio', 0.0)}",
         f"- unresolved_tie_event_count: {overall.get('unresolved_tie_event_count', 0)}",
-        f"- resolved_tie_ratio: {overall.get('resolved_tie_ratio', 0.0)}",
-        f"- unresolved_tie_ratio: {overall.get('unresolved_tie_ratio', 0.0)}",
+        f"- time_to_resolution_summary: {overall.get('time_to_resolution_summary', {})}",
         "",
         "## Repeated Tie Pairs",
         "",
@@ -218,7 +247,11 @@ def render_shadow_tie_break_diagnosis_markdown(summary: dict[str, Any]) -> str:
             for candidate in candidates
         )
         lines.append(
-            f"- {pair_text}: count={row.get('count')}, resolved_after_any_tie={row.get('resolved_after_any_tie')}"
+            f"- {pair_text}: "
+            f"count={row.get('count')}, "
+            f"within_3={row.get('resolved_within_3_runs_count')}, "
+            f"within_5={row.get('resolved_within_5_runs_count')}, "
+            f"within_10={row.get('resolved_within_10_runs_count')}"
         )
     if not summary.get("repeated_tie_pairs"):
         lines.append("- none")
@@ -305,28 +338,13 @@ def _resolve_event(
                 "resolved_after_tie": True,
                 "resolved_winner": selected_identity,
                 "resolution_selected_run_index": index,
+                "time_to_resolution_runs": index - event_index,
             }
     return {
         "resolved_after_tie": False,
         "resolved_winner": None,
         "resolution_selected_run_index": None,
-    }
-
-
-def _resolve_pair_aggregate(
-    events: list[dict[str, Any]],
-    selected_by_index: dict[int, tuple[str, str, str]],
-) -> dict[str, Any]:
-    for event in sorted(events, key=lambda item: item["index"]):
-        resolution = _resolve_event(event, selected_by_index)
-        if resolution["resolved_after_tie"]:
-            return {
-                "resolved_after_any_tie": True,
-                "resolved_winner": resolution["resolved_winner"],
-            }
-    return {
-        "resolved_after_any_tie": False,
-        "resolved_winner": None,
+        "time_to_resolution_runs": None,
     }
 
 
@@ -383,6 +401,25 @@ def _candidate_sort_key(candidate: dict[str, Any]) -> tuple[float, float, float]
         _to_float(candidate.get("aggregate_score")) or 0.0,
         _to_float(candidate.get("edge_stability_score")) or 0.0,
     )
+
+
+def _numeric_summary_int(values: list[int]) -> dict[str, Any]:
+    if not values:
+        return {
+            "count": 0,
+            "min": None,
+            "max": None,
+            "mean": None,
+            "median": None,
+        }
+    ordered = sorted(values)
+    return {
+        "count": len(ordered),
+        "min": ordered[0],
+        "max": ordered[-1],
+        "mean": round(sum(ordered) / len(ordered), 6),
+        "median": float(median(ordered)),
+    }
 
 
 def _selected_identity(run: dict[str, Any]) -> tuple[str, str, str] | None:
