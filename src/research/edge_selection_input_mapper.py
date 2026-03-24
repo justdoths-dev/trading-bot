@@ -27,6 +27,11 @@ SOURCE_FIELDS = {
 }
 VALID_SOURCE_PREFERENCES = {"latest", "cumulative", "n/a"}
 VALID_HORIZONS = {"15m", "1h", "4h"}
+STRATEGY_HORIZON_COMPATIBILITY = {
+    "scalping": {"1m", "5m"},
+    "intraday": {"5m", "15m", "1h"},
+    "swing": {"1h", "4h", "1d"},
+}
 SUPPORT_CATEGORY_ORDER = ("symbol", "strategy")
 INVALID_IDENTIFIER_VALUES = {
     "insufficient_data",
@@ -103,8 +108,7 @@ def map_edge_selection_input(
     score_lookup = _build_score_lookup(edge_scores_summary)
     drift_lookup = _build_drift_lookup(score_drift_summary)
 
-    seeds = _build_candidate_seeds(comparison_summary)
-    candidate_seed_diagnostics = _build_candidate_seed_diagnostics(comparison_summary, seeds)
+    seeds, candidate_seed_diagnostics = _build_candidate_seeds(latest_summary)
 
     candidates = [
         _build_candidate(
@@ -208,148 +212,114 @@ def _extract_cumulative_record_count(comparison_summary: dict[str, Any]) -> int 
     return _coerce_non_negative_int(comparison_overview.get("cumulative_total_records"))
 
 
-def _build_candidate_seeds(comparison_summary: dict[str, Any]) -> list[dict[str, Any]]:
-    comparison = _coerce_dict(comparison_summary.get("edge_candidates_comparison"))
+def _build_candidate_seeds(latest_summary: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    edge_candidate_rows = _coerce_dict(latest_summary.get("edge_candidate_rows"))
+    raw_rows = edge_candidate_rows.get("rows")
+    rows = [row for row in raw_rows if isinstance(row, dict)] if isinstance(raw_rows, list) else []
+
     seeds: list[dict[str, Any]] = []
+    dropped_rows: list[dict[str, Any]] = []
+    dropped_reason_counts: dict[str, int] = {}
+    rows_by_horizon: dict[str, int] = {horizon: 0 for horizon in sorted(VALID_HORIZONS)}
 
-    for horizon in sorted(comparison):
-        if horizon not in VALID_HORIZONS:
-            continue
+    for index, row in enumerate(rows):
+        seed, drop_reasons = _normalize_candidate_row_seed(row)
+        horizon = _normalize_horizon(row.get("horizon"))
+        if horizon is not None:
+            rows_by_horizon[horizon] += 1
 
-        horizon_payload = _coerce_dict(comparison.get(horizon))
-        if not horizon_payload:
-            continue
-
-        symbol = _first_valid_identifier(
-            horizon_payload.get("latest_top_symbol_group"),
-            horizon_payload.get("cumulative_top_symbol_group"),
-        )
-        strategy = _first_valid_identifier(
-            horizon_payload.get("latest_top_strategy_group"),
-            horizon_payload.get("cumulative_top_strategy_group"),
-        )
-
-        if symbol is None and strategy is None:
-            continue
-
-        seeds.append(
-            {
-                "horizon": horizon,
-                "symbol": symbol,
-                "strategy": strategy,
-                "latest_candidate_strength": _normalize_text(
-                    horizon_payload.get("latest_candidate_strength")
-                ),
-                "cumulative_candidate_strength": _normalize_text(
-                    horizon_payload.get("cumulative_candidate_strength")
-                ),
-            }
-        )
-
-    return seeds
-
-
-def _build_candidate_seed_diagnostics(
-    comparison_summary: dict[str, Any],
-    seeds: list[dict[str, Any]],
-) -> dict[str, Any]:
-    comparison = _coerce_dict(comparison_summary.get("edge_candidates_comparison"))
-    horizon_diagnostics: list[dict[str, Any]] = []
-    horizons_with_seed: list[str] = []
-    horizons_without_seed: list[str] = []
-    all_horizons_insufficient_data = True
-
-    for horizon in sorted(comparison):
-        if horizon not in VALID_HORIZONS:
-            continue
-
-        horizon_payload = _coerce_dict(comparison.get(horizon))
-        if not horizon_payload:
-            horizons_without_seed.append(horizon)
-            horizon_diagnostics.append(
+        if seed is None:
+            dropped_rows.append(
                 {
-                    "horizon": horizon,
-                    "seed_generated": False,
-                    "blocker_reasons": ["missing_horizon_payload"],
+                    "row_index": index,
+                    "symbol": row.get("symbol"),
+                    "strategy": row.get("strategy"),
+                    "horizon": row.get("horizon"),
+                    "drop_reasons": drop_reasons,
                 }
             )
-            all_horizons_insufficient_data = False
+            for reason in drop_reasons:
+                dropped_reason_counts[reason] = dropped_reason_counts.get(reason, 0) + 1
             continue
 
-        latest_strength = _normalize_text(horizon_payload.get("latest_candidate_strength"))
-        cumulative_strength = _normalize_text(
-            horizon_payload.get("cumulative_candidate_strength")
+        seeds.append(seed)
+
+    horizon_diagnostics: list[dict[str, Any]] = []
+    for horizon in sorted(VALID_HORIZONS):
+        accepted = sum(1 for seed in seeds if seed.get("horizon") == horizon)
+        dropped = sum(
+            1
+            for row in dropped_rows
+            if _normalize_horizon(row.get("horizon")) == horizon
         )
-
-        latest_symbol = _normalize_text(horizon_payload.get("latest_top_symbol_group"))
-        cumulative_symbol = _normalize_text(
-            horizon_payload.get("cumulative_top_symbol_group")
-        )
-        latest_strategy = _normalize_text(horizon_payload.get("latest_top_strategy_group"))
-        cumulative_strategy = _normalize_text(
-            horizon_payload.get("cumulative_top_strategy_group")
-        )
-        latest_alignment_state = _normalize_text(
-            horizon_payload.get("latest_top_alignment_state_group")
-        )
-        cumulative_alignment_state = _normalize_text(
-            horizon_payload.get("cumulative_top_alignment_state_group")
-        )
-
-        valid_symbol = _first_valid_identifier(latest_symbol, cumulative_symbol)
-        valid_strategy = _first_valid_identifier(latest_strategy, cumulative_strategy)
-
-        seed_generated = any(
-            seed.get("horizon") == horizon
-            for seed in seeds
-        )
-
-        if seed_generated:
-            horizons_with_seed.append(horizon)
-        else:
-            horizons_without_seed.append(horizon)
-
-        latest_is_insufficient = latest_strength == "insufficient_data"
-        cumulative_is_insufficient = cumulative_strength == "insufficient_data"
-        if not (latest_is_insufficient and cumulative_is_insufficient):
-            all_horizons_insufficient_data = False
-
-        blocker_reasons: list[str] = []
-        if latest_is_insufficient and cumulative_is_insufficient:
-            blocker_reasons.append("candidate_strength_insufficient_data")
-        if valid_symbol is None:
-            blocker_reasons.append("no_valid_symbol_group")
-        if valid_strategy is None:
-            blocker_reasons.append("no_valid_strategy_group")
-        if valid_symbol is None and valid_strategy is None:
-            blocker_reasons.append("no_valid_symbol_or_strategy_group")
-
         horizon_diagnostics.append(
             {
                 "horizon": horizon,
-                "seed_generated": seed_generated,
-                "latest_candidate_strength": latest_strength or "n/a",
-                "cumulative_candidate_strength": cumulative_strength or "n/a",
-                "latest_top_symbol_group": latest_symbol or "n/a",
-                "cumulative_top_symbol_group": cumulative_symbol or "n/a",
-                "latest_top_strategy_group": latest_strategy or "n/a",
-                "cumulative_top_strategy_group": cumulative_strategy or "n/a",
-                "latest_top_alignment_state_group": latest_alignment_state or "n/a",
-                "cumulative_top_alignment_state_group": cumulative_alignment_state or "n/a",
-                "has_valid_symbol_group": valid_symbol is not None,
-                "has_valid_strategy_group": valid_strategy is not None,
-                "blocker_reasons": blocker_reasons,
+                "joined_candidate_rows_seen": rows_by_horizon.get(horizon, 0),
+                "seed_generated_count": accepted,
+                "dropped_count": dropped,
+                "seed_generated": accepted > 0,
             }
         )
 
-    return {
-        "total_horizons_evaluated": len(horizon_diagnostics),
+    diagnostics = {
+        "seed_source": "latest.edge_candidate_rows",
+        "joined_candidate_row_count": len(rows),
         "candidate_seed_count": len(seeds),
-        "horizons_with_seed": horizons_with_seed,
-        "horizons_without_seed": horizons_without_seed,
-        "all_horizons_insufficient_data": all_horizons_insufficient_data,
+        "dropped_candidate_row_count": len(dropped_rows),
+        "dropped_candidate_row_reasons": dropped_reason_counts,
+        "dropped_candidate_rows": dropped_rows,
+        "horizons_with_seed": sorted({str(seed.get("horizon")) for seed in seeds if seed.get("horizon") is not None}),
+        "horizons_without_seed": [
+            horizon for horizon in sorted(VALID_HORIZONS)
+            if not any(seed.get("horizon") == horizon for seed in seeds)
+        ],
         "horizon_diagnostics": horizon_diagnostics,
     }
+    return seeds, diagnostics
+
+
+def _normalize_candidate_row_seed(row: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
+    symbol = _normalize_group_for_category("symbol", row.get("symbol"))
+    strategy = _normalize_group_for_category("strategy", row.get("strategy"))
+    horizon = _normalize_horizon(row.get("horizon"))
+
+    reasons: list[str] = []
+    if symbol is None:
+        reasons.append("MISSING_SYMBOL")
+    if strategy is None:
+        reasons.append("MISSING_STRATEGY")
+    if horizon is None:
+        reasons.append("MISSING_OR_INVALID_HORIZON")
+
+    if not reasons and not _is_strategy_horizon_compatible(strategy, horizon):
+        reasons.append("INVALID_STRATEGY_HORIZON_COMBINATION")
+
+    if reasons:
+        return None, reasons
+
+    seed = {
+        "symbol": symbol,
+        "strategy": strategy,
+        "horizon": horizon,
+        "selected_candidate_strength": _normalize_text(row.get("selected_candidate_strength")),
+        "selected_stability_label": _normalize_text(row.get("selected_stability_label")),
+        "source_preference": _normalize_source_preference(row.get("source_preference")),
+        "edge_stability_score": _coerce_number(row.get("edge_stability_score")),
+        "drift_direction": _normalize_text(row.get("drift_direction")),
+        "score_delta": _coerce_number(row.get("score_delta")),
+        "selected_visible_horizons": _normalize_horizon_list(row.get("selected_visible_horizons")),
+    }
+    return seed, []
+
+
+def _is_strategy_horizon_compatible(strategy: str | None, horizon: str | None) -> bool:
+    if strategy is None or horizon is None:
+        return False
+    allowed_horizons = STRATEGY_HORIZON_COMPATIBILITY.get(strategy)
+    if allowed_horizons is None:
+        return False
+    return horizon in allowed_horizons
 
 
 def _build_score_lookup(
@@ -415,72 +385,83 @@ def _build_candidate(
     }
     candidate = {key: value for key, value in candidate.items() if value is not None}
 
-    support = _select_supporting_score(seed, score_lookup)
+    for field_name in (
+        "selected_candidate_strength",
+        "selected_stability_label",
+        "source_preference",
+        "drift_direction",
+    ):
+        field_value = _normalize_text(seed.get(field_name))
+        if field_value is not None:
+            candidate[field_name] = field_value
 
-    if support is None:
-        fallback_strength = _first_non_empty(
-            seed.get("latest_candidate_strength"),
-            seed.get("cumulative_candidate_strength"),
-        )
-        if fallback_strength is not None:
-            candidate["selected_candidate_strength"] = fallback_strength
-        return candidate
+    for field_name in ("edge_stability_score", "score_delta"):
+        field_value = _coerce_number(seed.get(field_name))
+        if field_value is not None:
+            candidate[field_name] = field_value
 
-    category, group, score_item = support
-    source_preference = _normalize_source_preference(score_item.get("source_preference"))
-
-    selected_strength = _resolve_strength(score_item, seed, source_preference)
-    if selected_strength is not None:
-        candidate["selected_candidate_strength"] = selected_strength
-
-    selected_stability_label = _resolve_stability_label(score_item, source_preference)
-    if selected_stability_label is not None:
-        candidate["selected_stability_label"] = selected_stability_label
-
-    if source_preference is not None:
-        candidate["source_preference"] = source_preference
-
-    edge_stability_score = _coerce_number(score_item.get("score"))
-    if edge_stability_score is not None:
-        candidate["edge_stability_score"] = edge_stability_score
-
-    selected_visible_horizons = _normalize_horizon_list(
-        score_item.get("selected_visible_horizons")
-    )
+    selected_visible_horizons = _normalize_horizon_list(seed.get("selected_visible_horizons"))
     if selected_visible_horizons:
         candidate["selected_visible_horizons"] = selected_visible_horizons
 
-    symbol_cumulative_support = _coerce_non_negative_int(
-        score_item.get("symbol_cumulative_support")
-    )
-    if symbol_cumulative_support is not None:
-        candidate["symbol_cumulative_support"] = symbol_cumulative_support
+    support = _select_supporting_score(seed, score_lookup)
+    if support is not None:
+        category, group, score_item = support
+        source_preference = _normalize_source_preference(score_item.get("source_preference"))
 
-    strategy_cumulative_support = _coerce_non_negative_int(
-        score_item.get("strategy_cumulative_support")
-    )
-    if strategy_cumulative_support is not None:
-        candidate["strategy_cumulative_support"] = strategy_cumulative_support
+        if candidate.get("selected_candidate_strength") is None:
+            selected_strength = _resolve_score_item_selected_strength(score_item)
+            if selected_strength is not None:
+                candidate["selected_candidate_strength"] = selected_strength
 
-    latest_sample_size = _coerce_non_negative_int(score_item.get("latest_sample_size"))
-    if latest_sample_size is not None:
-        candidate["latest_sample_size"] = latest_sample_size
+        if candidate.get("selected_stability_label") is None:
+            selected_stability_label = _resolve_stability_label(score_item, source_preference)
+            if selected_stability_label is not None:
+                candidate["selected_stability_label"] = selected_stability_label
 
-    cumulative_sample_size = _coerce_non_negative_int(
-        score_item.get("cumulative_sample_size")
-    )
-    if cumulative_sample_size is not None:
-        candidate["cumulative_sample_size"] = cumulative_sample_size
+        if candidate.get("source_preference") is None and source_preference is not None:
+            candidate["source_preference"] = source_preference
 
-    drift_item = drift_lookup.get((category, group))
-    if drift_item is not None:
-        drift_direction = _normalize_text(drift_item.get("drift_direction"))
-        if drift_direction is not None:
-            candidate["drift_direction"] = drift_direction
+        if candidate.get("edge_stability_score") is None:
+            edge_stability_score = _coerce_number(score_item.get("score"))
+            if edge_stability_score is not None:
+                candidate["edge_stability_score"] = edge_stability_score
 
-        score_delta = _coerce_number(drift_item.get("score_delta"))
-        if score_delta is not None:
-            candidate["score_delta"] = score_delta
+        if candidate.get("selected_visible_horizons") is None:
+            selected_visible_horizons = _normalize_horizon_list(score_item.get("selected_visible_horizons"))
+            if selected_visible_horizons:
+                candidate["selected_visible_horizons"] = selected_visible_horizons
+
+        symbol_cumulative_support = _coerce_non_negative_int(score_item.get("symbol_cumulative_support"))
+        if symbol_cumulative_support is not None:
+            candidate["symbol_cumulative_support"] = symbol_cumulative_support
+
+        strategy_cumulative_support = _coerce_non_negative_int(score_item.get("strategy_cumulative_support"))
+        if strategy_cumulative_support is not None:
+            candidate["strategy_cumulative_support"] = strategy_cumulative_support
+
+        latest_sample_size = _coerce_non_negative_int(score_item.get("latest_sample_size"))
+        if latest_sample_size is not None:
+            candidate["latest_sample_size"] = latest_sample_size
+
+        cumulative_sample_size = _coerce_non_negative_int(score_item.get("cumulative_sample_size"))
+        if cumulative_sample_size is not None:
+            candidate["cumulative_sample_size"] = cumulative_sample_size
+
+        drift_item = drift_lookup.get((category, group))
+        if drift_item is not None:
+            if candidate.get("drift_direction") is None:
+                drift_direction = _normalize_text(drift_item.get("drift_direction"))
+                if drift_direction is not None:
+                    candidate["drift_direction"] = drift_direction
+
+            if candidate.get("score_delta") is None:
+                score_delta = _coerce_number(drift_item.get("score_delta"))
+                if score_delta is not None:
+                    candidate["score_delta"] = score_delta
+
+    if candidate.get("source_preference") is None:
+        candidate["source_preference"] = "n/a"
 
     return candidate
 
@@ -629,7 +610,12 @@ def _is_valid_candidate(candidate: dict[str, Any]) -> bool:
     symbol = _normalize_group_for_category("symbol", candidate.get("symbol"))
     strategy = _normalize_group_for_category("strategy", candidate.get("strategy"))
     horizon = _normalize_horizon(candidate.get("horizon"))
-    return symbol is not None and strategy is not None and horizon is not None
+    return (
+        symbol is not None
+        and strategy is not None
+        and horizon is not None
+        and _is_strategy_horizon_compatible(strategy, horizon)
+    )
 
 
 def _normalize_source_preference(value: Any) -> str | None:

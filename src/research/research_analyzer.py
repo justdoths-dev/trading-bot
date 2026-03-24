@@ -94,6 +94,12 @@ SUPPORTING_MAJOR_DEFICITS = {
     "robustness_below_emerging_moderate",
 }
 
+STRATEGY_HORIZON_COMPATIBILITY = {
+    "scalping": {"1m", "5m"},
+    "intraday": {"5m", "15m", "1h"},
+    "swing": {"1h", "4h", "1d"},
+}
+
 
 def load_jsonl_records(input_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Load JSONL records, keeping only schema-valid objects for analysis."""
@@ -177,12 +183,15 @@ def run_research_analyzer(input_path: Path, output_dir: Path) -> dict[str, Any]:
 
     if records and int(validation_summary.get("invalid_records", 0)) == 0:
         strategy_lab_metrics = _build_strategy_lab_metrics(input_path)
+        edge_candidate_rows = _build_edge_candidate_rows(input_path)
     else:
         strategy_lab_metrics = _empty_strategy_lab_metrics()
+        edge_candidate_rows = _empty_edge_candidate_rows()
 
     final_metrics = dict(base_metrics)
     final_metrics["schema_validation"] = validation_summary
     final_metrics["strategy_lab"] = strategy_lab_metrics
+    final_metrics["edge_candidate_rows"] = edge_candidate_rows
     final_metrics["top_highlights"] = _build_top_highlights(
         schema_validation=validation_summary,
         strategy_lab=strategy_lab_metrics,
@@ -207,6 +216,15 @@ def _empty_strategy_lab_metrics() -> dict[str, Any]:
         "ranking": {},
         "edge": {},
         "segment": {},
+    }
+
+
+def _empty_edge_candidate_rows() -> dict[str, Any]:
+    return {
+        "row_count": 0,
+        "rows": [],
+        "dropped_row_count": 0,
+        "dropped_rows": [],
     }
 
 
@@ -950,6 +968,284 @@ def _horizon_visibility_reason(sample_gate: str, quality_gate: str) -> str:
     return "passed_sample_gate_only"
 
 
+def _build_edge_candidate_rows(input_path: Path) -> dict[str, Any]:
+    dataset = build_dataset(path=input_path)
+    grouped_rows: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    dropped_rows: list[dict[str, Any]] = []
+
+    for index, row in enumerate(dataset):
+        symbol = _joined_symbol(row)
+        strategy = _joined_strategy(row)
+        if symbol is None:
+            dropped_rows.append(
+                {
+                    "row_index": index,
+                    "symbol": row.get("symbol"),
+                    "strategy": row.get("selected_strategy"),
+                    "horizon": None,
+                    "drop_reason": "MISSING_SYMBOL",
+                }
+            )
+            continue
+        if strategy is None:
+            dropped_rows.append(
+                {
+                    "row_index": index,
+                    "symbol": row.get("symbol"),
+                    "strategy": row.get("selected_strategy"),
+                    "horizon": None,
+                    "drop_reason": "MISSING_STRATEGY",
+                }
+            )
+            continue
+        grouped_rows[(symbol, strategy)].append(row)
+
+    rows: list[dict[str, Any]] = []
+    visible_horizons_by_identity: dict[tuple[str, str], list[str]] = defaultdict(list)
+
+    for (symbol, strategy), identity_rows in sorted(grouped_rows.items()):
+        for horizon in HORIZONS:
+            if horizon not in STRATEGY_HORIZON_COMPATIBILITY.get(strategy, set()):
+                continue
+            candidate_row = _extract_joined_edge_candidate(
+                symbol=symbol,
+                strategy=strategy,
+                horizon=horizon,
+                rows=identity_rows,
+            )
+            if candidate_row is None:
+                continue
+            rows.append(candidate_row)
+            visible_horizons_by_identity[(symbol, strategy)].append(horizon)
+
+    for row in rows:
+        identity = (str(row["symbol"]), str(row["strategy"]))
+        visible_horizons = sorted(visible_horizons_by_identity.get(identity, []))
+        if len(visible_horizons) >= 2:
+            stability_label = "multi_horizon_confirmed"
+        else:
+            stability_label = "single_horizon_only"
+
+        row["selected_stability_label"] = stability_label
+        row["selected_visible_horizons"] = visible_horizons
+
+    rows.sort(
+        key=lambda item: (
+            str(item.get("horizon") or ""),
+            str(item.get("symbol") or ""),
+            str(item.get("strategy") or ""),
+        )
+    )
+
+    return {
+        "row_count": len(rows),
+        "rows": rows,
+        "dropped_row_count": len(dropped_rows),
+        "dropped_rows": dropped_rows[:25],
+    }
+
+
+def _extract_joined_edge_candidate(
+    *,
+    symbol: str,
+    strategy: str,
+    horizon: str,
+    rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    metrics = _build_joined_group_metrics(rows, horizon)
+    sample_count = _to_float(metrics.get("sample_count"))
+    labeled_count = _to_float(metrics.get("labeled_count"))
+    coverage_pct = _to_float(metrics.get("coverage_pct"))
+    median_future_return_pct = _to_float(metrics.get("median_future_return_pct"))
+    positive_rate_pct = _to_float(metrics.get("positive_rate_pct"))
+    robustness_label, robustness_value = _select_robustness_signal(metrics)
+
+    if not _passes_absolute_minimum_gate(
+        sample_count=sample_count,
+        labeled_count=labeled_count,
+        coverage_pct=coverage_pct,
+        median_future_return_pct=median_future_return_pct,
+    ):
+        return None
+
+    diagnostics = _score_candidate_strength_diagnostics(
+        sample_count=sample_count,
+        median_future_return_pct=median_future_return_pct,
+        positive_rate_pct=positive_rate_pct,
+        robustness_value=robustness_value,
+    )
+    candidate_strength = str(diagnostics["final_classification"])
+    if candidate_strength not in {"moderate", "strong"}:
+        return None
+
+    return {
+        "symbol": symbol,
+        "strategy": strategy,
+        "horizon": horizon,
+        "selected_candidate_strength": candidate_strength,
+        "selected_stability_label": None,
+        "source_preference": None,
+        "edge_stability_score": None,
+        "drift_direction": None,
+        "score_delta": None,
+        "selected_visible_horizons": [horizon],
+        "sample_count": int(sample_count or 0),
+        "labeled_count": int(labeled_count or 0),
+        "coverage_pct": coverage_pct,
+        "median_future_return_pct": median_future_return_pct,
+        "avg_future_return_pct": _to_float(metrics.get("avg_future_return_pct")),
+        "positive_rate_pct": positive_rate_pct,
+        "up_rate_pct": _to_float(metrics.get("up_rate_pct")),
+        "down_rate_pct": _to_float(metrics.get("down_rate_pct")),
+        "flat_rate_pct": _to_float(metrics.get("flat_rate_pct")),
+        "robustness_signal": robustness_label,
+        "robustness_signal_pct": robustness_value,
+        "visibility_reason": "passed_sample_and_quality_gate",
+        "chosen_metric_summary": _build_candidate_metric_summary(
+            sample_count=int(sample_count or 0),
+            median_future_return_pct=median_future_return_pct or 0.0,
+            positive_rate_pct=positive_rate_pct,
+            robustness_label=robustness_label,
+            robustness_value=robustness_value,
+            diagnostics=diagnostics,
+        ),
+    }
+
+
+def _build_joined_group_metrics(
+    rows: list[dict[str, Any]],
+    horizon: str,
+) -> dict[str, Any]:
+    label_key = f"future_label_{horizon}"
+    return_key = f"future_return_{horizon}"
+    sample_count = len(rows)
+
+    label_counts = {"up": 0, "down": 0, "flat": 0}
+    returns: list[float] = []
+    bias_known = 0
+    bias_match = 0
+    signal_known = 0
+    signal_match = 0
+
+    for row in rows:
+        label = _joined_normalize_label(row.get(label_key))
+        if label not in {"up", "down", "flat"}:
+            continue
+
+        label_counts[label] += 1
+
+        future_return = _to_float(row.get(return_key))
+        if future_return is not None:
+            returns.append(future_return)
+
+        bias_direction = _joined_bias_to_direction(row.get("bias"))
+        if bias_direction in {"up", "down", "flat"}:
+            bias_known += 1
+            if bias_direction == label:
+                bias_match += 1
+
+        signal_direction = _joined_signal_to_direction(_joined_extract_signal(row))
+        if signal_direction in {"up", "down", "flat"}:
+            signal_known += 1
+            if signal_direction == label:
+                signal_match += 1
+
+    labeled_count = sum(label_counts.values())
+    positive_rate_pct = None
+    if labeled_count > 0:
+        positive_rate_pct = max(
+            _joined_pct(label_counts["up"], labeled_count) or 0.0,
+            _joined_pct(label_counts["down"], labeled_count) or 0.0,
+        )
+
+    return {
+        "sample_count": sample_count,
+        "labeled_count": labeled_count,
+        "coverage_pct": _joined_pct(labeled_count, sample_count),
+        "up_rate_pct": _joined_pct(label_counts["up"], labeled_count),
+        "down_rate_pct": _joined_pct(label_counts["down"], labeled_count),
+        "flat_rate_pct": _joined_pct(label_counts["flat"], labeled_count),
+        "positive_rate_pct": positive_rate_pct,
+        "bias_match_rate_pct": _joined_pct(bias_match, bias_known),
+        "signal_match_rate_pct": _joined_pct(signal_match, signal_known),
+        "avg_future_return_pct": round(sum(returns) / len(returns), 6) if returns else None,
+        "median_future_return_pct": _median_or_none(returns),
+    }
+
+
+def _median_or_none(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return round(float(ordered[middle]), 6)
+    return round(float((ordered[middle - 1] + ordered[middle]) / 2.0), 6)
+
+
+def _joined_symbol(row: dict[str, Any]) -> str | None:
+    value = row.get("symbol")
+    if not isinstance(value, str):
+        return None
+    text = value.strip().upper()
+    return text or None
+
+
+def _joined_strategy(row: dict[str, Any]) -> str | None:
+    value = row.get("selected_strategy")
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    if not text:
+        return None
+    if text not in STRATEGY_HORIZON_COMPATIBILITY:
+        return None
+    return text
+
+
+def _joined_extract_signal(row: dict[str, Any]) -> Any:
+    for key in ("rule_signal", "execution_signal", "execution_action"):
+        value = row.get(key)
+        if value is not None and str(value).strip():
+            return value
+    return None
+
+
+def _joined_normalize_label(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"up", "down", "flat"}:
+        return text
+    return "unknown"
+
+
+def _joined_bias_to_direction(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in ("bullish", "long", "buy", "up"):
+        return "up"
+    if text in ("bearish", "short", "sell", "down"):
+        return "down"
+    if text in ("neutral", "hold", "flat", "no_trade"):
+        return "flat"
+    return "unknown"
+
+
+def _joined_signal_to_direction(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in ("long", "buy", "up"):
+        return "up"
+    if text in ("short", "sell", "down"):
+        return "down"
+    if text in ("hold", "neutral", "flat", "no_trade"):
+        return "flat"
+    return "unknown"
+
+
+def _joined_pct(numerator: int, denominator: int) -> float | None:
+    if denominator <= 0:
+        return None
+    return round((numerator / denominator) * 100.0, 2)
+
+
 def _build_edge_stability_preview(
     edge_candidates_preview: dict[str, Any],
 ) -> dict[str, Any]:
@@ -1060,6 +1356,7 @@ def _build_markdown(metrics: dict[str, Any]) -> str:
     overview = metrics.get("dataset_overview", {}) or {}
     top_highlights = metrics.get("top_highlights", {}) or {}
     edge_candidates_preview = metrics.get("edge_candidates_preview", {}) or {}
+    edge_candidate_rows = metrics.get("edge_candidate_rows", {}) or {}
     edge_stability_preview = metrics.get("edge_stability_preview", {}) or {}
     horizons = metrics.get("horizon_summary", {}) or {}
     by_symbol = metrics.get("by_symbol", {}) or {}
@@ -1075,6 +1372,7 @@ def _build_markdown(metrics: dict[str, Any]) -> str:
 
     lines.extend(_markdown_top_highlights(top_highlights))
     lines.extend(_markdown_edge_candidates_preview(edge_candidates_preview))
+    lines.extend(_markdown_edge_candidate_rows(edge_candidate_rows))
     lines.extend(_markdown_edge_stability_preview(edge_stability_preview))
 
     lines.append("## Schema Validation")
@@ -1287,6 +1585,36 @@ def _markdown_edge_candidates_preview(
         )
         lines.append("")
 
+    return lines
+
+
+def _markdown_edge_candidate_rows(edge_candidate_rows: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    rows = edge_candidate_rows.get("rows", []) if isinstance(edge_candidate_rows.get("rows"), list) else []
+
+    lines.append("## Edge Candidate Rows")
+    lines.append("")
+    lines.append(f"- row_count: {edge_candidate_rows.get('row_count', 0)}")
+    lines.append(f"- dropped_row_count: {edge_candidate_rows.get('dropped_row_count', 0)}")
+    lines.append("")
+
+    if not rows:
+        lines.append("No joined candidate rows available.")
+        lines.append("")
+        return lines
+
+    for row in rows[:12]:
+        lines.append(
+            "- "
+            f"{row.get('symbol', 'n/a')} / {row.get('strategy', 'n/a')} / {row.get('horizon', 'n/a')} "
+            f"(strength={row.get('selected_candidate_strength', 'n/a')}; "
+            f"stability={row.get('selected_stability_label', 'n/a')}; "
+            f"edge_stability_score={row.get('edge_stability_score', 'n/a')}; "
+            f"source_preference={row.get('source_preference', 'n/a')}; "
+            f"score_delta={row.get('score_delta', 'n/a')}; "
+            f"drift_direction={row.get('drift_direction', 'n/a')})"
+        )
+    lines.append("")
     return lines
 
 
