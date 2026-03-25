@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,7 @@ class TradeAnalysisLogger:
         self.log_dir = Path(self.config.log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.log_path = self.log_dir / self.config.filename
+        self._lock = threading.Lock()
 
     def log(
         self,
@@ -58,8 +60,79 @@ class TradeAnalysisLogger:
             execution_result=execution_result,
             ai_result=ai_result,
         )
-        self._append_record(record)
+        with self._lock:
+            self._append_record(record)
         return record
+
+    def enrich_latest_record(
+        self,
+        *,
+        symbol: str,
+        logged_at: str,
+        edge_selection_mapper_payload: dict[str, Any] | None = None,
+        edge_selection_output: dict[str, Any] | None = None,
+        edge_selection_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Add replay-ready edge-selection context to the latest matching log row."""
+        with self._lock:
+            if not self.log_path.exists() or not self.log_path.is_file():
+                raise FileNotFoundError(
+                    f"Trade analysis log does not exist: {self.log_path}"
+                )
+
+            with self.log_path.open("r", encoding="utf-8") as handle:
+                lines = handle.readlines()
+
+            target_index: int | None = None
+            target_record: dict[str, Any] | None = None
+
+            for index in range(len(lines) - 1, -1, -1):
+                content = lines[index].strip()
+                if not content:
+                    continue
+
+                try:
+                    parsed = json.loads(content)
+                except json.JSONDecodeError:
+                    continue
+
+                if not isinstance(parsed, dict):
+                    continue
+
+                if self._record_matches_identity(
+                    parsed,
+                    symbol=symbol,
+                    logged_at=logged_at,
+                ):
+                    target_index = index
+                    target_record = parsed
+                    break
+
+            if target_index is None or target_record is None:
+                raise ValueError(
+                    "Could not find the latest trade-analysis record to enrich for "
+                    f"symbol={symbol} logged_at={logged_at}."
+                )
+
+            updated_record = dict(target_record)
+            updated_record["edge_selection_mapper_payload"] = (
+                self._build_edge_selection_mapper_payload_snapshot(
+                    edge_selection_mapper_payload
+                )
+            )
+            updated_record["edge_selection_output"] = (
+                self._build_edge_selection_output_snapshot(edge_selection_output)
+            )
+            updated_record["edge_selection_metadata"] = (
+                self._build_edge_selection_metadata_snapshot(edge_selection_metadata)
+            )
+
+            lines[target_index] = json.dumps(updated_record, ensure_ascii=False) + "\n"
+
+            with self.log_path.open("w", encoding="utf-8") as handle:
+                handle.writelines(lines)
+
+            return updated_record
 
     def _build_record(
         self,
@@ -149,6 +222,9 @@ class TradeAnalysisLogger:
                 "stance_reason": analysis.get("stance_reason"),
                 "telegram_briefing": analysis.get("telegram_briefing", []),
             },
+            "edge_selection_mapper_payload": None,
+            "edge_selection_output": None,
+            "edge_selection_metadata": None,
         }
 
         record["alignment"] = self._build_alignment(record)
@@ -258,17 +334,64 @@ class TradeAnalysisLogger:
             return "neutral"
         return "unknown"
 
-    @staticmethod
-    def _value_or_unknown(value: Any) -> str:
-        if value is None:
-            return "unknown"
-
-        text = str(value).strip()
-        return text if text else "unknown"
+    def _value_or_unknown(self, value: Any) -> Any:
+        return value if value is not None else "unknown"
 
     def _append_record(self, record: dict[str, Any]) -> None:
-        with self.log_path.open("a", encoding="utf-8") as file:
-            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        with self.log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False))
+            handle.write("\n")
+
+    def _build_edge_selection_mapper_payload_snapshot(
+        self,
+        payload: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        return self._json_safe_copy(payload)
+
+    def _build_edge_selection_output_snapshot(
+        self,
+        payload: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        return self._json_safe_copy(payload)
+
+    def _build_edge_selection_metadata_snapshot(
+        self,
+        payload: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        return self._json_safe_copy(payload)
+
+    def _json_safe_copy(self, value: Any) -> Any:
+        if value is None:
+            return None
+
+        if isinstance(value, (str, int, float, bool)):
+            return value
+
+        if isinstance(value, Path):
+            return str(value)
+
+        if isinstance(value, datetime):
+            return value.isoformat()
+
+        if isinstance(value, dict):
+            return {
+                str(key): self._json_safe_copy(item)
+                for key, item in value.items()
+            }
+
+        if isinstance(value, (list, tuple, set)):
+            return [self._json_safe_copy(item) for item in value]
+
+        return str(value)
+
+    def _record_matches_identity(
+        self,
+        record: dict[str, Any],
+        *,
+        symbol: str,
+        logged_at: str,
+    ) -> bool:
+        return record.get("symbol") == symbol and record.get("logged_at") == logged_at
 
     def _now_iso(self) -> str:
         if self.config.utc_timestamp:
