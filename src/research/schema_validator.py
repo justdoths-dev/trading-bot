@@ -14,6 +14,12 @@ REQUIRED_TOP_LEVEL_FIELDS = (
     "execution",
 )
 
+OPTIONAL_REPLAY_FIELDS = (
+    "edge_selection_mapper_payload",
+    "edge_selection_output",
+    "edge_selection_metadata",
+)
+
 FUTURE_RETURN_FIELDS = (
     "future_return_15m",
     "future_return_1h",
@@ -27,6 +33,7 @@ FUTURE_LABEL_FIELDS = (
 )
 
 VALID_FUTURE_LABELS = {"up", "down", "flat"}
+VALID_SHADOW_STATUSES = {"not_started", "success", "failed"}
 MAX_INVALID_EXAMPLES = 5
 
 
@@ -97,6 +104,8 @@ def validate_record(record: dict[str, Any], line_number: int | None = None) -> d
 
         if not isinstance(value, str) or value.strip().lower() not in VALID_FUTURE_LABELS:
             errors.append(f"{prefix}{field} must be one of: up, down, flat")
+
+    _validate_optional_replay_fields(record, errors, warnings, prefix)
 
     return {
         "is_valid": not errors,
@@ -185,6 +194,115 @@ def validate_jsonl_file(input_path: Path) -> dict[str, Any]:
     return summary
 
 
+def _validate_optional_replay_fields(
+    record: dict[str, Any],
+    errors: list[str],
+    warnings: list[str],
+    prefix: str,
+) -> None:
+    for field in OPTIONAL_REPLAY_FIELDS:
+        if field not in record:
+            continue
+
+        value = record.get(field)
+        if value is not None and not isinstance(value, dict):
+            errors.append(f"{prefix}{field} must be a dict or null when present")
+
+    metadata = record.get("edge_selection_metadata")
+    if metadata is None:
+        return
+
+    if not isinstance(metadata, dict):
+        return
+
+    _validate_optional_string_field(
+        metadata,
+        "mapper_version",
+        errors,
+        prefix,
+        parent_name="edge_selection_metadata",
+    )
+    _validate_optional_string_field(
+        metadata,
+        "engine_version",
+        errors,
+        prefix,
+        parent_name="edge_selection_metadata",
+    )
+    _validate_optional_string_field(
+        metadata,
+        "trigger_symbol",
+        errors,
+        prefix,
+        parent_name="edge_selection_metadata",
+    )
+    _validate_optional_string_field(
+        metadata,
+        "reports_dir",
+        errors,
+        prefix,
+        parent_name="edge_selection_metadata",
+    )
+    _validate_optional_string_field(
+        metadata,
+        "shadow_output_path",
+        errors,
+        prefix,
+        parent_name="edge_selection_metadata",
+        allow_null=True,
+    )
+    _validate_optional_string_field(
+        metadata,
+        "error_type",
+        errors,
+        prefix,
+        parent_name="edge_selection_metadata",
+        allow_null=True,
+    )
+    _validate_optional_string_field(
+        metadata,
+        "error_message",
+        errors,
+        prefix,
+        parent_name="edge_selection_metadata",
+        allow_null=True,
+    )
+    _validate_optional_string_field(
+        metadata,
+        "selection_status",
+        errors,
+        prefix,
+        parent_name="edge_selection_metadata",
+        allow_null=True,
+    )
+
+    replay_ready = metadata.get("replay_ready", _MISSING)
+    if replay_ready is not _MISSING and replay_ready is not None and not isinstance(replay_ready, bool):
+        errors.append(f"{prefix}edge_selection_metadata.replay_ready must be a bool or null")
+
+    shadow_status = metadata.get("shadow_status", _MISSING)
+    if shadow_status is not _MISSING:
+        if shadow_status is not None and not isinstance(shadow_status, str):
+            errors.append(f"{prefix}edge_selection_metadata.shadow_status must be a string or null")
+        elif isinstance(shadow_status, str):
+            normalized = shadow_status.strip().lower()
+            if normalized and normalized not in VALID_SHADOW_STATUSES:
+                warnings.append(
+                    f"{prefix}edge_selection_metadata.shadow_status has unexpected value: {shadow_status}"
+                )
+
+    mapper_generated_at = metadata.get("mapper_generated_at", _MISSING)
+    if mapper_generated_at is not _MISSING:
+        if mapper_generated_at is not None and not isinstance(mapper_generated_at, str):
+            errors.append(
+                f"{prefix}edge_selection_metadata.mapper_generated_at must be a datetime string or null"
+            )
+        elif isinstance(mapper_generated_at, str) and not _is_parseable_datetime(mapper_generated_at):
+            errors.append(
+                f"{prefix}edge_selection_metadata.mapper_generated_at must be a parseable datetime string"
+            )
+
+
 def _validate_required_string(
     record: dict[str, Any],
     path: str,
@@ -199,6 +317,28 @@ def _validate_required_string(
 
     if not _is_non_empty_string(value):
         errors.append(f"{prefix}{path} must be a non-empty string")
+
+
+def _validate_optional_string_field(
+    record: dict[str, Any],
+    field_name: str,
+    errors: list[str],
+    prefix: str,
+    *,
+    parent_name: str,
+    allow_null: bool = False,
+) -> None:
+    value = record.get(field_name, _MISSING)
+    if value is _MISSING:
+        return
+
+    if value is None:
+        if allow_null:
+            return
+        return
+
+    if not _is_non_empty_string(value):
+        errors.append(f"{prefix}{parent_name}.{field_name} must be a non-empty string")
 
 
 def _get_nested_value(record: dict[str, Any], path: str) -> Any:
