@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 RESEARCH_REPORTS_DIR = Path("logs/research_reports")
 EDGE_SELECTION_MAPPER_VERSION = "edge_selection_input_mapper_v1"
 EDGE_SELECTION_ENGINE_VERSION = "edge_selection_engine_v1"
+FORCE_SHADOW_FAILURE_ENV_VAR = "EDGE_SELECTION_FORCE_SHADOW_FAILURE"
 
 
 class TradingPipelineService:
@@ -125,6 +127,11 @@ class TradingPipelineService:
         }
 
         try:
+            if self._is_forced_shadow_failure_enabled():
+                raise RuntimeError(
+                    f"Forced shadow observation failure via env var {FORCE_SHADOW_FAILURE_ENV_VAR}"
+                )
+
             mapped_payload = map_edge_selection_input(RESEARCH_REPORTS_DIR)
             shadow_result = run_edge_selection_engine(mapped_payload)
             output_path = write_edge_selection_shadow_output(shadow_result)
@@ -250,3 +257,7 @@ class TradingPipelineService:
                 "Shadow event notification failed after trading cycle: trigger_symbol=%s",
                 trigger_symbol,
             )
+
+    def _is_forced_shadow_failure_enabled(self) -> bool:
+        value = os.getenv(FORCE_SHADOW_FAILURE_ENV_VAR, "")
+        return value.strip().lower() in {"1", "true", "yes", "on"}
