@@ -117,7 +117,9 @@ def load_resolved_manifest(manifest_path: Path) -> ResolvedHistoricalManifest:
     )
     if not resolved_input_path.exists() or not resolved_input_path.is_file():
         raise ValueError(
-            f"Resolved input path from manifest does not exist or is not a file: {resolved_input_path}"
+            "Resolved input path from manifest does not exist or is not a file: "
+            f"{resolved_input_path} "
+            f"(raw output_path={resolved_input_raw}, manifest_path={resolved_manifest_path})"
         )
 
     return ResolvedHistoricalManifest(
@@ -652,8 +654,14 @@ def _write_jsonl_row(handle: TextIO, payload: dict[str, Any]) -> None:
 
 def _resolve_path_like(*, raw_path: str, base_dir: Path) -> Path:
     candidate = Path(raw_path)
+
     if candidate.is_absolute():
         return candidate
+
+    cwd_resolved = candidate.resolve()
+    if cwd_resolved.exists():
+        return cwd_resolved
+
     return (base_dir / candidate).resolve()
 
 
