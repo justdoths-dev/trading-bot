@@ -57,8 +57,14 @@ class ShadowEventNotifier:
             score_surge_threshold
         )
         self._cooldown_seconds = max(int(cooldown_seconds), 0)
-        self._bot_token = (bot_token or os.getenv(DEFAULT_EVENT_BOT_TOKEN_ENV, "")).strip()
-        self._chat_id = (chat_id or os.getenv(DEFAULT_EVENT_CHAT_ID_ENV, "")).strip()
+        self._bot_token = _resolve_config_value(
+            explicit_value=bot_token,
+            env_name=DEFAULT_EVENT_BOT_TOKEN_ENV,
+        )
+        self._chat_id = _resolve_config_value(
+            explicit_value=chat_id,
+            env_name=DEFAULT_EVENT_CHAT_ID_ENV,
+        )
         self._sender = sender
         self._now_provider = now_provider or _utc_now
 
@@ -140,8 +146,6 @@ class ShadowEventNotifier:
             ):
                 filtered.append(event)
                 if identity_key is not None:
-                    # In-memory working state update prevents same-run duplicates
-                    # from passing the filter again within the same notifier call.
                     working_state[identity_key] = _build_notified_state(
                         event,
                         sent_at=current_time,
@@ -303,9 +307,6 @@ def should_send_shadow_event(
     ):
         return True
 
-    # Current policy:
-    # - cooldown does not enable same-state refresh notifications
-    # - unchanged state remains suppressed regardless of cooldown expiry
     if is_within_cooldown(
         last_notified_state,
         cooldown_seconds=cooldown_seconds,
@@ -470,4 +471,18 @@ def _resolve_score_surge_threshold(configured_value: float | None) -> float:
             DEFAULT_SCORE_SURGE_THRESHOLD,
         )
         return DEFAULT_SCORE_SURGE_THRESHOLD
+
+
+def _resolve_config_value(*, explicit_value: str | None, env_name: str) -> str:
+    """
+    Resolve a config string with explicit-value precedence.
+
+    Rules:
+    - None  -> allow environment fallback
+    - ""    -> keep as explicit empty string, do not fallback
+    - other -> strip and use explicit value
+    """
+    if explicit_value is None:
+        return os.getenv(env_name, "").strip()
+    return explicit_value.strip()
 
