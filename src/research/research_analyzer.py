@@ -100,6 +100,29 @@ STRATEGY_HORIZON_COMPATIBILITY = {
     "swing": {"1h", "4h", "1d"},
 }
 
+def _normalize_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _coerce_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+def _normalize_horizon_list(value: Any) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+
+    normalized: list[str] = []
+    for item in value:
+        if item in HORIZONS and item not in normalized:
+            normalized.append(item)
+
+    return normalized or None
 
 def load_jsonl_records(input_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Load JSONL records, keeping only schema-valid objects for analysis."""
@@ -183,9 +206,25 @@ def run_research_analyzer(input_path: Path, output_dir: Path) -> dict[str, Any]:
 
     if records and int(validation_summary.get("invalid_records", 0)) == 0:
         strategy_lab_metrics = _build_strategy_lab_metrics(input_path)
-        edge_candidate_rows = _build_edge_candidate_rows(input_path)
+        edge_candidates_preview = _build_edge_candidates_preview(
+            strategy_lab=strategy_lab_metrics,
+        )
+        edge_stability_preview = _build_edge_stability_preview(
+            edge_candidates_preview=edge_candidates_preview,
+        )
+        edge_candidate_rows = _build_edge_candidate_rows(
+            input_path,
+            edge_candidates_preview=edge_candidates_preview,
+            edge_stability_preview=edge_stability_preview,
+        )
     else:
         strategy_lab_metrics = _empty_strategy_lab_metrics()
+        edge_candidates_preview = _build_edge_candidates_preview(
+            strategy_lab=strategy_lab_metrics,
+        )
+        edge_stability_preview = _build_edge_stability_preview(
+            edge_candidates_preview=edge_candidates_preview,
+        )
         edge_candidate_rows = _empty_edge_candidate_rows()
 
     final_metrics = dict(base_metrics)
@@ -196,12 +235,8 @@ def run_research_analyzer(input_path: Path, output_dir: Path) -> dict[str, Any]:
         schema_validation=validation_summary,
         strategy_lab=strategy_lab_metrics,
     )
-    final_metrics["edge_candidates_preview"] = _build_edge_candidates_preview(
-        strategy_lab=strategy_lab_metrics,
-    )
-    final_metrics["edge_stability_preview"] = _build_edge_stability_preview(
-        edge_candidates_preview=final_metrics["edge_candidates_preview"],
-    )
+    final_metrics["edge_candidates_preview"] = edge_candidates_preview
+    final_metrics["edge_stability_preview"] = edge_stability_preview
 
     write_summary_files(final_metrics, output_dir)
     return final_metrics
@@ -968,7 +1003,12 @@ def _horizon_visibility_reason(sample_gate: str, quality_gate: str) -> str:
     return "passed_sample_gate_only"
 
 
-def _build_edge_candidate_rows(input_path: Path) -> dict[str, Any]:
+def _build_edge_candidate_rows(
+    input_path: Path,
+    *,
+    edge_candidates_preview: dict[str, Any] | None = None,
+    edge_stability_preview: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     dataset = build_dataset(path=input_path)
     grouped_rows: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     dropped_rows: list[dict[str, Any]] = []
@@ -1002,11 +1042,16 @@ def _build_edge_candidate_rows(input_path: Path) -> dict[str, Any]:
 
     rows: list[dict[str, Any]] = []
     visible_horizons_by_identity: dict[tuple[str, str], list[str]] = defaultdict(list)
+    preview_visibility = _build_edge_candidate_preview_visibility(
+        edge_candidates_preview=edge_candidates_preview,
+        edge_stability_preview=edge_stability_preview,
+    )
 
     for (symbol, strategy), identity_rows in sorted(grouped_rows.items()):
         for horizon in HORIZONS:
             if horizon not in STRATEGY_HORIZON_COMPATIBILITY.get(strategy, set()):
                 continue
+
             candidate_row = _extract_joined_edge_candidate(
                 symbol=symbol,
                 strategy=strategy,
@@ -1015,19 +1060,41 @@ def _build_edge_candidate_rows(input_path: Path) -> dict[str, Any]:
             )
             if candidate_row is None:
                 continue
+
             rows.append(candidate_row)
             visible_horizons_by_identity[(symbol, strategy)].append(horizon)
 
     for row in rows:
         identity = (str(row["symbol"]), str(row["strategy"]))
-        visible_horizons = sorted(visible_horizons_by_identity.get(identity, []))
-        if len(visible_horizons) >= 2:
-            stability_label = "multi_horizon_confirmed"
-        else:
-            stability_label = "single_horizon_only"
+        joined_visible_horizons = sorted(visible_horizons_by_identity.get(identity, []))
 
-        row["selected_stability_label"] = stability_label
-        row["selected_visible_horizons"] = visible_horizons
+        row["selected_visible_horizons"] = joined_visible_horizons
+        row["selected_stability_label"] = (
+            "multi_horizon_confirmed"
+            if len(joined_visible_horizons) >= 2
+            else "single_horizon_only"
+        )
+
+        symbol_preview = _coerce_dict(
+            preview_visibility["symbol"].get(str(row["symbol"]))
+        )
+        strategy_preview = _coerce_dict(
+            preview_visibility["strategy"].get(str(row["strategy"]))
+        )
+
+        _attach_preview_visibility_metadata(
+            row=row,
+            symbol_preview=symbol_preview,
+            strategy_preview=strategy_preview,
+        )
+
+        row["visibility_reason"] = _resolve_edge_candidate_visibility_reason(
+            base_reason=str(
+                row.get("visibility_reason") or "passed_sample_and_quality_gate"
+            ),
+            symbol_preview=symbol_preview,
+            strategy_preview=strategy_preview,
+        )
 
     rows.sort(
         key=lambda item: (
@@ -1043,6 +1110,175 @@ def _build_edge_candidate_rows(input_path: Path) -> dict[str, Any]:
         "dropped_row_count": len(dropped_rows),
         "dropped_rows": dropped_rows[:25],
     }
+
+
+def _build_edge_candidate_preview_visibility(
+    *,
+    edge_candidates_preview: dict[str, Any] | None,
+    edge_stability_preview: dict[str, Any] | None,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    by_horizon = _coerce_dict(_coerce_dict(edge_candidates_preview).get("by_horizon"))
+    stability_root = _coerce_dict(edge_stability_preview)
+
+    return {
+        "symbol": _build_category_preview_visibility(
+            by_horizon=by_horizon,
+            stability_entry=_coerce_dict(stability_root.get("symbol")),
+            category="symbol",
+            candidate_key="top_symbol",
+        ),
+        "strategy": _build_category_preview_visibility(
+            by_horizon=by_horizon,
+            stability_entry=_coerce_dict(stability_root.get("strategy")),
+            category="strategy",
+            candidate_key="top_strategy",
+        ),
+    }
+
+
+def _build_category_preview_visibility(
+    *,
+    by_horizon: dict[str, Any],
+    stability_entry: dict[str, Any],
+    category: str,
+    candidate_key: str,
+) -> dict[str, dict[str, Any]]:
+    horizons_by_group: dict[str, set[str]] = defaultdict(set)
+
+    for horizon in HORIZONS:
+        horizon_data = _coerce_dict(by_horizon.get(horizon))
+        candidate = _coerce_dict(horizon_data.get(candidate_key))
+        if candidate.get("candidate_strength") == "insufficient_data":
+            continue
+
+        group = _normalize_preview_visibility_group(category, candidate.get("group"))
+        if group is None:
+            continue
+
+        horizons_by_group[group].add(horizon)
+
+    stability_group = _normalize_preview_visibility_group(
+        category,
+        stability_entry.get("group"),
+    )
+
+    visibility: dict[str, dict[str, Any]] = {}
+    for group, horizons in horizons_by_group.items():
+        visible_horizons = sorted(horizons)
+        stability_label = (
+            "multi_horizon_confirmed"
+            if len(visible_horizons) >= 2
+            else "single_horizon_only"
+        )
+        visibility_reason = (
+            "preview_visible_candidate_across_multiple_horizons"
+            if len(visible_horizons) >= 2
+            else "preview_visible_in_one_horizon_only"
+        )
+
+        if group == stability_group:
+            stability_label = str(
+                stability_entry.get("stability_label") or stability_label
+            )
+            visibility_reason = str(
+                stability_entry.get("visibility_reason") or visibility_reason
+            )
+
+        visibility[group] = {
+            "visible_horizons": visible_horizons,
+            "stability_label": stability_label,
+            "visibility_reason": visibility_reason,
+        }
+
+    return visibility
+
+
+def _normalize_preview_visibility_group(category: str, value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+
+    text = value.strip()
+    if not text:
+        return None
+
+    lowered = text.lower()
+    if lowered in {"insufficient_data", "n/a", "na", "none", "null", "unknown"}:
+        return None
+
+    if category == "symbol":
+        return text.upper()
+    return lowered
+
+
+def _attach_preview_visibility_metadata(
+    *,
+    row: dict[str, Any],
+    symbol_preview: dict[str, Any],
+    strategy_preview: dict[str, Any],
+) -> None:
+    symbol_visible_horizons = _normalize_horizon_list(
+        symbol_preview.get("visible_horizons")
+    )
+    if symbol_visible_horizons:
+        row["preview_symbol_visible_horizons"] = symbol_visible_horizons
+
+    symbol_stability_label = _normalize_text(symbol_preview.get("stability_label"))
+    if symbol_stability_label is not None:
+        row["preview_symbol_stability_label"] = symbol_stability_label
+
+    symbol_visibility_reason = _normalize_text(symbol_preview.get("visibility_reason"))
+    if symbol_visibility_reason is not None:
+        row["preview_symbol_visibility_reason"] = symbol_visibility_reason
+
+    strategy_visible_horizons = _normalize_horizon_list(
+        strategy_preview.get("visible_horizons")
+    )
+    if strategy_visible_horizons:
+        row["preview_strategy_visible_horizons"] = strategy_visible_horizons
+
+    strategy_stability_label = _normalize_text(strategy_preview.get("stability_label"))
+    if strategy_stability_label is not None:
+        row["preview_strategy_stability_label"] = strategy_stability_label
+
+    strategy_visibility_reason = _normalize_text(
+        strategy_preview.get("visibility_reason")
+    )
+    if strategy_visibility_reason is not None:
+        row["preview_strategy_visibility_reason"] = strategy_visibility_reason
+
+
+def _resolve_edge_candidate_visibility_reason(
+    *,
+    base_reason: str,
+    symbol_preview: dict[str, Any],
+    strategy_preview: dict[str, Any],
+) -> str:
+    reasons = [base_reason]
+
+    symbol_visible_horizons = _normalize_horizon_list(
+        symbol_preview.get("visible_horizons")
+    )
+    if symbol_visible_horizons:
+        if len(symbol_visible_horizons) >= 2:
+            reasons.append("symbol_preview_multi_horizon")
+        else:
+            reasons.append("symbol_preview_single_horizon")
+
+    strategy_visible_horizons = _normalize_horizon_list(
+        strategy_preview.get("visible_horizons")
+    )
+    if strategy_visible_horizons:
+        if len(strategy_visible_horizons) >= 2:
+            reasons.append("strategy_preview_multi_horizon")
+        else:
+            reasons.append("strategy_preview_single_horizon")
+
+    deduped: list[str] = []
+    for reason in reasons:
+        if reason and reason not in deduped:
+            deduped.append(reason)
+
+    return "+".join(deduped)
 
 
 def _extract_joined_edge_candidate(
@@ -1328,10 +1564,6 @@ def _build_stability_entry(
     second_group, second_horizons = ranked_candidates[1]
     second_horizons = list(second_horizons)
 
-    # Recovery-friendly stability rule:
-    # If a single top candidate clearly dominates visibility across multiple
-    # horizons, preserve that convergence signal instead of marking the state
-    # unstable merely because a secondary candidate appears in fewer horizons.
     if len(top_horizons) >= 2 and len(top_horizons) > len(second_horizons):
         return {
             "group": top_group,
