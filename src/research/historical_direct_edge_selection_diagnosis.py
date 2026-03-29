@@ -10,13 +10,13 @@ import subprocess
 import sys
 import traceback
 from contextlib import contextmanager
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 
-RUNNER_VERSION = "historical_direct_edge_selection_diagnosis_v3"
+RUNNER_VERSION = "historical_direct_edge_selection_diagnosis_v4"
 
 
 @dataclass
@@ -153,6 +153,13 @@ def resolve_engine_callable() -> Tuple[str, str, Callable[..., Any]]:
     return import_first_available(candidates)
 
 
+def resolve_comparison_pipeline_callable() -> Tuple[str, str, Callable[..., Any]]:
+    candidates = [
+        ("src.research.run_comparison_pipeline", "run_comparison_pipeline"),
+    ]
+    return import_first_available(candidates)
+
+
 def run_research_analyzer_cli(
     repo_root: Path,
     workspace_root: Path,
@@ -173,31 +180,44 @@ def run_research_analyzer_cli(
     )
 
 
+def run_comparison_pipeline_step(
+    comparison_pipeline_func: Callable[..., Any],
+    workspace_root: Path,
+) -> Any:
+    logs_dir = workspace_root / "logs"
+    reports_dir = logs_dir / "research_reports"
+
+    latest_summary = reports_dir / "latest" / "summary.json"
+    cumulative_output = logs_dir / "trade_analysis_cumulative.jsonl"
+    cumulative_output_dir = reports_dir / "cumulative"
+    comparison_output_dir = reports_dir / "comparison"
+    edge_scores_output_dir = reports_dir / "edge_scores"
+    edge_score_history_output = reports_dir / "edge_scores_history.jsonl"
+    score_drift_output_dir = reports_dir / "score_drift"
+
+    return comparison_pipeline_func(
+        logs_dir=logs_dir,
+        latest_summary=latest_summary,
+        cumulative_output=cumulative_output,
+        cumulative_output_dir=cumulative_output_dir,
+        comparison_output_dir=comparison_output_dir,
+        edge_scores_output_dir=edge_scores_output_dir,
+        edge_score_history_output=edge_score_history_output,
+        score_drift_output_dir=score_drift_output_dir,
+    )
+
+
 def run_mapper(
     mapper_func: Callable[..., Any],
     workspace_root: Path,
 ) -> Any:
-    """
-    Mapper expects base_dir that resolves:
-      latest/summary.json
-      comparison/summary.json
-      edge_scores/summary.json
-      score_drift/summary.json
-
-    Therefore the correct base_dir is most likely:
-      workspace_root / logs / research_reports
-    """
     reports_base_dir = workspace_root / "logs" / "research_reports"
 
     attempts: List[Tuple[str, Callable[[], Any]]] = [
-        ("kwargs_base_dir_reports_root_path", lambda: call_with_supported_kwargs(mapper_func, base_dir=reports_base_dir)),
-        ("kwargs_base_dir_reports_root_str", lambda: call_with_supported_kwargs(mapper_func, base_dir=str(reports_base_dir))),
+        ("kwargs_reports_root_path", lambda: call_with_supported_kwargs(mapper_func, base_dir=reports_base_dir)),
+        ("kwargs_reports_root_str", lambda: call_with_supported_kwargs(mapper_func, base_dir=str(reports_base_dir))),
         ("positional_reports_root_path", lambda: mapper_func(reports_base_dir)),
         ("positional_reports_root_str", lambda: mapper_func(str(reports_base_dir))),
-        ("kwargs_workspace_root_path", lambda: call_with_supported_kwargs(mapper_func, base_dir=workspace_root)),
-        ("kwargs_workspace_root_str", lambda: call_with_supported_kwargs(mapper_func, base_dir=str(workspace_root))),
-        ("positional_workspace_root_path", lambda: mapper_func(workspace_root)),
-        ("positional_workspace_root_str", lambda: mapper_func(str(workspace_root))),
     ]
 
     errors: List[str] = []
@@ -207,8 +227,7 @@ def run_mapper(
         except Exception as exc:
             errors.append(f"{label}: {exc}")
 
-    joined = " | ".join(errors)
-    raise RuntimeError(f"Mapper execution failed after all attempts: {joined}")
+    raise RuntimeError(f"Mapper execution failed after all attempts: {' | '.join(errors)}")
 
 
 def run_engine(
@@ -314,12 +333,7 @@ def extract_selection_fields(engine_output: Any) -> Dict[str, Any]:
     selected_strategy = data.get("selected_strategy")
     selected_horizon = data.get("selected_horizon")
 
-    selected_block = (
-        data.get("selected_candidate")
-        or data.get("selected")
-        or data.get("winner")
-    )
-
+    selected_block = data.get("selected_candidate") or data.get("selected") or data.get("winner")
     if isinstance(selected_block, dict):
         selected_symbol = selected_symbol or selected_block.get("symbol")
         selected_strategy = selected_strategy or selected_block.get("strategy")
@@ -409,9 +423,7 @@ def build_markdown_summary(
     lines.append("")
     lines.append("## Recent Steps")
     for item in step_results[-10:]:
-        candidate = " / ".join(
-            [x for x in [item.selected_symbol, item.selected_strategy, item.selected_horizon] if x]
-        ) or "n/a"
+        candidate = " / ".join([x for x in [item.selected_symbol, item.selected_strategy, item.selected_horizon] if x]) or "n/a"
         lines.append(
             f"- step={item.step_index}, window={item.window_record_count}, "
             f"status={item.selection_status}, reason={item.reason}, selected={candidate}, "
@@ -480,6 +492,7 @@ def main() -> None:
 
     mapper_module, mapper_attr, mapper_func = resolve_mapper_callable()
     engine_module, engine_attr, engine_func = resolve_engine_callable()
+    comparison_module, comparison_attr, comparison_pipeline_func = resolve_comparison_pipeline_callable()
 
     step_results: List[StepResult] = []
     selected_counter: Dict[str, int] = {}
@@ -509,6 +522,7 @@ def main() -> None:
         "imports": {
             "mapper": f"{mapper_module}.{mapper_attr}",
             "engine": f"{engine_module}.{engine_attr}",
+            "comparison_pipeline": f"{comparison_module}.{comparison_attr}",
         },
         "planned_steps": len(planned_indices),
         "total_records": total_records,
@@ -567,6 +581,10 @@ def main() -> None:
 
         try:
             with pushd(workspace_root):
+                comparison_pipeline_output = run_comparison_pipeline_step(
+                    comparison_pipeline_func=comparison_pipeline_func,
+                    workspace_root=workspace_root,
+                )
                 mapper_payload = run_mapper(
                     mapper_func=mapper_func,
                     workspace_root=workspace_root,
@@ -584,14 +602,11 @@ def main() -> None:
             if status == "selected":
                 selected_count += 1
                 candidate_name = " / ".join(
-                    [
-                        x for x in [
-                            selection_fields["selected_symbol"],
-                            selection_fields["selected_strategy"],
-                            selection_fields["selected_horizon"],
-                        ]
-                        if x
-                    ]
+                    [x for x in [
+                        selection_fields["selected_symbol"],
+                        selection_fields["selected_strategy"],
+                        selection_fields["selected_horizon"],
+                    ] if x]
                 ) or "unknown"
                 selected_counter[candidate_name] = selected_counter.get(candidate_name, 0) + 1
             elif status == "abstain":
@@ -621,6 +636,7 @@ def main() -> None:
                 {
                     "step_index": step_index,
                     "window_record_count": window_count,
+                    "comparison_pipeline_output": to_plain_data(comparison_pipeline_output),
                     "mapper_payload": to_plain_data(mapper_payload),
                     "engine_output": to_plain_data(engine_output),
                     "result": asdict(result),
@@ -637,7 +653,7 @@ def main() -> None:
                 window_record_count=window_count,
                 end_record_index_inclusive=end_exclusive - 1,
                 selection_status="error",
-                reason="mapper_or_engine_failed",
+                reason="comparison_mapper_or_engine_failed",
                 selected_symbol=None,
                 selected_strategy=None,
                 selected_horizon=None,
@@ -683,6 +699,7 @@ def main() -> None:
         "imports": {
             "mapper": f"{mapper_module}.{mapper_attr}",
             "engine": f"{engine_module}.{engine_attr}",
+            "comparison_pipeline": f"{comparison_module}.{comparison_attr}",
         },
     }
 
