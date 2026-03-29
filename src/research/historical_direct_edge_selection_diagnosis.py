@@ -16,12 +16,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 
-RUNNER_VERSION = "historical_direct_edge_selection_diagnosis_v1"
+RUNNER_VERSION = "historical_direct_edge_selection_diagnosis_v2"
 
-
-# ============================================================
-# Data structures
-# ============================================================
 
 @dataclass
 class StepResult:
@@ -40,10 +36,6 @@ class StepResult:
     raw_output_path: str
     error: Optional[str] = None
 
-
-# ============================================================
-# Generic helpers
-# ============================================================
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -136,22 +128,12 @@ def import_first_available(candidates: List[Tuple[str, str]]) -> Tuple[str, str,
 def call_with_supported_kwargs(func: Callable[..., Any], **kwargs: Any) -> Any:
     sig = inspect.signature(func)
     accepted = {}
-    for name, param in sig.parameters.items():
+    for name in sig.parameters.keys():
         if name in kwargs:
             accepted[name] = kwargs[name]
 
-    try:
-        return func(**accepted)
-    except TypeError:
-        # final fallback: try zero-arg call for functions that read from project paths
-        if len(sig.parameters) == 0:
-            return func()
-        raise
+    return func(**accepted)
 
-
-# ============================================================
-# Dynamic project adapters
-# ============================================================
 
 def resolve_mapper_callable() -> Tuple[str, str, Callable[..., Any]]:
     candidates = [
@@ -177,11 +159,6 @@ def run_research_analyzer_cli(
     workspace_root: Path,
     python_executable: str,
 ) -> subprocess.CompletedProcess:
-    """
-    Assumption:
-    - project already has a CLI-entry module at `python -m src.research.research_analyzer`
-    - analyzer reads/writes using repo-relative `logs/...` paths based on current working directory
-    """
     env = os.environ.copy()
     existing_pythonpath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = str(repo_root) if not existing_pythonpath else f"{repo_root}{os.pathsep}{existing_pythonpath}"
@@ -199,26 +176,46 @@ def run_research_analyzer_cli(
 
 def run_mapper(
     mapper_func: Callable[..., Any],
+    workspace_root: Path,
     latest_reports_dir: Path,
 ) -> Any:
     """
-    Try several likely signatures without modifying production code.
+    Actual repo behavior appears to require `base_dir`.
+    Prefer workspace_root because mapper likely resolves
+    logs/research_reports/latest internally from base_dir.
     """
-    attempts = [
-        {"latest_reports_dir": latest_reports_dir},
-        {"reports_root": latest_reports_dir},
-        {"report_root": latest_reports_dir},
-        {"research_reports_latest_dir": latest_reports_dir},
-        {},
+    attempts: List[Tuple[str, Callable[[], Any]]] = [
+        ("kwargs_base_dir", lambda: call_with_supported_kwargs(mapper_func, base_dir=workspace_root)),
+        ("kwargs_base_dir_str", lambda: call_with_supported_kwargs(mapper_func, base_dir=str(workspace_root))),
+        ("positional_base_dir", lambda: mapper_func(workspace_root)),
+        ("positional_base_dir_str", lambda: mapper_func(str(workspace_root))),
+        (
+            "kwargs_base_dir_latest_reports_dir",
+            lambda: call_with_supported_kwargs(
+                mapper_func,
+                base_dir=workspace_root,
+                latest_reports_dir=latest_reports_dir,
+            ),
+        ),
+        (
+            "kwargs_base_dir_reports_root",
+            lambda: call_with_supported_kwargs(
+                mapper_func,
+                base_dir=workspace_root,
+                reports_root=latest_reports_dir,
+            ),
+        ),
     ]
 
-    last_exc: Optional[Exception] = None
-    for kwargs in attempts:
+    errors: List[str] = []
+    for label, runner in attempts:
         try:
-            return call_with_supported_kwargs(mapper_func, **kwargs)
+            return runner()
         except Exception as exc:
-            last_exc = exc
-    raise RuntimeError(f"Mapper execution failed after all attempts: {last_exc}") from last_exc
+            errors.append(f"{label}: {exc}")
+
+    joined = " | ".join(errors)
+    raise RuntimeError(f"Mapper execution failed after all attempts: {joined}")
 
 
 def run_engine(
@@ -234,24 +231,21 @@ def run_engine(
         {"candidate_payload": mapper_payload},
     ]
 
-    last_exc: Optional[Exception] = None
+    errors: List[str] = []
+
     for kwargs in attempts:
         try:
             return call_with_supported_kwargs(engine_func, **kwargs)
         except Exception as exc:
-            last_exc = exc
+            errors.append(f"kwargs={list(kwargs.keys())}: {exc}")
 
     try:
         return engine_func(mapper_payload)
     except Exception as exc:
-        last_exc = exc
+        errors.append(f"positional_payload: {exc}")
 
-    raise RuntimeError(f"Engine execution failed after all attempts: {last_exc}") from last_exc
+    raise RuntimeError(f"Engine execution failed after all attempts: {' | '.join(errors)}")
 
-
-# ============================================================
-# Extraction helpers
-# ============================================================
 
 def to_plain_data(value: Any) -> Any:
     if isinstance(value, dict):
@@ -354,10 +348,6 @@ def extract_selection_fields(engine_output: Any) -> Dict[str, Any]:
     }
 
 
-# ============================================================
-# Workspace management
-# ============================================================
-
 def reset_workspace(workspace_root: Path) -> None:
     if workspace_root.exists():
         shutil.rmtree(workspace_root)
@@ -370,10 +360,6 @@ def seed_workspace_input(workspace_root: Path, window_rows: List[dict]) -> Path:
     write_jsonl(input_path, window_rows)
     return input_path
 
-
-# ============================================================
-# Markdown output
-# ============================================================
 
 def build_markdown_summary(
     run_id: str,
@@ -416,10 +402,7 @@ def build_markdown_summary(
     lines.append("## Recent Steps")
     for item in step_results[-10:]:
         candidate = " / ".join(
-            [
-                x for x in [item.selected_symbol, item.selected_strategy, item.selected_horizon]
-                if x
-            ]
+            [x for x in [item.selected_symbol, item.selected_strategy, item.selected_horizon] if x]
         ) or "n/a"
         lines.append(
             f"- step={item.step_index}, window={item.window_record_count}, "
@@ -430,10 +413,6 @@ def build_markdown_summary(
     lines.append("")
     return "\n".join(lines)
 
-
-# ============================================================
-# Main runner
-# ============================================================
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Direct historical edge selection diagnosis without replay-ready logs.")
@@ -579,7 +558,11 @@ def main() -> None:
             latest_reports_dir = workspace_root / "logs" / "research_reports" / "latest"
 
             with pushd(workspace_root):
-                mapper_payload = run_mapper(mapper_func, latest_reports_dir)
+                mapper_payload = run_mapper(
+                    mapper_func=mapper_func,
+                    workspace_root=workspace_root,
+                    latest_reports_dir=latest_reports_dir,
+                )
                 engine_output = run_engine(engine_func, mapper_payload)
 
             candidate_seed_count, horizons_with_seed, horizons_without_seed = extract_candidate_seed_info(mapper_payload)
@@ -688,8 +671,7 @@ def main() -> None:
         },
     }
 
-    step_results_jsonl = output_dir / "step_results.jsonl"
-    write_jsonl(step_results_jsonl, [asdict(item) for item in step_results])
+    write_jsonl(output_dir / "step_results.jsonl", [asdict(item) for item in step_results])
     write_json(output_dir / "summary.json", summary)
 
     summary_md = build_markdown_summary(
