@@ -4,7 +4,7 @@ import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional
 
 
 DEFAULT_TARGET_WINDOWS = [3550, 3575, 3600, 3625, 3650]
@@ -102,7 +102,7 @@ def parse_args() -> argparse.Namespace:
         nargs="*",
         type=int,
         default=DEFAULT_TARGET_WINDOWS,
-        help="Target end_record_index_inclusive windows to inspect.",
+        help="Target windows to inspect. Supports either end_record_index_inclusive or record-count style inputs.",
     )
     parser.add_argument(
         "--output-dir",
@@ -129,15 +129,33 @@ def main() -> None:
     rows = load_jsonl(step_results_path)
     indexed_rows = index_rows_by_window(rows)
 
-    targets = []
-    missing_windows = []
-    for window in args.windows:
-        row = indexed_rows.get(window)
-        if row is None:
-            missing_windows.append(window)
+    targets: List[StepSnapshot] = []
+    missing_windows: List[int] = []
+    resolved_window_map: List[Dict[str, Any]] = []
+
+    for requested_window in args.windows:
+        resolved_window, resolution_mode = resolve_window_key(requested_window, indexed_rows)
+        if resolved_window is None:
+            missing_windows.append(requested_window)
+            resolved_window_map.append(
+                {
+                    "requested_window": requested_window,
+                    "resolved_window": None,
+                    "resolution_mode": "missing",
+                }
+            )
             continue
+
+        row = indexed_rows[resolved_window]
         snapshot = build_step_snapshot(row)
         targets.append(snapshot)
+        resolved_window_map.append(
+            {
+                "requested_window": requested_window,
+                "resolved_window": resolved_window,
+                "resolution_mode": resolution_mode,
+            }
+        )
 
     comparison_groups = build_comparison_groups(targets)
     explanations = build_explanations(comparison_groups)
@@ -148,6 +166,7 @@ def main() -> None:
             "step_results_path": str(step_results_path),
             "target_windows": args.windows,
             "resolved_windows": [s.end_record_index_inclusive for s in targets],
+            "resolved_window_map": resolved_window_map,
             "missing_windows": missing_windows,
         },
         "snapshots": [s.to_dict() for s in targets],
@@ -170,6 +189,7 @@ def main() -> None:
             "json_report": str(json_path),
             "markdown_report": str(md_path),
             "resolved_windows": [s.end_record_index_inclusive for s in targets],
+            "resolved_window_map": resolved_window_map,
             "missing_windows": missing_windows,
         },
         indent=2,
@@ -231,6 +251,17 @@ def index_rows_by_window(rows: Iterable[Dict[str, Any]]) -> Dict[int, Dict[str, 
         if isinstance(window, int):
             indexed[window] = row
     return indexed
+
+
+def resolve_window_key(requested_window: int, indexed_rows: Dict[int, Dict[str, Any]]) -> tuple[Optional[int], str]:
+    if requested_window in indexed_rows:
+        return requested_window, "exact"
+
+    off_by_one = requested_window - 1
+    if off_by_one in indexed_rows:
+        return off_by_one, "record_count_to_inclusive_index"
+
+    return None, "missing"
 
 
 def load_json_file(path: Path) -> Dict[str, Any]:
@@ -620,8 +651,7 @@ def build_explanations(comparison_groups: List[Dict[str, Any]]) -> List[str]:
 
         lines: List[str] = []
         lines.append(
-            f"Window {selected_window} -> {abstain_window}: "
-            f"the system moves from selected to abstain because the load-bearing state weakens."
+            f"Window {selected_window} -> {abstain_window}: the system moves from selected to abstain because the load-bearing state weakens."
         )
 
         if "horizons_with_seed" in diffs:
@@ -636,9 +666,8 @@ def build_explanations(comparison_groups: List[Dict[str, Any]]) -> List[str]:
             )
         if "selected_stability_label" in diffs:
             lines.append(
-                f"- selected_stability_label downgrades from "
-                f"{format_value(diffs['selected_stability_label']['selected'])} to "
-                f"{format_value(diffs['selected_stability_label']['abstain'])}."
+                f"- selected_stability_label downgrades from {format_value(diffs['selected_stability_label']['selected'])} "
+                f"to {format_value(diffs['selected_stability_label']['abstain'])}."
             )
         if "candidate_status" in diffs:
             lines.append(
@@ -708,6 +737,7 @@ def render_markdown(report: Dict[str, Any]) -> str:
     lines.append(f"- step_results_path: `{metadata['step_results_path']}`")
     lines.append(f"- target_windows: `{metadata['target_windows']}`")
     lines.append(f"- resolved_windows: `{metadata['resolved_windows']}`")
+    lines.append(f"- resolved_window_map: `{metadata['resolved_window_map']}`")
     lines.append(f"- missing_windows: `{metadata['missing_windows']}`")
     lines.append("")
 
@@ -763,9 +793,7 @@ def render_markdown(report: Dict[str, Any]) -> str:
         lines.append("- No comparison groups generated.")
     else:
         for group in comparison_groups:
-            lines.append(
-                f"### selected {group['selected_window']} vs abstain {group['abstain_window']}"
-            )
+            lines.append(f"### selected {group['selected_window']} vs abstain {group['abstain_window']}")
             lines.append(f"- selected_identity: `{group['selected_identity']}`")
             lines.append(f"- abstain_identity: `{group['abstain_identity']}`")
             lines.append("")
