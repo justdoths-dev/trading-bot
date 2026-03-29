@@ -6,7 +6,6 @@ import inspect
 import json
 import os
 import shutil
-import subprocess
 import sys
 import traceback
 from contextlib import contextmanager
@@ -15,8 +14,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+from src.research.research_analyzer import run_research_analyzer
 
-RUNNER_VERSION = "historical_direct_edge_selection_diagnosis_v4"
+
+RUNNER_VERSION = "historical_direct_edge_selection_diagnosis_v5"
 
 
 @dataclass
@@ -158,26 +159,6 @@ def resolve_comparison_pipeline_callable() -> Tuple[str, str, Callable[..., Any]
         ("src.research.run_comparison_pipeline", "run_comparison_pipeline"),
     ]
     return import_first_available(candidates)
-
-
-def run_research_analyzer_cli(
-    repo_root: Path,
-    workspace_root: Path,
-    python_executable: str,
-) -> subprocess.CompletedProcess:
-    env = os.environ.copy()
-    existing_pythonpath = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = str(repo_root) if not existing_pythonpath else f"{repo_root}{os.pathsep}{existing_pythonpath}"
-
-    cmd = [python_executable, "-m", "src.research.research_analyzer"]
-    return subprocess.run(
-        cmd,
-        cwd=str(workspace_root),
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
 
 
 def run_comparison_pipeline_step(
@@ -462,7 +443,7 @@ def main() -> None:
     parser.add_argument(
         "--python-executable",
         default=sys.executable,
-        help="Python executable used to invoke the research analyzer CLI.",
+        help="Reserved for compatibility. Analyzer now runs directly in-process.",
     )
     args = parser.parse_args()
 
@@ -523,6 +504,7 @@ def main() -> None:
             "mapper": f"{mapper_module}.{mapper_attr}",
             "engine": f"{engine_module}.{engine_attr}",
             "comparison_pipeline": f"{comparison_module}.{comparison_attr}",
+            "research_analyzer": "src.research.research_analyzer.run_research_analyzer",
         },
         "planned_steps": len(planned_indices),
         "total_records": total_records,
@@ -534,19 +516,18 @@ def main() -> None:
         window_count = len(window_rows)
 
         reset_workspace(workspace_root)
-        seed_workspace_input(workspace_root, window_rows)
-
-        analyzer_proc = run_research_analyzer_cli(
-            repo_root=repo_root,
-            workspace_root=workspace_root,
-            python_executable=args.python_executable,
-        )
-
+        seeded_input_path = seed_workspace_input(workspace_root, window_rows)
         raw_output_path = raw_steps_dir / f"step_{step_index:05d}.json"
 
-        if analyzer_proc.returncode != 0:
+        try:
+            analyzer_output = run_research_analyzer(
+                input_path=seeded_input_path,
+                output_dir=workspace_root / "logs" / "research_reports" / "latest",
+            )
+        except Exception as exc:
             error_count += 1
             status_counts["error"] = status_counts.get("error", 0) + 1
+            tb = traceback.format_exc()
             result = StepResult(
                 step_index=step_index,
                 window_record_count=window_count,
@@ -561,18 +542,15 @@ def main() -> None:
                 horizons_without_seed=[],
                 ranking_count=None,
                 raw_output_path=str(raw_output_path),
-                error=analyzer_proc.stderr[-4000:] if analyzer_proc.stderr else "research_analyzer_failed",
+                error=str(exc),
             )
             write_json(
                 raw_output_path,
                 {
                     "step_index": step_index,
                     "window_record_count": window_count,
-                    "research_analyzer": {
-                        "returncode": analyzer_proc.returncode,
-                        "stdout_tail": analyzer_proc.stdout[-4000:] if analyzer_proc.stdout else "",
-                        "stderr_tail": analyzer_proc.stderr[-4000:] if analyzer_proc.stderr else "",
-                    },
+                    "error": str(exc),
+                    "traceback": tb,
                     "result": asdict(result),
                 },
             )
@@ -636,6 +614,7 @@ def main() -> None:
                 {
                     "step_index": step_index,
                     "window_record_count": window_count,
+                    "analyzer_output": to_plain_data(analyzer_output),
                     "comparison_pipeline_output": to_plain_data(comparison_pipeline_output),
                     "mapper_payload": to_plain_data(mapper_payload),
                     "engine_output": to_plain_data(engine_output),
@@ -700,6 +679,7 @@ def main() -> None:
             "mapper": f"{mapper_module}.{mapper_attr}",
             "engine": f"{engine_module}.{engine_attr}",
             "comparison_pipeline": f"{comparison_module}.{comparison_attr}",
+            "research_analyzer": "src.research.research_analyzer.run_research_analyzer",
         },
     }
 
