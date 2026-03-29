@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 
-RUNNER_VERSION = "historical_direct_edge_selection_diagnosis_v2"
+RUNNER_VERSION = "historical_direct_edge_selection_diagnosis_v3"
 
 
 @dataclass
@@ -131,7 +131,6 @@ def call_with_supported_kwargs(func: Callable[..., Any], **kwargs: Any) -> Any:
     for name in sig.parameters.keys():
         if name in kwargs:
             accepted[name] = kwargs[name]
-
     return func(**accepted)
 
 
@@ -177,34 +176,28 @@ def run_research_analyzer_cli(
 def run_mapper(
     mapper_func: Callable[..., Any],
     workspace_root: Path,
-    latest_reports_dir: Path,
 ) -> Any:
     """
-    Actual repo behavior appears to require `base_dir`.
-    Prefer workspace_root because mapper likely resolves
-    logs/research_reports/latest internally from base_dir.
+    Mapper expects base_dir that resolves:
+      latest/summary.json
+      comparison/summary.json
+      edge_scores/summary.json
+      score_drift/summary.json
+
+    Therefore the correct base_dir is most likely:
+      workspace_root / logs / research_reports
     """
+    reports_base_dir = workspace_root / "logs" / "research_reports"
+
     attempts: List[Tuple[str, Callable[[], Any]]] = [
-        ("kwargs_base_dir", lambda: call_with_supported_kwargs(mapper_func, base_dir=workspace_root)),
-        ("kwargs_base_dir_str", lambda: call_with_supported_kwargs(mapper_func, base_dir=str(workspace_root))),
-        ("positional_base_dir", lambda: mapper_func(workspace_root)),
-        ("positional_base_dir_str", lambda: mapper_func(str(workspace_root))),
-        (
-            "kwargs_base_dir_latest_reports_dir",
-            lambda: call_with_supported_kwargs(
-                mapper_func,
-                base_dir=workspace_root,
-                latest_reports_dir=latest_reports_dir,
-            ),
-        ),
-        (
-            "kwargs_base_dir_reports_root",
-            lambda: call_with_supported_kwargs(
-                mapper_func,
-                base_dir=workspace_root,
-                reports_root=latest_reports_dir,
-            ),
-        ),
+        ("kwargs_base_dir_reports_root_path", lambda: call_with_supported_kwargs(mapper_func, base_dir=reports_base_dir)),
+        ("kwargs_base_dir_reports_root_str", lambda: call_with_supported_kwargs(mapper_func, base_dir=str(reports_base_dir))),
+        ("positional_reports_root_path", lambda: mapper_func(reports_base_dir)),
+        ("positional_reports_root_str", lambda: mapper_func(str(reports_base_dir))),
+        ("kwargs_workspace_root_path", lambda: call_with_supported_kwargs(mapper_func, base_dir=workspace_root)),
+        ("kwargs_workspace_root_str", lambda: call_with_supported_kwargs(mapper_func, base_dir=str(workspace_root))),
+        ("positional_workspace_root_path", lambda: mapper_func(workspace_root)),
+        ("positional_workspace_root_str", lambda: mapper_func(str(workspace_root))),
     ]
 
     errors: List[str] = []
@@ -271,14 +264,17 @@ def extract_candidate_seed_info(mapper_payload: Any) -> Tuple[Optional[int], Lis
 
     candidate_seed_count = safe_int(payload.get("candidate_seed_count"))
 
+    diagnostics = payload.get("candidate_seed_diagnostics") or {}
     horizons_with_seed = normalize_list(
         payload.get("horizons_with_seed")
         or payload.get("seeded_horizons")
         or payload.get("visible_horizons")
+        or diagnostics.get("horizons_with_seed")
     )
     horizons_without_seed = normalize_list(
         payload.get("horizons_without_seed")
         or payload.get("missing_seed_horizons")
+        or diagnostics.get("horizons_without_seed")
     )
 
     return candidate_seed_count, horizons_with_seed, horizons_without_seed
@@ -302,16 +298,21 @@ def extract_selection_fields(engine_output: Any) -> Dict[str, Any]:
         or data.get("result")
         or "unknown"
     )
+
+    reason_codes = data.get("reason_codes")
+    selection_explanation = data.get("selection_explanation")
     reason = (
         data.get("reason")
         or data.get("abstain_reason")
         or data.get("selection_reason")
+        or (reason_codes[0] if isinstance(reason_codes, list) and reason_codes else None)
+        or selection_explanation
         or "unknown"
     )
 
-    selected_symbol = None
-    selected_strategy = None
-    selected_horizon = None
+    selected_symbol = data.get("selected_symbol")
+    selected_strategy = data.get("selected_strategy")
+    selected_horizon = data.get("selected_horizon")
 
     selected_block = (
         data.get("selected_candidate")
@@ -320,9 +321,9 @@ def extract_selection_fields(engine_output: Any) -> Dict[str, Any]:
     )
 
     if isinstance(selected_block, dict):
-        selected_symbol = selected_block.get("symbol")
-        selected_strategy = selected_block.get("strategy")
-        selected_horizon = selected_block.get("horizon") or selected_block.get("timeframe")
+        selected_symbol = selected_symbol or selected_block.get("symbol")
+        selected_strategy = selected_strategy or selected_block.get("strategy")
+        selected_horizon = selected_horizon or selected_block.get("horizon") or selected_block.get("timeframe")
 
     if selected_symbol is None:
         ranking = data.get("ranking") or data.get("ranked_candidates") or []
@@ -369,8 +370,10 @@ def build_markdown_summary(
     total_steps: int,
     selected_count: int,
     abstain_count: int,
+    blocked_count: int,
     error_count: int,
     selection_rate: float,
+    status_counts: Dict[str, int],
     top_selected_candidates: List[Tuple[str, int]],
     step_results: List[StepResult],
 ) -> str:
@@ -389,8 +392,13 @@ def build_markdown_summary(
     lines.append(f"- total_steps: {total_steps}")
     lines.append(f"- selected_count: {selected_count}")
     lines.append(f"- abstain_count: {abstain_count}")
+    lines.append(f"- blocked_count: {blocked_count}")
     lines.append(f"- error_count: {error_count}")
     lines.append(f"- selection_rate: {selection_rate:.4f}")
+    lines.append("")
+    lines.append("## Status Counts")
+    for key, value in sorted(status_counts.items()):
+        lines.append(f"- {key}: {value}")
     lines.append("")
     lines.append("## Top Selected Candidates")
     if top_selected_candidates:
@@ -477,7 +485,9 @@ def main() -> None:
     selected_counter: Dict[str, int] = {}
     selected_count = 0
     abstain_count = 0
+    blocked_count = 0
     error_count = 0
+    status_counts: Dict[str, int] = {}
 
     planned_indices = list(range(args.warmup_records, total_records + 1, args.step_size))
     if planned_indices[-1] != total_records:
@@ -522,6 +532,7 @@ def main() -> None:
 
         if analyzer_proc.returncode != 0:
             error_count += 1
+            status_counts["error"] = status_counts.get("error", 0) + 1
             result = StepResult(
                 step_index=step_index,
                 window_record_count=window_count,
@@ -555,13 +566,10 @@ def main() -> None:
             continue
 
         try:
-            latest_reports_dir = workspace_root / "logs" / "research_reports" / "latest"
-
             with pushd(workspace_root):
                 mapper_payload = run_mapper(
                     mapper_func=mapper_func,
                     workspace_root=workspace_root,
-                    latest_reports_dir=latest_reports_dir,
                 )
                 engine_output = run_engine(engine_func, mapper_payload)
 
@@ -570,6 +578,8 @@ def main() -> None:
 
             status = selection_fields["selection_status"]
             reason = selection_fields["reason"]
+
+            status_counts[status] = status_counts.get(status, 0) + 1
 
             if status == "selected":
                 selected_count += 1
@@ -586,6 +596,8 @@ def main() -> None:
                 selected_counter[candidate_name] = selected_counter.get(candidate_name, 0) + 1
             elif status == "abstain":
                 abstain_count += 1
+            elif status == "blocked":
+                blocked_count += 1
 
             result = StepResult(
                 step_index=step_index,
@@ -618,6 +630,7 @@ def main() -> None:
 
         except Exception as exc:
             error_count += 1
+            status_counts["error"] = status_counts.get("error", 0) + 1
             tb = traceback.format_exc()
             result = StepResult(
                 step_index=step_index,
@@ -660,8 +673,10 @@ def main() -> None:
         "total_steps": total_steps,
         "selected_count": selected_count,
         "abstain_count": abstain_count,
+        "blocked_count": blocked_count,
         "error_count": error_count,
         "selection_rate": selection_rate,
+        "status_counts": status_counts,
         "top_selected_candidates": [
             {"candidate": name, "count": count} for name, count in top_selected_candidates[:20]
         ],
@@ -682,8 +697,10 @@ def main() -> None:
         total_steps=total_steps,
         selected_count=selected_count,
         abstain_count=abstain_count,
+        blocked_count=blocked_count,
         error_count=error_count,
         selection_rate=selection_rate,
+        status_counts=status_counts,
         top_selected_candidates=top_selected_candidates,
         step_results=step_results,
     )
