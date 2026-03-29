@@ -378,43 +378,93 @@ def to_int(value: Any) -> Optional[int]:
         return None
 
 
-def extract_ranking_candidates(raw_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    ranking = coalesce(
-        raw_payload.get("ranking"),
-        raw_payload.get("candidate_rankings"),
-        recursive_find_first(raw_payload, "ranking"),
-        recursive_find_first(raw_payload, "candidate_rankings"),
+def horizon_sort_key(value: str) -> int:
+    order = {"15m": 0, "1h": 1, "4h": 2}
+    return order.get(value, 999)
+
+
+def candidate_symbol(candidate: Dict[str, Any]) -> Optional[str]:
+    return coalesce(
+        candidate.get("symbol"),
+        recursive_find_first(candidate, "symbol"),
     )
+
+
+def candidate_strategy(candidate: Dict[str, Any]) -> Optional[str]:
+    return coalesce(
+        candidate.get("strategy"),
+        recursive_find_first(candidate, "strategy"),
+    )
+
+
+def candidate_horizon(candidate: Dict[str, Any]) -> Optional[str]:
+    value = coalesce(
+        candidate.get("horizon"),
+        recursive_find_first(candidate, "horizon"),
+    )
+    return str(value) if value is not None else None
+
+
+def extract_engine_ranking(raw_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    engine_output = raw_payload.get("engine_output")
+    if not isinstance(engine_output, dict):
+        return []
+
+    ranking = engine_output.get("ranking")
     if isinstance(ranking, list):
         return [item for item in ranking if isinstance(item, dict)]
     return []
 
 
-def extract_selected_candidate(raw_payload: Dict[str, Any], row: Dict[str, Any]) -> Dict[str, Any]:
-    explicit_selected = coalesce(
-        raw_payload.get("selected_candidate"),
-        recursive_find_first(raw_payload, "selected_candidate"),
-    )
-    if isinstance(explicit_selected, dict):
-        return explicit_selected
+def extract_mapper_candidates(raw_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    mapper_payload = raw_payload.get("mapper_payload")
+    if not isinstance(mapper_payload, dict):
+        return []
 
-    ranking = extract_ranking_candidates(raw_payload)
-    if not ranking:
+    candidates = mapper_payload.get("candidates")
+    if isinstance(candidates, list):
+        return [item for item in candidates if isinstance(item, dict)]
+    return []
+
+
+def extract_abstain_top_candidate(raw_payload: Dict[str, Any]) -> Dict[str, Any]:
+    engine_output = raw_payload.get("engine_output")
+    if not isinstance(engine_output, dict):
         return {}
 
-    row_symbol = row.get("selected_symbol")
-    row_strategy = row.get("selected_strategy")
-    row_horizon = row.get("selected_horizon")
+    abstain_diagnosis = engine_output.get("abstain_diagnosis")
+    if not isinstance(abstain_diagnosis, dict):
+        return {}
 
-    for candidate in ranking:
-        if (
-            candidate.get("symbol") == row_symbol
-            and candidate.get("strategy") == row_strategy
-            and candidate.get("horizon") == row_horizon
-        ):
-            return candidate
+    top_candidate = abstain_diagnosis.get("top_candidate")
+    if isinstance(top_candidate, dict):
+        return top_candidate
+    return {}
 
-    return ranking[0]
+
+def extract_selected_candidate(raw_payload: Dict[str, Any], row: Dict[str, Any]) -> Dict[str, Any]:
+    engine_output = raw_payload.get("engine_output")
+    if isinstance(engine_output, dict):
+        ranking = engine_output.get("ranking")
+        if isinstance(ranking, list):
+            row_symbol = row.get("selected_symbol") or engine_output.get("selected_symbol")
+            row_strategy = row.get("selected_strategy") or engine_output.get("selected_strategy")
+            row_horizon = row.get("selected_horizon") or engine_output.get("selected_horizon")
+
+            for candidate in ranking:
+                if not isinstance(candidate, dict):
+                    continue
+                if (
+                    candidate_symbol(candidate) == row_symbol
+                    and candidate_strategy(candidate) == row_strategy
+                    and candidate_horizon(candidate) == row_horizon
+                ):
+                    return candidate
+
+            if ranking and isinstance(ranking[0], dict):
+                return ranking[0]
+
+    return {}
 
 
 def find_candidates_for_identity(
@@ -424,33 +474,51 @@ def find_candidates_for_identity(
 ) -> List[Dict[str, Any]]:
     matched: List[Dict[str, Any]] = []
     for candidate in candidates:
-        if candidate.get("symbol") == symbol and candidate.get("strategy") == strategy:
+        if candidate_symbol(candidate) == symbol and candidate_strategy(candidate) == strategy:
             matched.append(candidate)
     return matched
 
 
-def choose_primary_tracked_candidate(
-    matched_candidates: List[Dict[str, Any]],
-    row: Dict[str, Any],
+def choose_primary_engine_candidate(
+    engine_candidates: List[Dict[str, Any]],
+    abstain_top_candidate: Dict[str, Any],
     selected_candidate: Dict[str, Any],
-    symbol: str,
-    strategy: str,
+    tracked_symbol: str,
+    tracked_strategy: str,
 ) -> Dict[str, Any]:
-    if selected_candidate.get("symbol") == symbol and selected_candidate.get("strategy") == strategy:
-        return selected_candidate
+    if selected_candidate:
+        if candidate_symbol(selected_candidate) == tracked_symbol and candidate_strategy(selected_candidate) == tracked_strategy:
+            return selected_candidate
 
-    selected_horizon = row.get("selected_horizon")
-    if selected_horizon is not None:
-        for candidate in matched_candidates:
-            if candidate.get("horizon") == selected_horizon:
-                return candidate
+    matched_engine = find_candidates_for_identity(engine_candidates, tracked_symbol, tracked_strategy)
+    if matched_engine:
+        for preferred_horizon in ["4h", "1h", "15m"]:
+            for candidate in matched_engine:
+                if candidate_horizon(candidate) == preferred_horizon:
+                    return candidate
+        return matched_engine[0]
+
+    if abstain_top_candidate:
+        if candidate_symbol(abstain_top_candidate) == tracked_symbol and candidate_strategy(abstain_top_candidate) == tracked_strategy:
+            return abstain_top_candidate
+
+    return {}
+
+
+def choose_primary_mapper_candidate(
+    mapper_candidates: List[Dict[str, Any]],
+    tracked_symbol: str,
+    tracked_strategy: str,
+) -> Dict[str, Any]:
+    matched = find_candidates_for_identity(mapper_candidates, tracked_symbol, tracked_strategy)
+    if not matched:
+        return {}
 
     for preferred_horizon in ["4h", "1h", "15m"]:
-        for candidate in matched_candidates:
-            if candidate.get("horizon") == preferred_horizon:
+        for candidate in matched:
+            if candidate_horizon(candidate) == preferred_horizon:
                 return candidate
-
-    return matched_candidates[0] if matched_candidates else {}
+    return matched[0]
 
 
 def build_continuity_row(
@@ -463,28 +531,36 @@ def build_continuity_row(
     if isinstance(raw_output_path_value, str) and raw_output_path_value:
         raw_payload = load_json_file(Path(raw_output_path_value))
 
-    ranking_candidates = extract_ranking_candidates(raw_payload)
+    mapper_candidates = extract_mapper_candidates(raw_payload)
+    engine_ranking = extract_engine_ranking(raw_payload)
+    abstain_top_candidate = extract_abstain_top_candidate(raw_payload)
     selected_candidate = extract_selected_candidate(raw_payload, row)
 
-    matched_candidates = find_candidates_for_identity(
-        ranking_candidates,
+    matched_mapper_candidates = find_candidates_for_identity(
+        mapper_candidates,
         symbol=tracked_symbol,
         strategy=tracked_strategy,
     )
 
-    primary_candidate = choose_primary_tracked_candidate(
-        matched_candidates=matched_candidates,
-        row=row,
+    mapper_primary_candidate = choose_primary_mapper_candidate(
+        mapper_candidates=mapper_candidates,
+        tracked_symbol=tracked_symbol,
+        tracked_strategy=tracked_strategy,
+    )
+
+    primary_engine_candidate = choose_primary_engine_candidate(
+        engine_candidates=engine_ranking,
+        abstain_top_candidate=abstain_top_candidate,
         selected_candidate=selected_candidate,
-        symbol=tracked_symbol,
-        strategy=tracked_strategy,
+        tracked_symbol=tracked_symbol,
+        tracked_strategy=tracked_strategy,
     )
 
     horizons_present_for_identity = sorted(
         {
-            str(candidate.get("horizon"))
-            for candidate in matched_candidates
-            if candidate.get("horizon") is not None
+            candidate_horizon(candidate)
+            for candidate in matched_mapper_candidates
+            if candidate_horizon(candidate) is not None
         },
         key=lambda value: horizon_sort_key(value),
     )
@@ -492,62 +568,78 @@ def build_continuity_row(
     has_1h_seed = "1h" in horizons_present_for_identity
     has_4h_seed = "4h" in horizons_present_for_identity
 
-    tracked_candidate_present = bool(primary_candidate)
+    tracked_candidate_present = bool(matched_mapper_candidates or primary_engine_candidate)
 
-    tracked_candidate_horizon = (
-        str(primary_candidate.get("horizon"))
-        if primary_candidate.get("horizon") is not None
-        else None
-    )
+    tracked_candidate_horizon = candidate_horizon(primary_engine_candidate) or candidate_horizon(mapper_primary_candidate)
 
     tracked_candidate_status = coalesce(
-        primary_candidate.get("candidate_status"),
-        primary_candidate.get("status"),
-        recursive_find_first(primary_candidate, "candidate_status"),
+        primary_engine_candidate.get("candidate_status"),
+        primary_engine_candidate.get("status"),
+        recursive_find_first(primary_engine_candidate, "candidate_status"),
     )
 
     tracked_candidate_stability_label = coalesce(
-        primary_candidate.get("selected_stability_label"),
-        primary_candidate.get("stability_label"),
-        recursive_find_first(primary_candidate, "selected_stability_label"),
-        recursive_find_first(primary_candidate, "stability_label"),
+        primary_engine_candidate.get("selected_stability_label"),
+        primary_engine_candidate.get("stability_label"),
+        recursive_find_first(primary_engine_candidate, "selected_stability_label"),
+        recursive_find_first(primary_engine_candidate, "stability_label"),
+        mapper_primary_candidate.get("selected_stability_label"),
+        mapper_primary_candidate.get("stability_label"),
+        recursive_find_first(mapper_primary_candidate, "selected_stability_label"),
+        recursive_find_first(mapper_primary_candidate, "stability_label"),
     )
 
     tracked_candidate_visible_horizons = normalize_string_list(coalesce(
-        primary_candidate.get("selected_visible_horizons"),
-        primary_candidate.get("visible_horizons"),
-        recursive_find_first(primary_candidate, "selected_visible_horizons"),
-        recursive_find_first(primary_candidate, "visible_horizons"),
+        primary_engine_candidate.get("selected_visible_horizons"),
+        primary_engine_candidate.get("visible_horizons"),
+        recursive_find_first(primary_engine_candidate, "selected_visible_horizons"),
+        recursive_find_first(primary_engine_candidate, "visible_horizons"),
+        mapper_primary_candidate.get("selected_visible_horizons"),
+        mapper_primary_candidate.get("visible_horizons"),
+        recursive_find_first(mapper_primary_candidate, "selected_visible_horizons"),
+        recursive_find_first(mapper_primary_candidate, "visible_horizons"),
     ))
 
     tracked_candidate_reason_codes = normalize_reason_codes(coalesce(
-        primary_candidate.get("reason_codes"),
-        recursive_find_first(primary_candidate, "reason_codes"),
+        primary_engine_candidate.get("reason_codes"),
+        recursive_find_first(primary_engine_candidate, "reason_codes"),
+        abstain_top_candidate.get("reason_codes"),
+        recursive_find_first(abstain_top_candidate, "reason_codes"),
     ))
 
     tracked_candidate_gate_diagnostics = normalize_gate_diagnostics(coalesce(
-        primary_candidate.get("gate_diagnostics"),
-        recursive_find_first(primary_candidate, "gate_diagnostics"),
+        primary_engine_candidate.get("gate_diagnostics"),
+        recursive_find_first(primary_engine_candidate, "gate_diagnostics"),
+        abstain_top_candidate.get("gate_diagnostics"),
+        recursive_find_first(abstain_top_candidate, "gate_diagnostics"),
     ))
 
     tracked_candidate_aggregate_score = to_float(coalesce(
-        primary_candidate.get("aggregate_score"),
-        recursive_find_first(primary_candidate, "aggregate_score"),
+        primary_engine_candidate.get("aggregate_score"),
+        recursive_find_first(primary_engine_candidate, "aggregate_score"),
+        abstain_top_candidate.get("aggregate_score"),
+        recursive_find_first(abstain_top_candidate, "aggregate_score"),
     ))
 
     tracked_candidate_sample_count = to_int(coalesce(
-        primary_candidate.get("sample_count"),
-        recursive_find_first(primary_candidate, "sample_count"),
+        primary_engine_candidate.get("sample_count"),
+        recursive_find_first(primary_engine_candidate, "sample_count"),
+        abstain_top_candidate.get("sample_count"),
+        recursive_find_first(abstain_top_candidate, "sample_count"),
     ))
 
     tracked_candidate_positive_rate_pct = to_float(coalesce(
-        primary_candidate.get("positive_rate_pct"),
-        recursive_find_first(primary_candidate, "positive_rate_pct"),
+        primary_engine_candidate.get("positive_rate_pct"),
+        recursive_find_first(primary_engine_candidate, "positive_rate_pct"),
+        abstain_top_candidate.get("positive_rate_pct"),
+        recursive_find_first(abstain_top_candidate, "positive_rate_pct"),
     ))
 
     tracked_candidate_robustness_signal_pct = to_float(coalesce(
-        primary_candidate.get("robustness_signal_pct"),
-        recursive_find_first(primary_candidate, "robustness_signal_pct"),
+        primary_engine_candidate.get("robustness_signal_pct"),
+        recursive_find_first(primary_engine_candidate, "robustness_signal_pct"),
+        abstain_top_candidate.get("robustness_signal_pct"),
+        recursive_find_first(abstain_top_candidate, "robustness_signal_pct"),
     ))
 
     candidate_seed_count = to_int(coalesce(
@@ -565,6 +657,23 @@ def build_continuity_row(
         recursive_find_first(raw_payload, "horizons_without_seed"),
     ))
 
+    engine_output = raw_payload.get("engine_output")
+    selected_symbol = coalesce(
+        row.get("selected_symbol"),
+        engine_output.get("selected_symbol") if isinstance(engine_output, dict) else None,
+        candidate_symbol(selected_candidate),
+    )
+    selected_strategy = coalesce(
+        row.get("selected_strategy"),
+        engine_output.get("selected_strategy") if isinstance(engine_output, dict) else None,
+        candidate_strategy(selected_candidate),
+    )
+    selected_horizon = coalesce(
+        row.get("selected_horizon"),
+        engine_output.get("selected_horizon") if isinstance(engine_output, dict) else None,
+        candidate_horizon(selected_candidate),
+    )
+
     return ContinuityRow(
         step_index=to_int(row.get("step_index")),
         end_record_index_inclusive=to_int(row.get("end_record_index_inclusive")),
@@ -581,18 +690,9 @@ def build_continuity_row(
         has_1h_seed=has_1h_seed,
         has_4h_seed=has_4h_seed,
         horizons_present_for_identity=horizons_present_for_identity,
-        selected_symbol=coalesce(
-            row.get("selected_symbol"),
-            recursive_find_first(selected_candidate, "symbol"),
-        ),
-        selected_strategy=coalesce(
-            row.get("selected_strategy"),
-            recursive_find_first(selected_candidate, "strategy"),
-        ),
-        selected_horizon=coalesce(
-            row.get("selected_horizon"),
-            recursive_find_first(selected_candidate, "horizon"),
-        ),
+        selected_symbol=selected_symbol,
+        selected_strategy=selected_strategy,
+        selected_horizon=selected_horizon,
         tracked_candidate_present=tracked_candidate_present,
         tracked_candidate_horizon=tracked_candidate_horizon,
         tracked_candidate_status=tracked_candidate_status,
@@ -609,11 +709,6 @@ def build_continuity_row(
         horizons_without_seed=horizons_without_seed,
         raw_output_path=raw_output_path_value if isinstance(raw_output_path_value, str) else None,
     )
-
-
-def horizon_sort_key(value: str) -> int:
-    order = {"15m": 0, "1h": 1, "4h": 2}
-    return order.get(value, 999)
 
 
 def build_summary(
@@ -831,9 +926,7 @@ def render_markdown(report: Dict[str, Any]) -> str:
         lines.append("- No continuity state transitions detected.")
     else:
         for item in transitions:
-            lines.append(
-                f"### {item['from_window']} -> {item['to_window']}"
-            )
+            lines.append(f"### {item['from_window']} -> {item['to_window']}")
             lines.append(f"- from_state: `{item['from_state']}`")
             lines.append(f"- to_state: `{item['to_state']}`")
             lines.append(f"- selection_change: `{item['selection_change']}`")
