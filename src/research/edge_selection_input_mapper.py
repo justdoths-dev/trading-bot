@@ -233,12 +233,20 @@ def _build_candidate_seeds(
     *,
     comparison_summary: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    has_edge_candidate_rows_block = isinstance(latest_summary.get("edge_candidate_rows"), dict)
     edge_candidate_rows = _coerce_dict(latest_summary.get("edge_candidate_rows"))
     raw_rows = edge_candidate_rows.get("rows")
     rows = [row for row in raw_rows if isinstance(row, dict)] if isinstance(raw_rows, list) else []
 
     if not rows:
-        return _build_legacy_candidate_seeds(comparison_summary)
+        if not has_edge_candidate_rows_block:
+            return _build_legacy_candidate_seeds(comparison_summary)
+
+        diagnostics = _build_empty_joined_row_diagnostics(
+            fallback_blocked=True,
+            fallback_block_reason="JOINED_EDGE_CANDIDATE_ROWS_PRESENT_BUT_EMPTY",
+        )
+        return [], diagnostics
 
     seeds: list[dict[str, Any]] = []
     dropped_rows: list[dict[str, Any]] = []
@@ -292,14 +300,49 @@ def _build_candidate_seeds(
         "dropped_candidate_row_count": len(dropped_rows),
         "dropped_candidate_row_reasons": dropped_reason_counts,
         "dropped_candidate_rows": dropped_rows,
-        "horizons_with_seed": sorted({str(seed.get("horizon")) for seed in seeds if seed.get("horizon") is not None}),
+        "horizons_with_seed": sorted(
+            {str(seed.get("horizon")) for seed in seeds if seed.get("horizon") is not None}
+        ),
         "horizons_without_seed": [
             horizon for horizon in sorted(VALID_HORIZONS)
             if not any(seed.get("horizon") == horizon for seed in seeds)
         ],
         "horizon_diagnostics": horizon_diagnostics,
+        "synthetic_seed_mode": False,
+        "fallback_blocked": False,
+        "fallback_block_reason": None,
     }
     return seeds, diagnostics
+
+
+def _build_empty_joined_row_diagnostics(
+    *,
+    fallback_blocked: bool,
+    fallback_block_reason: str | None,
+) -> dict[str, Any]:
+    return {
+        "seed_source": "latest.edge_candidate_rows",
+        "joined_candidate_row_count": 0,
+        "candidate_seed_count": 0,
+        "dropped_candidate_row_count": 0,
+        "dropped_candidate_row_reasons": {},
+        "dropped_candidate_rows": [],
+        "horizons_with_seed": [],
+        "horizons_without_seed": sorted(VALID_HORIZONS),
+        "horizon_diagnostics": [
+            {
+                "horizon": horizon,
+                "joined_candidate_rows_seen": 0,
+                "seed_generated_count": 0,
+                "dropped_count": 0,
+                "seed_generated": False,
+            }
+            for horizon in sorted(VALID_HORIZONS)
+        ],
+        "synthetic_seed_mode": False,
+        "fallback_blocked": fallback_blocked,
+        "fallback_block_reason": fallback_block_reason,
+    }
 
 
 def _build_legacy_candidate_seeds(
@@ -357,6 +400,9 @@ def _build_legacy_candidate_seeds(
             }
             for horizon in sorted(VALID_HORIZONS)
         ],
+        "synthetic_seed_mode": True,
+        "fallback_blocked": False,
+        "fallback_block_reason": None,
     }
     return seeds, diagnostics
 
@@ -403,6 +449,7 @@ def _normalize_legacy_candidate_seed(
         "drift_direction": None,
         "score_delta": None,
         "selected_visible_horizons": None,
+        "seed_origin_type": "legacy_comparison_synthetic",
     }
     return seed, []
 
@@ -437,6 +484,7 @@ def _normalize_candidate_row_seed(row: dict[str, Any]) -> tuple[dict[str, Any] |
         "drift_direction": _normalize_text(row.get("drift_direction")),
         "score_delta": _coerce_number(row.get("score_delta")),
         "selected_visible_horizons": _normalize_horizon_list(row.get("selected_visible_horizons")),
+        "seed_origin_type": "joined_edge_candidate_row",
     }
     _copy_research_signal_fields(source=row, target=seed)
     return seed, []
@@ -519,6 +567,7 @@ def _build_candidate(
         "selected_stability_label",
         "source_preference",
         "drift_direction",
+        "seed_origin_type",
     ):
         field_value = _normalize_text(seed.get(field_name))
         if field_value is not None:
