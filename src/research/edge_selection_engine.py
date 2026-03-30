@@ -30,6 +30,7 @@ ADVISORY_REASON_MAP = {
     "preferred_cumulative_sample": "CANDIDATE_CUMULATIVE_SAMPLE_PREFERRED_RANGE",
     "preferred_symbol_support": "CANDIDATE_SYMBOL_SUPPORT_PREFERRED_RANGE",
     "preferred_strategy_support": "CANDIDATE_STRATEGY_SUPPORT_PREFERRED_RANGE",
+    "single_horizon_relaxed": "CANDIDATE_STABILITY_SINGLE_HORIZON_RELAXED",
 }
 STATUS_PRIORITY = {
     "eligible": 2,
@@ -323,13 +324,26 @@ def _evaluate_candidate(candidate: Any) -> dict[str, Any]:
         strategy_cumulative_support=strategy_cumulative_support,
     )
 
+    relaxed_single_horizon = _should_relax_single_horizon_penalty(
+        strength=strength,
+        stability=stability,
+        drift_direction=drift_direction,
+        edge_stability_score=edge_stability_score,
+    )
+    effective_penalty_reasons = _apply_relaxed_penalties(
+        penalty_reasons=penalty_reasons,
+        relaxed_single_horizon=relaxed_single_horizon,
+    )
+    if relaxed_single_horizon:
+        advisory_reason_codes.append(ADVISORY_REASON_MAP["single_horizon_relaxed"])
+
     if blocked_reasons:
         candidate_status = "blocked"
         selection_score = None
         selection_confidence = None
         reason_codes = blocked_reasons
     else:
-        candidate_status = "penalized" if penalty_reasons else "eligible"
+        candidate_status = "penalized" if effective_penalty_reasons else "eligible"
         selection_score = _calculate_selection_score(
             strength=strength,
             stability=stability,
@@ -342,13 +356,13 @@ def _evaluate_candidate(candidate: Any) -> dict[str, Any]:
             positive_rate_pct=positive_rate_pct,
             robustness_signal_pct=robustness_signal_pct,
             supporting_major_deficit_count=supporting_major_deficit_count,
-            penalty_count=len(penalty_reasons),
+            penalty_count=len(effective_penalty_reasons),
         )
         selection_confidence = _calculate_confidence(
             selection_score=selection_score,
             candidate_status=candidate_status,
         )
-        reason_codes = penalty_reasons or [ELIGIBLE_CONSERVATIVE_PASS]
+        reason_codes = effective_penalty_reasons or [ELIGIBLE_CONSERVATIVE_PASS]
 
     gate_diagnostics = _build_gate_diagnostics(
         candidate_status=candidate_status,
@@ -357,8 +371,9 @@ def _evaluate_candidate(candidate: Any) -> dict[str, Any]:
         drift_direction=drift_direction,
         edge_stability_score=edge_stability_score,
         blocked_reasons=blocked_reasons,
-        penalty_reasons=penalty_reasons,
+        penalty_reasons=effective_penalty_reasons,
         advisory_reason_codes=advisory_reason_codes,
+        relaxed_single_horizon=relaxed_single_horizon,
     )
 
     ranking_signals = {
@@ -411,6 +426,7 @@ def _evaluate_candidate(candidate: Any) -> dict[str, Any]:
         "stability_gate_pass": candidate_status == "eligible",
         "drift_blocked": drift_direction == "decrease",
         "gate_diagnostics": gate_diagnostics,
+        "relaxed_single_horizon": relaxed_single_horizon,
     }
 
 
@@ -479,6 +495,42 @@ def _penalty_reasons(
         reasons.append(PENALTY_REASON_MAP["low_edge_score"])
 
     return reasons
+
+
+def _should_relax_single_horizon_penalty(
+    *,
+    strength: str,
+    stability: str,
+    drift_direction: str,
+    edge_stability_score: float | int | None,
+) -> bool:
+    if stability != "single_horizon_only":
+        return False
+    if strength not in {"moderate", "strong"}:
+        return False
+    if drift_direction == "decrease":
+        return False
+    if (
+        edge_stability_score is not None
+        and float(edge_stability_score) < SHADOW_MIN_EDGE_STABILITY_SCORE
+    ):
+        return False
+    return True
+
+
+def _apply_relaxed_penalties(
+    *,
+    penalty_reasons: list[str],
+    relaxed_single_horizon: bool,
+) -> list[str]:
+    if not relaxed_single_horizon:
+        return list(penalty_reasons)
+
+    return [
+        reason
+        for reason in penalty_reasons
+        if reason != PENALTY_REASON_MAP["single_horizon_stability"]
+    ]
 
 
 def _advisory_reasons(
@@ -566,7 +618,6 @@ def _calculate_selection_score(
 
     sample_component = 0.0
     if sample_count is not None:
-        # reward depth lightly; keep bounded to avoid overpowering conservative gates
         sample_component = min(max((float(sample_count) - 30.0) / 200.0, 0.0), 1.0)
 
     median_component = 0.0
@@ -749,6 +800,7 @@ def _build_ranking_item(candidate: dict[str, Any], *, rank: int) -> dict[str, An
         "ranking_signals": candidate.get("ranking_signals"),
         "stability_gate_pass": candidate.get("stability_gate_pass"),
         "drift_blocked": candidate.get("drift_blocked"),
+        "relaxed_single_horizon": candidate.get("relaxed_single_horizon"),
         "gate_diagnostics": candidate.get("gate_diagnostics"),
     }
     return {key: value for key, value in item.items() if value is not None}
@@ -806,6 +858,7 @@ def _build_gate_diagnostics(
     blocked_reasons: list[str],
     penalty_reasons: list[str],
     advisory_reason_codes: list[str],
+    relaxed_single_horizon: bool,
 ) -> dict[str, dict[str, Any]]:
     score_gate_reasons: list[str] = []
     if (
@@ -821,7 +874,7 @@ def _build_gate_diagnostics(
         stability_gate_reasons.append(BLOCKED_REASON_MAP["insufficient_data_stability"])
     if stability == "unstable":
         stability_gate_reasons.append(BLOCKED_REASON_MAP["unstable_stability"])
-    if stability == "single_horizon_only":
+    if stability == "single_horizon_only" and not relaxed_single_horizon:
         stability_gate_reasons.append(PENALTY_REASON_MAP["single_horizon_stability"])
 
     drift_gate_reasons: list[str] = []
@@ -838,6 +891,7 @@ def _build_gate_diagnostics(
         "stability_gate": {
             "passed": len(stability_gate_reasons) == 0,
             "reason_codes": stability_gate_reasons,
+            "relaxed_single_horizon": relaxed_single_horizon,
         },
         "drift_gate": {
             "passed": len(drift_gate_reasons) == 0,
@@ -846,6 +900,7 @@ def _build_gate_diagnostics(
         "eligibility_gate": {
             "passed": candidate_status == "eligible",
             "reason_codes": eligibility_gate_reasons,
+            "relaxed_single_horizon": relaxed_single_horizon,
         },
         "advisory": {
             "reason_codes": list(advisory_reason_codes),
