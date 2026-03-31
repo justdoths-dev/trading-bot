@@ -118,6 +118,36 @@ def _median_or_none(values: list[float]) -> float | None:
     return round(float(median(values)), 6)
 
 
+def _json_safe_value(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    if isinstance(value, Path):
+        return str(value)
+
+    if isinstance(value, dict):
+        return {str(k): _json_safe_value(v) for k, v in value.items()}
+
+    if isinstance(value, list):
+        return [_json_safe_value(item) for item in value]
+
+    if isinstance(value, tuple):
+        return [_json_safe_value(item) for item in value]
+
+    if isinstance(value, set):
+        return [_json_safe_value(item) for item in sorted(value, key=str)]
+
+    try:
+        json.dumps(value)
+        return value
+    except TypeError:
+        return str(value)
+
+
+def _json_safe_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {str(k): _json_safe_value(v) for k, v in row.items()}
+
+
 def _parse_targets(raw_targets: list[str]) -> list[tuple[str, str]]:
     targets: list[tuple[str, str]] = []
     for item in raw_targets:
@@ -177,7 +207,6 @@ def _select_recent_subset_dataset(
     if not subset:
         return []
 
-    # Preserve original chronological order from dataset
     return subset
 
 
@@ -194,7 +223,8 @@ def _write_subset_jsonl(
     )
     with path.open("w", encoding="utf-8") as f:
         for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            safe_row = _json_safe_row(row)
+            f.write(json.dumps(safe_row, ensure_ascii=False) + "\n")
     return path
 
 
