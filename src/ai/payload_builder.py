@@ -22,6 +22,8 @@ class AIPayloadBuilder:
         scalping_result = strategy_result.get("scalping_result", {}) or {}
         intraday_result = strategy_result.get("intraday_result", {}) or {}
         swing_result = strategy_result.get("swing_result", {}) or {}
+        decision_layers = strategy_result.get("decision_layers", {}) or {}
+        selected_timeframe_summary = selected_result.get("timeframe_summary", {}) or {}
 
         timeframe_summary = self._build_timeframe_summary(enriched_data)
         key_bottlenecks = self._build_key_bottlenecks(selected_result)
@@ -62,9 +64,28 @@ class AIPayloadBuilder:
                 "signal": selected_result.get("signal"),
                 "reason": selected_result.get("reason"),
                 "layers": {
-                    "bias_layer": selected_result.get("timeframe_summary", {}).get("bias_layer", {}),
-                    "setup_layer": selected_result.get("timeframe_summary", {}).get("setup_layer", {}),
-                    "trigger_layer": selected_result.get("timeframe_summary", {}).get("trigger_layer", {}),
+                    "context_layer": self._resolve_layer(
+                        selected_timeframe_summary,
+                        decision_layers,
+                        primary_key="context_layer",
+                        fallback_key="bias_layer",
+                    ),
+                    "bias_layer": self._resolve_layer(
+                        selected_timeframe_summary,
+                        decision_layers,
+                        primary_key="bias_layer",
+                        fallback_key="context_layer",
+                    ),
+                    "setup_layer": self._resolve_layer(
+                        selected_timeframe_summary,
+                        decision_layers,
+                        primary_key="setup_layer",
+                    ),
+                    "trigger_layer": self._resolve_layer(
+                        selected_timeframe_summary,
+                        decision_layers,
+                        primary_key="trigger_layer",
+                    ),
                 },
             },
             "risk_analysis": {
@@ -91,7 +112,8 @@ class AIPayloadBuilder:
                 "reason": execution_result.get("reason"),
             },
             "decision_policy": {
-                "rule_based_priority": True,
+                "rule_based_priority": False,
+                "decision_architecture": "detector_composed",
                 "ai_role": "higher_level_interpreter_and_decision_support",
                 "ai_must_not_replace_indicator_calculations": True,
             },
@@ -153,15 +175,23 @@ class AIPayloadBuilder:
         bottlenecks: list[str] = []
 
         timeframe_summary = selected_result.get("timeframe_summary", {}) or {}
-        bias_layer = timeframe_summary.get("bias_layer", {})
+        context_layer = timeframe_summary.get("context_layer", {})
+        bias_layer = timeframe_summary.get("bias_layer", context_layer)
         setup_layer = timeframe_summary.get("setup_layer", {})
         trigger_layer = timeframe_summary.get("trigger_layer", {})
 
-        bias = bias_layer.get("bias")
+        bias = context_layer.get("bias") or bias_layer.get("bias")
+        context_state = context_layer.get("context") or bias_layer.get("context")
         setup = setup_layer.get("setup")
         trigger = trigger_layer.get("trigger")
 
-        if bias == "neutral_conflict":
+        if context_state == "conflicted":
+            bottlenecks.append("Higher timeframes are conflicted, so the engine avoids forcing a directional trade.")
+        elif context_state == "countertrend_bounce":
+            bottlenecks.append("The market is bouncing against a bearish higher-timeframe trend, which limits long conviction.")
+        elif context_state == "countertrend_drop":
+            bottlenecks.append("The market is dropping against a bullish higher-timeframe trend, which limits short conviction.")
+        elif bias == "neutral_conflict":
             bottlenecks.append("Higher timeframe bias is conflicted between 1d and 4h.")
 
         if setup == "neutral":
@@ -204,6 +234,33 @@ class AIPayloadBuilder:
                 seen.add(item)
 
         return deduped
+
+    def _resolve_layer(
+        self,
+        timeframe_summary: dict[str, Any],
+        decision_layers: dict[str, Any],
+        *,
+        primary_key: str,
+        fallback_key: str | None = None,
+    ) -> dict[str, Any]:
+        layer = timeframe_summary.get(primary_key)
+        if isinstance(layer, dict) and layer:
+            return layer
+
+        layer = decision_layers.get(primary_key)
+        if isinstance(layer, dict) and layer:
+            return layer
+
+        if fallback_key is not None:
+            layer = timeframe_summary.get(fallback_key)
+            if isinstance(layer, dict) and layer:
+                return layer
+
+            layer = decision_layers.get(fallback_key)
+            if isinstance(layer, dict) and layer:
+                return layer
+
+        return {}
 
     def _determine_ema_bias(self, ema_20: float | None, ema_50: float | None) -> str:
         if ema_20 is None or ema_50 is None:
