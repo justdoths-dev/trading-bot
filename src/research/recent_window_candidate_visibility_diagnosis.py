@@ -13,8 +13,6 @@ from src.research.research_analyzer import (
     _build_edge_candidate_rows,
     _build_edge_candidates_preview,
     _build_edge_stability_preview,
-    _empty_edge_candidate_rows,
-    _empty_strategy_lab_metrics,
     _build_strategy_lab_metrics,
 )
 from src.research.strategy_lab.dataset_builder import build_dataset
@@ -35,7 +33,7 @@ def _default_output_dir() -> Path:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Diagnose recent-window candidate visibility and joined candidate rows."
+        description="Diagnose recent-window candidate visibility using true subset datasets."
     )
     parser.add_argument(
         "--input",
@@ -60,7 +58,18 @@ def _parse_args() -> argparse.Namespace:
         "--targets",
         nargs="*",
         default=["BTCUSDT:swing", "ETHUSDT:swing"],
-        help="Optional target identities in SYMBOL:strategy format",
+        help="Target identities in SYMBOL:strategy format",
+    )
+    parser.add_argument(
+        "--anchor-horizon",
+        choices=list(HORIZONS),
+        default="4h",
+        help="Horizon used to construct recent labeled subset windows",
+    )
+    parser.add_argument(
+        "--keep-temp-files",
+        action="store_true",
+        help="Keep generated temporary subset JSONL files",
     )
     return parser.parse_args()
 
@@ -119,6 +128,7 @@ def _parse_targets(raw_targets: list[str]) -> list[tuple[str, str]]:
         strategy_norm = _normalize_strategy(strategy)
         if symbol_norm and strategy_norm:
             targets.append((symbol_norm, strategy_norm))
+
     deduped: list[tuple[str, str]] = []
     for item in targets:
         if item not in deduped:
@@ -136,6 +146,56 @@ def _filter_recent_labeled_rows(
     if labeled_window <= 0:
         return labeled
     return labeled[-labeled_window:]
+
+
+def _select_recent_subset_dataset(
+    dataset: list[dict[str, Any]],
+    *,
+    targets: list[tuple[str, str]],
+    anchor_horizon: str,
+    labeled_window: int,
+) -> list[dict[str, Any]]:
+    target_row_ids: set[int] = set()
+
+    for symbol, strategy in targets:
+        identity_rows = [
+            row
+            for row in dataset
+            if _normalize_symbol(row.get("symbol")) == symbol
+            and _normalize_strategy(row.get("selected_strategy")) == strategy
+        ]
+        recent_rows = _filter_recent_labeled_rows(
+            identity_rows,
+            horizon=anchor_horizon,
+            labeled_window=labeled_window,
+        )
+        for row in recent_rows:
+            target_row_ids.add(id(row))
+
+    subset = [row for row in dataset if id(row) in target_row_ids]
+
+    if not subset:
+        return []
+
+    # Preserve original chronological order from dataset
+    return subset
+
+
+def _write_subset_jsonl(
+    rows: list[dict[str, Any]],
+    *,
+    output_dir: Path,
+    labeled_window: int,
+    anchor_horizon: str,
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / (
+        f"_recent_window_subset_{anchor_horizon}_{labeled_window}.jsonl"
+    )
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return path
 
 
 def _build_target_recent_metrics(
@@ -257,22 +317,30 @@ def _extract_preview_summary(
 
 
 def _build_window_snapshot(
-    input_path: Path,
-    dataset: list[dict[str, Any]],
+    full_dataset: list[dict[str, Any]],
     *,
+    output_dir: Path,
     labeled_window: int,
     targets: list[tuple[str, str]],
+    anchor_horizon: str,
+    keep_temp_files: bool,
 ) -> dict[str, Any]:
-    temp_input = (
-        Path(__file__).resolve().parents[2]
-        / "logs"
-        / "research_reports"
-        / "latest"
-        / f"_recent_window_candidate_visibility_input_{labeled_window}.jsonl"
+    subset_dataset = _select_recent_subset_dataset(
+        full_dataset,
+        targets=targets,
+        anchor_horizon=anchor_horizon,
+        labeled_window=labeled_window,
+    )
+
+    subset_path = _write_subset_jsonl(
+        subset_dataset,
+        output_dir=output_dir,
+        labeled_window=labeled_window,
+        anchor_horizon=anchor_horizon,
     )
 
     try:
-        strategy_lab_metrics = _build_strategy_lab_metrics(input_path)
+        strategy_lab_metrics = _build_strategy_lab_metrics(subset_path)
         edge_candidates_preview = _build_edge_candidates_preview(
             strategy_lab=strategy_lab_metrics,
         )
@@ -280,19 +348,13 @@ def _build_window_snapshot(
             edge_candidates_preview=edge_candidates_preview,
         )
         edge_candidate_rows = _build_edge_candidate_rows(
-            input_path,
+            subset_path,
             edge_candidates_preview=edge_candidates_preview,
             edge_stability_preview=edge_stability_preview,
         )
-    except Exception:
-        strategy_lab_metrics = _empty_strategy_lab_metrics()
-        edge_candidates_preview = _build_edge_candidates_preview(
-            strategy_lab=strategy_lab_metrics,
-        )
-        edge_stability_preview = _build_edge_stability_preview(
-            edge_candidates_preview=edge_candidates_preview,
-        )
-        edge_candidate_rows = _empty_edge_candidate_rows()
+    finally:
+        if not keep_temp_files and subset_path.exists():
+            subset_path.unlink()
 
     target_metrics: dict[str, Any] = {}
     for symbol, strategy in targets:
@@ -300,7 +362,7 @@ def _build_window_snapshot(
         target_metrics[identity_key] = {}
         for horizon in HORIZONS:
             target_metrics[identity_key][horizon] = _build_target_recent_metrics(
-                dataset,
+                full_dataset,
                 symbol=symbol,
                 strategy=strategy,
                 horizon=horizon,
@@ -309,6 +371,8 @@ def _build_window_snapshot(
 
     return {
         "labeled_window": labeled_window,
+        "anchor_horizon": anchor_horizon,
+        "subset_dataset_rows": len(subset_dataset),
         "joined_candidate_rows": _summarize_rows(edge_candidate_rows),
         "preview_summary": _extract_preview_summary(
             edge_candidates_preview=edge_candidates_preview,
@@ -342,6 +406,7 @@ def _build_markdown(payload: dict[str, Any]) -> str:
     lines.append(f"- generated_at: {payload.get('generated_at')}")
     lines.append(f"- input_path: {payload.get('input_path')}")
     lines.append(f"- dataset_rows: {payload.get('dataset_rows')}")
+    lines.append(f"- anchor_horizon: {payload.get('anchor_horizon')}")
     lines.append("")
 
     for snapshot in payload.get("windows", []):
@@ -352,6 +417,7 @@ def _build_markdown(payload: dict[str, Any]) -> str:
 
         lines.append(f"## Recent labeled window = {window}")
         lines.append("")
+        lines.append(f"- subset_dataset_rows: {snapshot.get('subset_dataset_rows', 0)}")
         lines.append(f"- row_count: {joined.get('row_count', 0)}")
         lines.append(f"- dropped_row_count: {joined.get('dropped_row_count', 0)}")
         lines.append(f"- symbol_counter: {joined.get('symbol_counter', {})}")
@@ -406,7 +472,7 @@ def _build_markdown(payload: dict[str, Any]) -> str:
             lines.append(f"- stability_score: {entry.get('stability_score')}")
             lines.append(f"- visibility_reason: {entry.get('visibility_reason')}")
             lines.append("")
-        
+
         lines.append("### Target Recent Metrics")
         lines.append("")
         for identity, metrics_by_horizon in target_recent_metrics.items():
@@ -431,31 +497,34 @@ def _build_markdown(payload: dict[str, Any]) -> str:
 
 def main() -> None:
     args = _parse_args()
-    dataset = build_dataset(path=args.input)
+    full_dataset = build_dataset(path=args.input)
     targets = _parse_targets(args.targets)
 
     windows_payload: list[dict[str, Any]] = []
     for labeled_window in args.windows:
         windows_payload.append(
             _build_window_snapshot(
-                args.input,
-                dataset,
+                full_dataset,
+                output_dir=args.output_dir,
                 labeled_window=labeled_window,
                 targets=targets,
+                anchor_horizon=args.anchor_horizon,
+                keep_temp_files=args.keep_temp_files,
             )
         )
 
     payload = {
         "generated_at": datetime.now(UTC).isoformat(),
         "input_path": str(args.input),
-        "dataset_rows": len(dataset),
+        "dataset_rows": len(full_dataset),
         "targets": [f"{symbol}:{strategy}" for symbol, strategy in targets],
+        "anchor_horizon": args.anchor_horizon,
         "windows": windows_payload,
     }
 
     json_path, md_path = _write_outputs(args.output_dir, payload)
 
-    print(f"Dataset rows: {len(dataset)}")
+    print(f"Dataset rows: {len(full_dataset)}")
     print(f"Diagnosis JSON: {json_path.resolve()}")
     print(f"Diagnosis MD: {md_path.resolve()}")
 
