@@ -148,23 +148,26 @@ def _parse_targets(raw_targets: list[str]) -> list[tuple[str, str]]:
     return deduped
 
 
-def _filter_recent_labeled_rows(
-    rows: list[dict[str, Any]],
+def _filter_recent_labeled_row_indices(
+    indexed_rows: list[tuple[int, dict[str, Any]]],
     horizon: str,
     window: int,
-) -> list[dict[str, Any]]:
+) -> list[int]:
     label_key = f"future_label_{horizon}"
-    labeled = [row for row in rows if _normalize_label(row.get(label_key)) is not None]
+    labeled = [
+        index
+        for index, row in indexed_rows
+        if _normalize_label(row.get(label_key)) is not None
+    ]
     return labeled[-window:] if window > 0 else labeled
 
 
-def _extract_logged_at(row: dict[str, Any]) -> str:
+def _extract_logged_at(row: dict[str, Any]) -> str | None:
     value = row.get("logged_at")
     if isinstance(value, str):
         text = value.strip()
-        if text:
-            return text
-    return ""
+        return text or None
+    return None
 
 
 def _build_full_context_recent_subset(
@@ -177,74 +180,52 @@ def _build_full_context_recent_subset(
     """
     Build a recent-window dataset while preserving full-category context.
 
-    Logic:
-    1. For each target identity, collect recent labeled rows on anchor_horizon.
-    2. Find the earliest logged_at among those selected anchor rows.
-    3. Keep ALL dataset rows whose logged_at is >= that cutoff.
-    4. If logged_at is missing everywhere or cutoff cannot be determined, fall back
-       to target-row-only subset and record fallback metadata.
+    Primary strategy:
+    - Find the original dataset indices of each target identity's recent anchor-horizon
+      labeled rows.
+    - Use the earliest selected index as a cutoff.
+    - Keep ALL rows from cutoff_index to the end of the dataset.
+
+    This avoids relying on logged_at, which may be absent after dataset building.
     """
-    selected_anchor_rows: list[dict[str, Any]] = []
+    selected_anchor_indices: list[int] = []
 
     for symbol, strategy in targets:
-        identity_rows = [
-            row
-            for row in dataset
+        indexed_rows = [
+            (index, row)
+            for index, row in enumerate(dataset)
             if _normalize_symbol(row.get("symbol")) == symbol
             and _normalize_strategy(row.get("selected_strategy")) == strategy
         ]
-        recent_rows = _filter_recent_labeled_rows(
-            identity_rows,
+        recent_indices = _filter_recent_labeled_row_indices(
+            indexed_rows,
             horizon=anchor_horizon,
             window=labeled_window,
         )
-        selected_anchor_rows.extend(recent_rows)
+        selected_anchor_indices.extend(recent_indices)
 
-    if not selected_anchor_rows:
+    if not selected_anchor_indices:
         return [], {
             "subset_mode": "empty",
+            "cutoff_row_index": None,
             "cutoff_logged_at": None,
             "selected_anchor_row_count": 0,
             "full_context_row_count": 0,
         }
 
-    anchor_logged_ats = [
-        _extract_logged_at(row)
-        for row in selected_anchor_rows
-        if _extract_logged_at(row)
-    ]
+    cutoff_row_index = min(selected_anchor_indices)
+    subset = dataset[cutoff_row_index:]
 
-    if not anchor_logged_ats:
-        target_ids = {id(row) for row in selected_anchor_rows}
-        fallback_subset = [row for row in dataset if id(row) in target_ids]
-        return fallback_subset, {
-            "subset_mode": "target_row_only_fallback",
-            "cutoff_logged_at": None,
-            "selected_anchor_row_count": len(selected_anchor_rows),
-            "full_context_row_count": len(fallback_subset),
-        }
+    cutoff_logged_at = None
+    if 0 <= cutoff_row_index < len(dataset):
+        cutoff_logged_at = _extract_logged_at(dataset[cutoff_row_index])
 
-    cutoff_logged_at = min(anchor_logged_ats)
-    full_context_subset = [
-        row for row in dataset
-        if _extract_logged_at(row) and _extract_logged_at(row) >= cutoff_logged_at
-    ]
-
-    if not full_context_subset:
-        target_ids = {id(row) for row in selected_anchor_rows}
-        fallback_subset = [row for row in dataset if id(row) in target_ids]
-        return fallback_subset, {
-            "subset_mode": "target_row_only_fallback_after_empty_cut",
-            "cutoff_logged_at": cutoff_logged_at,
-            "selected_anchor_row_count": len(selected_anchor_rows),
-            "full_context_row_count": len(fallback_subset),
-        }
-
-    return full_context_subset, {
-        "subset_mode": "full_context_cutoff",
+    return subset, {
+        "subset_mode": "full_context_row_index_cutoff",
+        "cutoff_row_index": cutoff_row_index,
         "cutoff_logged_at": cutoff_logged_at,
-        "selected_anchor_row_count": len(selected_anchor_rows),
-        "full_context_row_count": len(full_context_subset),
+        "selected_anchor_row_count": len(selected_anchor_indices),
+        "full_context_row_count": len(subset),
     }
 
 
@@ -274,10 +255,15 @@ def _build_target_recent_metrics(
     label_key = f"future_label_{horizon}"
     return_key = f"future_return_{horizon}"
 
-    recent_labeled_rows = _filter_recent_labeled_rows(
-        target_rows,
-        horizon=horizon,
-        window=labeled_window,
+    recent_labeled_rows = [
+        row
+        for row in target_rows
+        if _normalize_label(row.get(label_key)) is not None
+    ]
+    recent_labeled_rows = (
+        recent_labeled_rows[-labeled_window:]
+        if labeled_window > 0
+        else recent_labeled_rows
     )
 
     label_counter: Counter[str] = Counter()
@@ -478,6 +464,7 @@ def _build_markdown(payload: dict[str, Any]) -> str:
         lines.append("")
         lines.append(f"- subset_dataset_rows: {snapshot.get('subset_dataset_rows', 0)}")
         lines.append(f"- subset_mode: {subset_metadata.get('subset_mode')}")
+        lines.append(f"- cutoff_row_index: {subset_metadata.get('cutoff_row_index')}")
         lines.append(f"- cutoff_logged_at: {subset_metadata.get('cutoff_logged_at')}")
         lines.append(
             f"- selected_anchor_row_count: {subset_metadata.get('selected_anchor_row_count')}"
