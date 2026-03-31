@@ -35,7 +35,8 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Diagnose recent-window visibility by explicitly separating "
-            "target-only recovery signals from full-context joined-candidate survival."
+            "target-only local metrics, meaningful recovery, and full-context "
+            "joined-candidate survival."
         )
     )
     parser.add_argument("--input", type=Path, default=_default_input_path())
@@ -206,8 +207,8 @@ def _build_full_context_recent_subset(
     - Use the earliest selected row index as the cutoff.
     - Keep ALL rows from cutoff_index to the dataset tail.
 
-    This produces a strict full-context subset suitable for analyzer/joined survival
-    diagnosis without relying on logged_at preservation.
+    This produces a strict full-context subset suitable for analyzer/joined
+    survival diagnosis without relying on logged_at preservation.
     """
     selected_anchor_indices: list[int] = []
 
@@ -295,6 +296,9 @@ def _build_metrics_from_rows(
             _pct(down_count, labeled_count) or 0.0,
         )
 
+    median_future_return_pct = _median_or_none(returns)
+    avg_future_return_pct = _avg_or_none(returns)
+
     return {
         "metric_mode": metric_mode,
         "symbol": symbol,
@@ -309,8 +313,8 @@ def _build_metrics_from_rows(
         "down_rate_pct": _pct(down_count, labeled_count),
         "flat_rate_pct": _pct(flat_count, labeled_count),
         "directional_dominance_pct": directional_dominance_pct,
-        "avg_future_return_pct": _avg_or_none(returns),
-        "median_future_return_pct": _median_or_none(returns),
+        "avg_future_return_pct": avg_future_return_pct,
+        "median_future_return_pct": median_future_return_pct,
     }
 
 
@@ -330,7 +334,9 @@ def _build_target_only_recent_metrics(
         for row in target_rows
         if _normalize_label(row.get(label_key)) is not None
     ]
-    recent_rows = labeled_target_rows[-labeled_window:] if labeled_window > 0 else labeled_target_rows
+    recent_rows = (
+        labeled_target_rows[-labeled_window:] if labeled_window > 0 else labeled_target_rows
+    )
 
     metrics = _build_metrics_from_rows(
         recent_rows,
@@ -437,6 +443,61 @@ def _extract_identity_entry(
     return None
 
 
+def _normalize_joined_stability_label(
+    joined_horizons: list[str],
+    raw_label: str | None,
+) -> str:
+    if not joined_horizons:
+        return "empty"
+    return raw_label or _scope_label(joined_horizons)
+
+
+def _has_local_metrics(metrics: dict[str, Any]) -> bool:
+    labeled_count = metrics.get("subset_labeled_count") or 0
+    return labeled_count > 0
+
+
+def _has_meaningful_recovery(metrics: dict[str, Any]) -> bool:
+    """
+    Conservative recovery definition for diagnosis purposes.
+
+    We intentionally require a positive median future return.
+    This avoids labeling merely-present local metrics as recovery.
+    """
+    labeled_count = metrics.get("subset_labeled_count") or 0
+    median_return = metrics.get("median_future_return_pct")
+    return labeled_count > 0 and median_return is not None and median_return > 0
+
+
+def _build_horizon_diagnosis(
+    *,
+    survives_joined: bool,
+    target_metric: dict[str, Any],
+    subset_metric: dict[str, Any],
+) -> str:
+    target_has_metrics = _has_local_metrics(target_metric)
+    subset_has_metrics = _has_local_metrics(subset_metric)
+    target_has_recovery = _has_meaningful_recovery(target_metric)
+    subset_has_recovery = _has_meaningful_recovery(subset_metric)
+
+    if survives_joined:
+        return "meaningful_recovery_and_joined_survival"
+
+    if subset_has_recovery:
+        return "meaningful_subset_recovery_present_but_joined_survival_failed"
+
+    if target_has_recovery and not subset_has_recovery:
+        return "target_only_meaningful_recovery_present_but_joined_survival_failed"
+
+    if target_has_metrics and subset_has_metrics:
+        return "local_metrics_present_but_meaningful_recovery_not_reached_and_joined_survival_failed"
+
+    if target_has_metrics and not subset_has_metrics:
+        return "target_only_metrics_present_but_subset_context_thin_or_empty"
+
+    return "no_local_metrics_present"
+
+
 def _build_recovery_vs_survival_summary(
     *,
     identity_key: str,
@@ -444,13 +505,19 @@ def _build_recovery_vs_survival_summary(
     target_only_metrics: dict[str, Any],
     subset_context_metrics: dict[str, Any],
 ) -> dict[str, Any]:
-    joined_horizons = []
-    joined_stability_label = None
+    joined_horizons: list[str] = []
+    raw_joined_stability_label: str | None = None
+    normalized_joined_stability_label: str = "empty"
     rejection_reasons: dict[str, str] = {}
 
     if identity_entry:
         joined_horizons = identity_entry.get("actual_joined_eligible_horizons", []) or []
-        joined_stability_label = identity_entry.get("actual_joined_stability_label")
+        raw_joined_stability_label = identity_entry.get("actual_joined_stability_label")
+        normalized_joined_stability_label = _normalize_joined_stability_label(
+            joined_horizons,
+            raw_joined_stability_label,
+        )
+
         horizon_evaluations = identity_entry.get("horizon_evaluations", {}) or {}
         for horizon in HORIZONS:
             evaluation = horizon_evaluations.get(horizon, {}) or {}
@@ -461,54 +528,37 @@ def _build_recovery_vs_survival_summary(
                     evaluation.get("rejection_reason") or "unknown"
                 )
     else:
-        joined_stability_label = "identity_not_present_in_evaluations"
+        raw_joined_stability_label = None
+        normalized_joined_stability_label = "empty"
         rejection_reasons = {h: "identity_not_present_in_evaluations" for h in HORIZONS}
 
     horizon_summary: dict[str, Any] = {}
     for horizon in HORIZONS:
         target_metric = target_only_metrics.get(horizon, {}) or {}
         subset_metric = subset_context_metrics.get(horizon, {}) or {}
-
-        target_labeled = target_metric.get("subset_labeled_count")
-        subset_labeled = subset_metric.get("subset_labeled_count")
-        target_median = target_metric.get("median_future_return_pct")
-        subset_median = subset_metric.get("median_future_return_pct")
-        target_dom = target_metric.get("directional_dominance_pct")
-        subset_dom = subset_metric.get("directional_dominance_pct")
-
-        local_recovery_signal = (
-            (target_labeled or 0) > 0 and (
-                target_median is not None or target_dom is not None
-            )
-        )
-        subset_signal_present = (
-            (subset_labeled or 0) > 0 and (
-                subset_median is not None or subset_dom is not None
-            )
-        )
         survives_joined = horizon in joined_horizons
-
-        if survives_joined:
-            diagnosis = "local_recovery_and_joined_survival"
-        elif local_recovery_signal and subset_signal_present:
-            diagnosis = "local_recovery_present_but_joined_survival_failed"
-        elif local_recovery_signal and not subset_signal_present:
-            diagnosis = "target_only_recovery_present_but_subset_context_thin_or_empty"
-        else:
-            diagnosis = "no_meaningful_local_recovery_signal"
 
         horizon_summary[horizon] = {
             "target_only_recent_metrics": target_metric,
             "subset_context_target_metrics": subset_metric,
+            "target_only_local_metrics_present": _has_local_metrics(target_metric),
+            "subset_context_local_metrics_present": _has_local_metrics(subset_metric),
+            "target_only_meaningful_recovery": _has_meaningful_recovery(target_metric),
+            "subset_context_meaningful_recovery": _has_meaningful_recovery(subset_metric),
             "survives_joined": survives_joined,
             "joined_status_or_rejection_reason": rejection_reasons.get(horizon),
-            "diagnosis": diagnosis,
+            "diagnosis": _build_horizon_diagnosis(
+                survives_joined=survives_joined,
+                target_metric=target_metric,
+                subset_metric=subset_metric,
+            ),
         }
 
     return {
         "identity_key": identity_key,
         "actual_joined_eligible_horizons": joined_horizons,
-        "actual_joined_stability_label": joined_stability_label,
+        "actual_joined_stability_label_raw": raw_joined_stability_label,
+        "actual_joined_stability_label_normalized": normalized_joined_stability_label,
         "by_horizon": horizon_summary,
     }
 
@@ -534,6 +584,8 @@ def _build_interpretation(entry: dict[str, Any]) -> list[str]:
         or []
     )
     joined = entry.get("actual_joined_eligible_horizons", []) or []
+    joined_label_raw = entry.get("actual_joined_stability_label")
+    joined_label_normalized = _normalize_joined_stability_label(joined, joined_label_raw)
 
     horizon_evaluations = entry.get("horizon_evaluations", {}) or {}
     rejection_counter: Counter[str] = Counter()
@@ -554,6 +606,8 @@ def _build_interpretation(entry: dict[str, Any]) -> list[str]:
         f"- compatibility_filtered_union_horizons: {compat_union} ({_scope_label(compat_union)})",
         f"- compatibility_filtered_overlap_horizons: {compat_overlap} ({_scope_label(compat_overlap)})",
         f"- actual_joined_eligible_horizons: {joined} ({_scope_label(joined)})",
+        f"- actual_joined_stability_label_raw: {joined_label_raw}",
+        f"- actual_joined_stability_label_normalized: {joined_label_normalized}",
         f"- dominant_rejection_reasons: {dominant_rejections}",
     ]
 
@@ -584,8 +638,11 @@ def _build_markdown(payload: dict[str, Any]) -> str:
     lines.append("# Recent Window Candidate Visibility Diagnosis v2")
     lines.append("")
     lines.append(
-        "This report explicitly separates target-only recovery signals from full-context joined-candidate survival."
+        "This report explicitly separates target-only local metrics, meaningful recovery, and full-context joined-candidate survival."
     )
+    lines.append("")
+    lines.append("Meaningful recovery is intentionally conservative in this report.")
+    lines.append("It currently requires a positive median future return for the relevant horizon slice.")
     lines.append("")
     lines.append(f"- generated_at: {payload.get('generated_at')}")
     lines.append(f"- input_path: {payload.get('input_path')}")
@@ -685,6 +742,13 @@ def _build_markdown(payload: dict[str, Any]) -> str:
                 )
                 horizon_evaluations = entry.get("horizon_evaluations", {}) or {}
 
+                joined_horizons = entry.get("actual_joined_eligible_horizons", []) or []
+                joined_label_raw = entry.get("actual_joined_stability_label")
+                joined_label_normalized = _normalize_joined_stability_label(
+                    joined_horizons,
+                    joined_label_raw,
+                )
+
                 lines.append(f"#### {entry.get('identity_key')}")
                 lines.append("**Interpretation Summary**")
                 lines.extend(_build_interpretation(entry))
@@ -710,8 +774,15 @@ def _build_markdown(payload: dict[str, Any]) -> str:
                 )
                 lines.append(
                     "- actual_joined_eligible_horizons: "
-                    f"{entry.get('actual_joined_eligible_horizons')} "
-                    f"({entry.get('actual_joined_stability_label')})"
+                    f"{joined_horizons}"
+                )
+                lines.append(
+                    "- actual_joined_stability_label_raw: "
+                    f"{joined_label_raw}"
+                )
+                lines.append(
+                    "- actual_joined_stability_label_normalized: "
+                    f"{joined_label_normalized}"
                 )
                 lines.append("")
 
@@ -741,7 +812,10 @@ def _build_markdown(payload: dict[str, Any]) -> str:
                 f"- actual_joined_eligible_horizons: {identity_summary.get('actual_joined_eligible_horizons')}"
             )
             lines.append(
-                f"- actual_joined_stability_label: {identity_summary.get('actual_joined_stability_label')}"
+                f"- actual_joined_stability_label_raw: {identity_summary.get('actual_joined_stability_label_raw')}"
+            )
+            lines.append(
+                f"- actual_joined_stability_label_normalized: {identity_summary.get('actual_joined_stability_label_normalized')}"
             )
             lines.append("")
 
@@ -760,6 +834,18 @@ def _build_markdown(payload: dict[str, Any]) -> str:
                 )
                 lines.append(
                     f"  - joined_status_or_rejection_reason: {horizon_summary.get('joined_status_or_rejection_reason')}"
+                )
+                lines.append(
+                    f"  - target_only_local_metrics_present: {horizon_summary.get('target_only_local_metrics_present')}"
+                )
+                lines.append(
+                    f"  - subset_context_local_metrics_present: {horizon_summary.get('subset_context_local_metrics_present')}"
+                )
+                lines.append(
+                    f"  - target_only_meaningful_recovery: {horizon_summary.get('target_only_meaningful_recovery')}"
+                )
+                lines.append(
+                    f"  - subset_context_meaningful_recovery: {horizon_summary.get('subset_context_meaningful_recovery')}"
                 )
                 lines.append(
                     "  - target_only_recent_metrics: "
