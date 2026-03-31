@@ -310,6 +310,12 @@ def _summarize_rows(rows_block: dict[str, Any]) -> dict[str, Any]:
         horizon_counter[str(row.get("horizon", "n/a"))] += 1
         stability_counter[str(row.get("selected_stability_label", "n/a"))] += 1
 
+    identity_horizon_evaluations = (
+        rows_block.get("identity_horizon_evaluations", [])
+        if isinstance(rows_block.get("identity_horizon_evaluations"), list)
+        else []
+    )
+
     return {
         "row_count": rows_block.get("row_count", 0),
         "dropped_row_count": rows_block.get("dropped_row_count", 0),
@@ -318,6 +324,7 @@ def _summarize_rows(rows_block: dict[str, Any]) -> dict[str, Any]:
         "horizon_counter": dict(horizon_counter),
         "stability_counter": dict(stability_counter),
         "rows": rows,
+        "identity_horizon_evaluations": identity_horizon_evaluations,
     }
 
 
@@ -341,6 +348,7 @@ def _extract_preview_summary(
         }
 
     return {
+        "raw_preview_by_horizon": preview_by_horizon,
         "by_horizon": preview_by_horizon,
         "stability_preview": edge_stability_preview,
     }
@@ -444,6 +452,12 @@ def _build_markdown(payload: dict[str, Any]) -> str:
         joined = snapshot.get("joined_candidate_rows", {}) or {}
         preview = snapshot.get("preview_summary", {}) or {}
         target_recent_metrics = snapshot.get("target_recent_metrics", {}) or {}
+        raw_preview_by_horizon = preview.get("raw_preview_by_horizon") or preview.get("by_horizon", {}) or {}
+        identity_horizon_evaluations = (
+            joined.get("identity_horizon_evaluations", [])
+            if isinstance(joined.get("identity_horizon_evaluations"), list)
+            else []
+        )
 
         lines.append(f"## Recent labeled window = {window}")
         lines.append("")
@@ -455,6 +469,11 @@ def _build_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- horizon_counter: {joined.get('horizon_counter', {})}")
         lines.append(f"- stability_counter: {joined.get('stability_counter', {})}")
         lines.append("")
+        lines.append(
+            "Preview is category-level, while joined candidate rows are identity-level and filtered "
+            "by strategy-horizon compatibility plus candidate quality gates."
+        )
+        lines.append("")
 
         lines.append("### Joined Candidate Rows")
         lines.append("")
@@ -465,10 +484,11 @@ def _build_markdown(payload: dict[str, Any]) -> str:
                     "- "
                     f"{row.get('symbol')} / {row.get('strategy')} / {row.get('horizon')} "
                     f"(strength={row.get('selected_candidate_strength')}, "
-                    f"stability={row.get('selected_stability_label')}, "
-                    f"selected_visible_horizons={row.get('selected_visible_horizons')}, "
-                    f"preview_symbol_visible_horizons={row.get('preview_symbol_visible_horizons')}, "
-                    f"preview_strategy_visible_horizons={row.get('preview_strategy_visible_horizons')}, "
+                    f"actual_joined_eligible_horizons={row.get('actual_joined_eligible_horizons')}, "
+                    f"raw_preview_symbol={row.get('preview_symbol_visible_horizons')}, "
+                    f"raw_preview_strategy={row.get('preview_strategy_visible_horizons')}, "
+                    f"compatibility_preview_symbol={row.get('compatibility_preview_symbol_visible_horizons')}, "
+                    f"compatibility_preview_strategy={row.get('compatibility_preview_strategy_visible_horizons')}, "
                     f"aggregate_score={row.get('aggregate_score')}, "
                     f"visibility_reason={row.get('visibility_reason')})"
                 )
@@ -476,10 +496,10 @@ def _build_markdown(payload: dict[str, Any]) -> str:
             lines.append("No joined candidate rows.")
         lines.append("")
 
-        lines.append("### Preview By Horizon")
+        lines.append("### Raw Preview By Horizon")
         lines.append("")
         for horizon in HORIZONS:
-            horizon_preview = (preview.get("by_horizon", {}) or {}).get(horizon, {}) or {}
+            horizon_preview = raw_preview_by_horizon.get(horizon, {}) or {}
             lines.append(f"#### {horizon}")
             lines.append(f"- sample_gate: {horizon_preview.get('sample_gate')}")
             lines.append(f"- quality_gate: {horizon_preview.get('quality_gate')}")
@@ -503,6 +523,51 @@ def _build_markdown(payload: dict[str, Any]) -> str:
             lines.append(f"- visibility_reason: {entry.get('visibility_reason')}")
             lines.append("")
 
+        lines.append("### Identity Visibility Diagnostics")
+        lines.append("")
+        if identity_horizon_evaluations:
+            for entry in identity_horizon_evaluations:
+                raw_preview_visibility = entry.get("raw_preview_visibility", {}) or {}
+                compatibility_filtered_preview_visibility = (
+                    entry.get("compatibility_filtered_preview_visibility", {}) or {}
+                )
+                horizon_evaluations = entry.get("horizon_evaluations", {}) or {}
+                lines.append(f"#### {entry.get('identity_key')}")
+                lines.append(
+                    "- raw_preview_visibility: "
+                    f"symbol={raw_preview_visibility.get('symbol')}, "
+                    f"strategy={raw_preview_visibility.get('strategy')}, "
+                    f"combined={raw_preview_visibility.get('combined_visible_horizons')}"
+                )
+                lines.append(
+                    "- compatibility_filtered_preview_visibility: "
+                    f"symbol={compatibility_filtered_preview_visibility.get('symbol')}, "
+                    f"strategy={compatibility_filtered_preview_visibility.get('strategy')}, "
+                    f"combined={compatibility_filtered_preview_visibility.get('combined_visible_horizons')}, "
+                    f"compatible_horizons={compatibility_filtered_preview_visibility.get('strategy_compatible_horizons')}"
+                )
+                lines.append(
+                    "- actual_joined_eligible_horizons: "
+                    f"{entry.get('actual_joined_eligible_horizons')} "
+                    f"({entry.get('actual_joined_stability_label')})"
+                )
+                lines.append("- horizon_rejection_reasons_and_selection:")
+                for horizon in HORIZONS:
+                    evaluation = horizon_evaluations.get(horizon, {}) or {}
+                    lines.append(
+                        "  - "
+                        f"{horizon}: status={evaluation.get('status')}, "
+                        f"reason={evaluation.get('rejection_reason') or 'selected'}, "
+                        f"candidate_strength={evaluation.get('candidate_strength')}, "
+                        f"sample_gate={evaluation.get('sample_gate')}, "
+                        f"quality_gate={evaluation.get('quality_gate')}, "
+                        f"aggregate_score={evaluation.get('aggregate_score')}"
+                    )
+                lines.append("")
+        else:
+            lines.append("No identity visibility diagnostics available.")
+            lines.append("")
+
         lines.append("### Target Recent Metrics")
         lines.append("")
         for identity, metrics_by_horizon in target_recent_metrics.items():
@@ -523,7 +588,6 @@ def _build_markdown(payload: dict[str, Any]) -> str:
             lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
-
 
 def main() -> None:
     args = _parse_args()

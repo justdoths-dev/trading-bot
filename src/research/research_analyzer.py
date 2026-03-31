@@ -100,6 +100,7 @@ STRATEGY_HORIZON_COMPATIBILITY = {
     "swing": {"1h", "4h", "1d"},
 }
 
+
 def _normalize_text(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -123,6 +124,19 @@ def _normalize_horizon_list(value: Any) -> list[str] | None:
             normalized.append(item)
 
     return normalized or None
+
+
+def _normalize_horizon_strength_map(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+
+    normalized: dict[str, str] = {}
+    for horizon in HORIZONS:
+        strength = value.get(horizon)
+        if isinstance(strength, str) and strength.strip():
+            normalized[horizon] = strength.strip()
+    return normalized
+
 
 def load_jsonl_records(input_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Load JSONL records, keeping only schema-valid objects for analysis."""
@@ -260,6 +274,7 @@ def _empty_edge_candidate_rows() -> dict[str, Any]:
         "rows": [],
         "dropped_row_count": 0,
         "dropped_rows": [],
+        "identity_horizon_evaluations": [],
     }
 
 
@@ -1042,58 +1057,130 @@ def _build_edge_candidate_rows(
 
     rows: list[dict[str, Any]] = []
     visible_horizons_by_identity: dict[tuple[str, str], list[str]] = defaultdict(list)
+    identity_horizon_evaluations: list[dict[str, Any]] = []
     preview_visibility = _build_edge_candidate_preview_visibility(
         edge_candidates_preview=edge_candidates_preview,
         edge_stability_preview=edge_stability_preview,
     )
 
     for (symbol, strategy), identity_rows in sorted(grouped_rows.items()):
-        for horizon in HORIZONS:
-            if horizon not in STRATEGY_HORIZON_COMPATIBILITY.get(strategy, set()):
-                continue
+        raw_preview_visibility = _build_identity_preview_visibility(
+            symbol=symbol,
+            strategy=strategy,
+            preview_visibility=preview_visibility,
+        )
+        compatibility_filtered_preview_visibility = (
+            _build_compatibility_filtered_preview_visibility(
+                strategy=strategy,
+                raw_preview_visibility=raw_preview_visibility,
+            )
+        )
 
-            candidate_row = _extract_joined_edge_candidate(
+        horizon_evaluations: dict[str, dict[str, Any]] = {}
+        for horizon in HORIZONS:
+            evaluation = _evaluate_joined_edge_candidate_horizon(
                 symbol=symbol,
                 strategy=strategy,
                 horizon=horizon,
                 rows=identity_rows,
             )
-            if candidate_row is None:
+            horizon_evaluations[horizon] = evaluation
+
+            if evaluation.get("status") != "selected":
                 continue
 
+            candidate_row = _build_joined_candidate_row_from_evaluation(evaluation)
             rows.append(candidate_row)
             visible_horizons_by_identity[(symbol, strategy)].append(horizon)
+
+        actual_joined_eligible_horizons = sorted(
+            visible_horizons_by_identity.get((symbol, strategy), [])
+        )
+        identity_horizon_evaluations.append(
+            {
+                "identity_key": f"{symbol}:{strategy}",
+                "symbol": symbol,
+                "strategy": strategy,
+                "strategy_compatible_horizons": _sorted_compatible_horizons(strategy),
+                "raw_preview_visibility": raw_preview_visibility,
+                "compatibility_filtered_preview_visibility": (
+                    compatibility_filtered_preview_visibility
+                ),
+                "actual_joined_eligible_horizons": actual_joined_eligible_horizons,
+                "actual_joined_stability_label": (
+                    "multi_horizon_confirmed"
+                    if len(actual_joined_eligible_horizons) >= 2
+                    else "single_horizon_only"
+                ),
+                "horizon_evaluations": horizon_evaluations,
+            }
+        )
+
+    identity_evaluations_by_key = {
+        (
+            str(item.get("symbol") or ""),
+            str(item.get("strategy") or ""),
+        ): item
+        for item in identity_horizon_evaluations
+    }
 
     for row in rows:
         identity = (str(row["symbol"]), str(row["strategy"]))
         joined_visible_horizons = sorted(visible_horizons_by_identity.get(identity, []))
+        identity_evaluation = _coerce_dict(identity_evaluations_by_key.get(identity))
 
         row["selected_visible_horizons"] = joined_visible_horizons
+        row["actual_joined_eligible_horizons"] = joined_visible_horizons
         row["selected_stability_label"] = (
             "multi_horizon_confirmed"
             if len(joined_visible_horizons) >= 2
             else "single_horizon_only"
         )
 
-        symbol_preview = _coerce_dict(
-            preview_visibility["symbol"].get(str(row["symbol"]))
+        raw_preview_visibility = _coerce_dict(
+            identity_evaluation.get("raw_preview_visibility")
         )
-        strategy_preview = _coerce_dict(
-            preview_visibility["strategy"].get(str(row["strategy"]))
+        compatibility_filtered_preview_visibility = _coerce_dict(
+            identity_evaluation.get("compatibility_filtered_preview_visibility")
+        )
+        symbol_preview = _coerce_dict(raw_preview_visibility.get("symbol"))
+        strategy_preview = _coerce_dict(raw_preview_visibility.get("strategy"))
+        compatibility_symbol_preview = _coerce_dict(
+            compatibility_filtered_preview_visibility.get("symbol")
+        )
+        compatibility_strategy_preview = _coerce_dict(
+            compatibility_filtered_preview_visibility.get("strategy")
         )
 
         _attach_preview_visibility_metadata(
             row=row,
             symbol_preview=symbol_preview,
             strategy_preview=strategy_preview,
+            compatibility_symbol_preview=compatibility_symbol_preview,
+            compatibility_strategy_preview=compatibility_strategy_preview,
         )
 
+        row["horizon_evaluation"] = _coerce_dict(
+            _coerce_dict(identity_evaluation.get("horizon_evaluations")).get(
+                str(row["horizon"])
+            )
+        )
+        row["visibility_diagnostics"] = _build_visibility_diagnostics(
+            symbol_preview=symbol_preview,
+            strategy_preview=strategy_preview,
+            compatibility_symbol_preview=compatibility_symbol_preview,
+            compatibility_strategy_preview=compatibility_strategy_preview,
+            joined_visible_horizons=joined_visible_horizons,
+        )
         row["visibility_reason"] = _resolve_edge_candidate_visibility_reason(
             base_reason=str(
                 row.get("visibility_reason") or "passed_sample_and_quality_gate"
             ),
             symbol_preview=symbol_preview,
             strategy_preview=strategy_preview,
+            compatibility_symbol_preview=compatibility_symbol_preview,
+            compatibility_strategy_preview=compatibility_strategy_preview,
+            joined_visible_horizons=joined_visible_horizons,
         )
 
     rows.sort(
@@ -1109,6 +1196,7 @@ def _build_edge_candidate_rows(
         "rows": rows,
         "dropped_row_count": len(dropped_rows),
         "dropped_rows": dropped_rows[:25],
+        "identity_horizon_evaluations": identity_horizon_evaluations,
     }
 
 
@@ -1144,11 +1232,15 @@ def _build_category_preview_visibility(
     candidate_key: str,
 ) -> dict[str, dict[str, Any]]:
     horizons_by_group: dict[str, set[str]] = defaultdict(set)
+    quality_passed_horizons_by_group: dict[str, set[str]] = defaultdict(set)
+    horizon_strengths_by_group: dict[str, dict[str, str]] = defaultdict(dict)
+    horizon_quality_gates_by_group: dict[str, dict[str, str]] = defaultdict(dict)
 
     for horizon in HORIZONS:
         horizon_data = _coerce_dict(by_horizon.get(horizon))
         candidate = _coerce_dict(horizon_data.get(candidate_key))
-        if candidate.get("candidate_strength") == "insufficient_data":
+        candidate_strength = str(candidate.get("candidate_strength") or "insufficient_data")
+        if candidate_strength == "insufficient_data":
             continue
 
         group = _normalize_preview_visibility_group(category, candidate.get("group"))
@@ -1156,6 +1248,12 @@ def _build_category_preview_visibility(
             continue
 
         horizons_by_group[group].add(horizon)
+        horizon_strengths_by_group[group][horizon] = candidate_strength
+
+        quality_gate = str(candidate.get("quality_gate") or "failed")
+        horizon_quality_gates_by_group[group][horizon] = quality_gate
+        if quality_gate == "passed":
+            quality_passed_horizons_by_group[group].add(horizon)
 
     stability_group = _normalize_preview_visibility_group(
         category,
@@ -1165,6 +1263,7 @@ def _build_category_preview_visibility(
     visibility: dict[str, dict[str, Any]] = {}
     for group, horizons in horizons_by_group.items():
         visible_horizons = sorted(horizons)
+        quality_passed_horizons = sorted(quality_passed_horizons_by_group.get(group, set()))
         stability_label = (
             "multi_horizon_confirmed"
             if len(visible_horizons) >= 2
@@ -1186,11 +1285,178 @@ def _build_category_preview_visibility(
 
         visibility[group] = {
             "visible_horizons": visible_horizons,
+            "quality_passed_horizons": quality_passed_horizons,
+            "horizon_strengths": dict(horizon_strengths_by_group.get(group, {})),
+            "horizon_quality_gates": dict(horizon_quality_gates_by_group.get(group, {})),
             "stability_label": stability_label,
             "visibility_reason": visibility_reason,
         }
 
     return visibility
+
+
+def _sorted_compatible_horizons(strategy: str) -> list[str]:
+    compatible = STRATEGY_HORIZON_COMPATIBILITY.get(strategy, set())
+    return [horizon for horizon in HORIZONS if horizon in compatible]
+
+
+def _build_identity_preview_visibility(
+    *,
+    symbol: str,
+    strategy: str,
+    preview_visibility: dict[str, dict[str, dict[str, Any]]],
+) -> dict[str, Any]:
+    symbol_preview = _coerce_dict(preview_visibility.get("symbol", {}).get(symbol))
+    strategy_preview = _coerce_dict(preview_visibility.get("strategy", {}).get(strategy))
+
+    symbol_visible_horizons = _normalize_horizon_list(symbol_preview.get("visible_horizons")) or []
+    strategy_visible_horizons = _normalize_horizon_list(strategy_preview.get("visible_horizons")) or []
+
+    symbol_quality_passed_horizons = (
+        _normalize_horizon_list(symbol_preview.get("quality_passed_horizons")) or []
+    )
+    strategy_quality_passed_horizons = (
+        _normalize_horizon_list(strategy_preview.get("quality_passed_horizons")) or []
+    )
+
+    return {
+        "symbol": symbol_preview,
+        "strategy": strategy_preview,
+        "raw_category_union_horizons": _merge_unique_horizons(
+            symbol_visible_horizons,
+            strategy_visible_horizons,
+        ),
+        "raw_category_overlap_horizons": _intersect_horizons(
+            symbol_visible_horizons,
+            strategy_visible_horizons,
+        ),
+        "raw_category_quality_passed_union_horizons": _merge_unique_horizons(
+            symbol_quality_passed_horizons,
+            strategy_quality_passed_horizons,
+        ),
+        "raw_category_quality_passed_overlap_horizons": _intersect_horizons(
+            symbol_quality_passed_horizons,
+            strategy_quality_passed_horizons,
+        ),
+    }
+
+
+def _build_compatibility_filtered_preview_visibility(
+    *,
+    strategy: str,
+    raw_preview_visibility: dict[str, Any],
+) -> dict[str, Any]:
+    compatible_horizons = _sorted_compatible_horizons(strategy)
+    symbol_preview = _coerce_dict(raw_preview_visibility.get("symbol"))
+    strategy_preview = _coerce_dict(raw_preview_visibility.get("strategy"))
+
+    filtered_symbol_horizons = _filter_horizons_to_compatible(
+        _normalize_horizon_list(symbol_preview.get("visible_horizons")) or [],
+        compatible_horizons,
+    )
+    filtered_strategy_horizons = _filter_horizons_to_compatible(
+        _normalize_horizon_list(strategy_preview.get("visible_horizons")) or [],
+        compatible_horizons,
+    )
+    filtered_symbol_quality_passed_horizons = _filter_horizons_to_compatible(
+        _normalize_horizon_list(symbol_preview.get("quality_passed_horizons")) or [],
+        compatible_horizons,
+    )
+    filtered_strategy_quality_passed_horizons = _filter_horizons_to_compatible(
+        _normalize_horizon_list(strategy_preview.get("quality_passed_horizons")) or [],
+        compatible_horizons,
+    )
+
+    return {
+        "strategy_compatible_horizons": compatible_horizons,
+        "symbol": _copy_preview_visibility_entry(
+            symbol_preview,
+            visible_horizons=filtered_symbol_horizons,
+            quality_passed_horizons=filtered_symbol_quality_passed_horizons,
+        ),
+        "strategy": _copy_preview_visibility_entry(
+            strategy_preview,
+            visible_horizons=filtered_strategy_horizons,
+            quality_passed_horizons=filtered_strategy_quality_passed_horizons,
+        ),
+        "compatibility_filtered_category_union_horizons": _merge_unique_horizons(
+            filtered_symbol_horizons,
+            filtered_strategy_horizons,
+        ),
+        "compatibility_filtered_category_overlap_horizons": _intersect_horizons(
+            filtered_symbol_horizons,
+            filtered_strategy_horizons,
+        ),
+        "compatibility_filtered_quality_passed_union_horizons": _merge_unique_horizons(
+            filtered_symbol_quality_passed_horizons,
+            filtered_strategy_quality_passed_horizons,
+        ),
+        "compatibility_filtered_quality_passed_overlap_horizons": _intersect_horizons(
+            filtered_symbol_quality_passed_horizons,
+            filtered_strategy_quality_passed_horizons,
+        ),
+        "visibility_reason": "filtered_by_strategy_horizon_compatibility",
+    }
+
+
+def _copy_preview_visibility_entry(
+    entry: dict[str, Any],
+    *,
+    visible_horizons: list[str],
+    quality_passed_horizons: list[str],
+) -> dict[str, Any]:
+    horizon_strengths = _normalize_horizon_strength_map(entry.get("horizon_strengths"))
+    horizon_quality_gates = _normalize_horizon_strength_map(entry.get("horizon_quality_gates"))
+
+    filtered_horizon_strengths = {
+        horizon: strength
+        for horizon, strength in horizon_strengths.items()
+        if horizon in visible_horizons
+    }
+    filtered_horizon_quality_gates = {
+        horizon: gate
+        for horizon, gate in horizon_quality_gates.items()
+        if horizon in visible_horizons
+    }
+
+    if not entry:
+        return {
+            "visible_horizons": visible_horizons,
+            "quality_passed_horizons": quality_passed_horizons,
+            "horizon_strengths": filtered_horizon_strengths,
+            "horizon_quality_gates": filtered_horizon_quality_gates,
+            "stability_label": None,
+            "visibility_reason": None,
+        }
+
+    return {
+        "visible_horizons": visible_horizons,
+        "quality_passed_horizons": quality_passed_horizons,
+        "horizon_strengths": filtered_horizon_strengths,
+        "horizon_quality_gates": filtered_horizon_quality_gates,
+        "stability_label": _normalize_text(entry.get("stability_label")),
+        "visibility_reason": _normalize_text(entry.get("visibility_reason")),
+    }
+
+
+def _merge_unique_horizons(*horizon_lists: list[str]) -> list[str]:
+    merged: list[str] = []
+    for horizon in HORIZONS:
+        if any(horizon in items for items in horizon_lists) and horizon not in merged:
+            merged.append(horizon)
+    return merged
+
+
+def _intersect_horizons(left: list[str], right: list[str]) -> list[str]:
+    return [horizon for horizon in HORIZONS if horizon in left and horizon in right]
+
+
+def _filter_horizons_to_compatible(
+    horizons: list[str],
+    compatible_horizons: list[str],
+) -> list[str]:
+    compatible_set = set(compatible_horizons)
+    return [horizon for horizon in horizons if horizon in compatible_set]
 
 
 def _normalize_preview_visibility_group(category: str, value: Any) -> str | None:
@@ -1215,12 +1481,26 @@ def _attach_preview_visibility_metadata(
     row: dict[str, Any],
     symbol_preview: dict[str, Any],
     strategy_preview: dict[str, Any],
+    compatibility_symbol_preview: dict[str, Any],
+    compatibility_strategy_preview: dict[str, Any],
 ) -> None:
     symbol_visible_horizons = _normalize_horizon_list(
         symbol_preview.get("visible_horizons")
     )
     if symbol_visible_horizons:
         row["preview_symbol_visible_horizons"] = symbol_visible_horizons
+
+    symbol_quality_passed_horizons = _normalize_horizon_list(
+        symbol_preview.get("quality_passed_horizons")
+    )
+    if symbol_quality_passed_horizons is not None:
+        row["preview_symbol_quality_passed_horizons"] = symbol_quality_passed_horizons
+
+    symbol_horizon_strengths = _normalize_horizon_strength_map(
+        symbol_preview.get("horizon_strengths")
+    )
+    if symbol_horizon_strengths:
+        row["preview_symbol_horizon_strengths"] = symbol_horizon_strengths
 
     symbol_stability_label = _normalize_text(symbol_preview.get("stability_label"))
     if symbol_stability_label is not None:
@@ -1236,6 +1516,20 @@ def _attach_preview_visibility_metadata(
     if strategy_visible_horizons:
         row["preview_strategy_visible_horizons"] = strategy_visible_horizons
 
+    strategy_quality_passed_horizons = _normalize_horizon_list(
+        strategy_preview.get("quality_passed_horizons")
+    )
+    if strategy_quality_passed_horizons is not None:
+        row["preview_strategy_quality_passed_horizons"] = (
+            strategy_quality_passed_horizons
+        )
+
+    strategy_horizon_strengths = _normalize_horizon_strength_map(
+        strategy_preview.get("horizon_strengths")
+    )
+    if strategy_horizon_strengths:
+        row["preview_strategy_horizon_strengths"] = strategy_horizon_strengths
+
     strategy_stability_label = _normalize_text(strategy_preview.get("stability_label"))
     if strategy_stability_label is not None:
         row["preview_strategy_stability_label"] = strategy_stability_label
@@ -1246,32 +1540,179 @@ def _attach_preview_visibility_metadata(
     if strategy_visibility_reason is not None:
         row["preview_strategy_visibility_reason"] = strategy_visibility_reason
 
+    compatibility_symbol_visible_horizons = _normalize_horizon_list(
+        compatibility_symbol_preview.get("visible_horizons")
+    )
+    if compatibility_symbol_visible_horizons is not None:
+        row["compatibility_preview_symbol_visible_horizons"] = (
+            compatibility_symbol_visible_horizons
+        )
+
+    compatibility_symbol_quality_passed_horizons = _normalize_horizon_list(
+        compatibility_symbol_preview.get("quality_passed_horizons")
+    )
+    if compatibility_symbol_quality_passed_horizons is not None:
+        row["compatibility_preview_symbol_quality_passed_horizons"] = (
+            compatibility_symbol_quality_passed_horizons
+        )
+
+    compatibility_symbol_horizon_strengths = _normalize_horizon_strength_map(
+        compatibility_symbol_preview.get("horizon_strengths")
+    )
+    if compatibility_symbol_horizon_strengths:
+        row["compatibility_preview_symbol_horizon_strengths"] = (
+            compatibility_symbol_horizon_strengths
+        )
+
+    compatibility_symbol_stability_label = _normalize_text(
+        compatibility_symbol_preview.get("stability_label")
+    )
+    if compatibility_symbol_stability_label is not None:
+        row["compatibility_preview_symbol_stability_label"] = (
+            compatibility_symbol_stability_label
+        )
+
+    compatibility_symbol_visibility_reason = _normalize_text(
+        compatibility_symbol_preview.get("visibility_reason")
+    )
+    if compatibility_symbol_visibility_reason is not None:
+        row["compatibility_preview_symbol_visibility_reason"] = (
+            compatibility_symbol_visibility_reason
+        )
+
+    compatibility_strategy_visible_horizons = _normalize_horizon_list(
+        compatibility_strategy_preview.get("visible_horizons")
+    )
+    if compatibility_strategy_visible_horizons is not None:
+        row["compatibility_preview_strategy_visible_horizons"] = (
+            compatibility_strategy_visible_horizons
+        )
+
+    compatibility_strategy_quality_passed_horizons = _normalize_horizon_list(
+        compatibility_strategy_preview.get("quality_passed_horizons")
+    )
+    if compatibility_strategy_quality_passed_horizons is not None:
+        row["compatibility_preview_strategy_quality_passed_horizons"] = (
+            compatibility_strategy_quality_passed_horizons
+        )
+
+    compatibility_strategy_horizon_strengths = _normalize_horizon_strength_map(
+        compatibility_strategy_preview.get("horizon_strengths")
+    )
+    if compatibility_strategy_horizon_strengths:
+        row["compatibility_preview_strategy_horizon_strengths"] = (
+            compatibility_strategy_horizon_strengths
+        )
+
+    compatibility_strategy_stability_label = _normalize_text(
+        compatibility_strategy_preview.get("stability_label")
+    )
+    if compatibility_strategy_stability_label is not None:
+        row["compatibility_preview_strategy_stability_label"] = (
+            compatibility_strategy_stability_label
+        )
+
+    compatibility_strategy_visibility_reason = _normalize_text(
+        compatibility_strategy_preview.get("visibility_reason")
+    )
+    if compatibility_strategy_visibility_reason is not None:
+        row["compatibility_preview_strategy_visibility_reason"] = (
+            compatibility_strategy_visibility_reason
+        )
+
+
+def _build_visibility_diagnostics(
+    *,
+    symbol_preview: dict[str, Any],
+    strategy_preview: dict[str, Any],
+    compatibility_symbol_preview: dict[str, Any],
+    compatibility_strategy_preview: dict[str, Any],
+    joined_visible_horizons: list[str],
+) -> dict[str, Any]:
+    raw_symbol_visible_horizons = (
+        _normalize_horizon_list(symbol_preview.get("visible_horizons")) or []
+    )
+    raw_strategy_visible_horizons = (
+        _normalize_horizon_list(strategy_preview.get("visible_horizons")) or []
+    )
+    compatibility_symbol_visible_horizons = (
+        _normalize_horizon_list(compatibility_symbol_preview.get("visible_horizons")) or []
+    )
+    compatibility_strategy_visible_horizons = (
+        _normalize_horizon_list(compatibility_strategy_preview.get("visible_horizons")) or []
+    )
+
+    raw_union = _merge_unique_horizons(
+        raw_symbol_visible_horizons,
+        raw_strategy_visible_horizons,
+    )
+    compatibility_union = _merge_unique_horizons(
+        compatibility_symbol_visible_horizons,
+        compatibility_strategy_visible_horizons,
+    )
+
+    return {
+        "raw_symbol_preview_scope": _preview_scope_label(raw_symbol_visible_horizons),
+        "raw_strategy_preview_scope": _preview_scope_label(raw_strategy_visible_horizons),
+        "compatibility_symbol_preview_scope": _preview_scope_label(
+            compatibility_symbol_visible_horizons
+        ),
+        "compatibility_strategy_preview_scope": _preview_scope_label(
+            compatibility_strategy_visible_horizons
+        ),
+        "raw_preview_union_scope": _preview_scope_label(raw_union),
+        "compatibility_preview_union_scope": _preview_scope_label(compatibility_union),
+        "actual_joined_scope": _preview_scope_label(joined_visible_horizons),
+        "raw_preview_union_horizons": raw_union,
+        "compatibility_preview_union_horizons": compatibility_union,
+        "actual_joined_horizons": joined_visible_horizons,
+    }
+
+
+def _preview_scope_label(horizons: list[str]) -> str:
+    if len(horizons) >= 2:
+        return "multi_horizon"
+    if len(horizons) == 1:
+        return "single_horizon"
+    return "empty"
+
 
 def _resolve_edge_candidate_visibility_reason(
     *,
     base_reason: str,
     symbol_preview: dict[str, Any],
     strategy_preview: dict[str, Any],
+    compatibility_symbol_preview: dict[str, Any],
+    compatibility_strategy_preview: dict[str, Any],
+    joined_visible_horizons: list[str],
 ) -> str:
+    diagnostics = _build_visibility_diagnostics(
+        symbol_preview=symbol_preview,
+        strategy_preview=strategy_preview,
+        compatibility_symbol_preview=compatibility_symbol_preview,
+        compatibility_strategy_preview=compatibility_strategy_preview,
+        joined_visible_horizons=joined_visible_horizons,
+    )
+
+    actual_joined_scope = str(diagnostics.get("actual_joined_scope") or "empty")
+    raw_preview_union_scope = str(diagnostics.get("raw_preview_union_scope") or "empty")
+    compatibility_preview_union_scope = str(
+        diagnostics.get("compatibility_preview_union_scope") or "empty"
+    )
+
     reasons = [base_reason]
 
-    symbol_visible_horizons = _normalize_horizon_list(
-        symbol_preview.get("visible_horizons")
-    )
-    if symbol_visible_horizons:
-        if len(symbol_visible_horizons) >= 2:
-            reasons.append("symbol_preview_multi_horizon")
+    if actual_joined_scope == "multi_horizon":
+        reasons.append("joined_selected_multi_horizon")
+    elif actual_joined_scope == "single_horizon":
+        if compatibility_preview_union_scope == "multi_horizon":
+            reasons.append("joined_selected_but_compatibility_preview_broader_than_joined")
+        elif raw_preview_union_scope == "multi_horizon":
+            reasons.append("joined_selected_but_raw_preview_broader_than_joined")
         else:
-            reasons.append("symbol_preview_single_horizon")
-
-    strategy_visible_horizons = _normalize_horizon_list(
-        strategy_preview.get("visible_horizons")
-    )
-    if strategy_visible_horizons:
-        if len(strategy_visible_horizons) >= 2:
-            reasons.append("strategy_preview_multi_horizon")
-        else:
-            reasons.append("strategy_preview_single_horizon")
+            reasons.append("joined_selected_single_horizon")
+    else:
+        reasons.append("joined_not_selected")
 
     deduped: list[str] = []
     for reason in reasons:
@@ -1281,13 +1722,32 @@ def _resolve_edge_candidate_visibility_reason(
     return "+".join(deduped)
 
 
-def _extract_joined_edge_candidate(
+def _evaluate_joined_edge_candidate_horizon(
     *,
     symbol: str,
     strategy: str,
     horizon: str,
     rows: list[dict[str, Any]],
-) -> dict[str, Any] | None:
+) -> dict[str, Any]:
+    if horizon not in STRATEGY_HORIZON_COMPATIBILITY.get(strategy, set()):
+        return {
+            "symbol": symbol,
+            "strategy": strategy,
+            "horizon": horizon,
+            "strategy_horizon_compatible": False,
+            "status": "rejected",
+            "rejection_reason": "strategy_horizon_incompatible",
+            "rejection_reasons": ["strategy_horizon_incompatible"],
+            "sample_gate": "not_applicable",
+            "quality_gate": "not_applicable",
+            "candidate_strength": "incompatible",
+            "candidate_strength_diagnostics": None,
+            "metrics": {},
+            "aggregate_score": None,
+            "visibility_reason": "strategy_horizon_incompatible",
+            "chosen_metric_summary": "strategy_horizon_incompatible",
+        }
+
     metrics = _build_joined_group_metrics(rows, horizon)
     sample_count = _to_float(metrics.get("sample_count"))
     labeled_count = _to_float(metrics.get("labeled_count"))
@@ -1296,13 +1756,54 @@ def _extract_joined_edge_candidate(
     positive_rate_pct = _to_float(metrics.get("positive_rate_pct"))
     robustness_label, robustness_value = _select_robustness_signal(metrics)
 
-    if not _passes_absolute_minimum_gate(
+    insufficiency_reason = _joined_metrics_insufficient_reason(
+        sample_count=sample_count,
+        labeled_count=labeled_count,
+        median_future_return_pct=median_future_return_pct,
+    )
+    if insufficiency_reason is not None:
+        return {
+            "symbol": symbol,
+            "strategy": strategy,
+            "horizon": horizon,
+            "strategy_horizon_compatible": True,
+            "status": "rejected",
+            "rejection_reason": insufficiency_reason,
+            "rejection_reasons": [insufficiency_reason],
+            "sample_gate": "failed",
+            "quality_gate": "failed",
+            "candidate_strength": "insufficient_data",
+            "candidate_strength_diagnostics": None,
+            "metrics": metrics,
+            "aggregate_score": None,
+            "visibility_reason": insufficiency_reason,
+            "chosen_metric_summary": insufficiency_reason,
+        }
+
+    absolute_gate_failure_reasons = _absolute_minimum_gate_failure_reasons(
         sample_count=sample_count,
         labeled_count=labeled_count,
         coverage_pct=coverage_pct,
         median_future_return_pct=median_future_return_pct,
-    ):
-        return None
+    )
+    if absolute_gate_failure_reasons:
+        return {
+            "symbol": symbol,
+            "strategy": strategy,
+            "horizon": horizon,
+            "strategy_horizon_compatible": True,
+            "status": "rejected",
+            "rejection_reason": "failed_absolute_minimum_gate",
+            "rejection_reasons": ["failed_absolute_minimum_gate", *absolute_gate_failure_reasons],
+            "sample_gate": "failed",
+            "quality_gate": "failed",
+            "candidate_strength": "insufficient_data",
+            "candidate_strength_diagnostics": None,
+            "metrics": metrics,
+            "aggregate_score": None,
+            "visibility_reason": "failed_absolute_minimum_gate",
+            "chosen_metric_summary": "failed_absolute_minimum_gate",
+        }
 
     diagnostics = _score_candidate_strength_diagnostics(
         sample_count=sample_count,
@@ -1311,8 +1812,118 @@ def _extract_joined_edge_candidate(
         robustness_value=robustness_value,
     )
     candidate_strength = str(diagnostics["final_classification"])
-    if candidate_strength not in {"moderate", "strong"}:
-        return None
+    aggregate_score = _to_float(diagnostics.get("aggregate_score"))
+
+    if candidate_strength in {"moderate", "strong"}:
+        return {
+            "symbol": symbol,
+            "strategy": strategy,
+            "horizon": horizon,
+            "strategy_horizon_compatible": True,
+            "status": "selected",
+            "rejection_reason": None,
+            "rejection_reasons": [],
+            "sample_gate": "passed",
+            "quality_gate": "passed",
+            "candidate_strength": candidate_strength,
+            "candidate_strength_diagnostics": diagnostics,
+            "metrics": metrics,
+            "aggregate_score": aggregate_score,
+            "visibility_reason": "passed_sample_and_quality_gate",
+            "chosen_metric_summary": _build_candidate_metric_summary(
+                sample_count=int(sample_count or 0),
+                median_future_return_pct=median_future_return_pct or 0.0,
+                positive_rate_pct=positive_rate_pct,
+                robustness_label=robustness_label,
+                robustness_value=robustness_value,
+                diagnostics=diagnostics,
+            ),
+        }
+
+    classification_reason = str(diagnostics.get("classification_reason") or "candidate_strength_weak")
+    rejection_reasons = ["candidate_strength_weak"]
+    if classification_reason not in rejection_reasons:
+        rejection_reasons.append(classification_reason)
+
+    return {
+        "symbol": symbol,
+        "strategy": strategy,
+        "horizon": horizon,
+        "strategy_horizon_compatible": True,
+        "status": "rejected",
+        "rejection_reason": "candidate_strength_weak",
+        "rejection_reasons": rejection_reasons,
+        "sample_gate": "passed",
+        "quality_gate": "failed",
+        "candidate_strength": candidate_strength,
+        "candidate_strength_diagnostics": diagnostics,
+        "metrics": metrics,
+        "aggregate_score": aggregate_score,
+        "visibility_reason": "candidate_strength_weak",
+        "chosen_metric_summary": _build_candidate_metric_summary(
+            sample_count=int(sample_count or 0),
+            median_future_return_pct=median_future_return_pct or 0.0,
+            positive_rate_pct=positive_rate_pct,
+            robustness_label=robustness_label,
+            robustness_value=robustness_value,
+            diagnostics=diagnostics,
+        ),
+    }
+
+
+def _joined_metrics_insufficient_reason(
+    *,
+    sample_count: float | None,
+    labeled_count: float | None,
+    median_future_return_pct: float | None,
+) -> str | None:
+    if sample_count is None or sample_count <= 0:
+        return "sample_count_zero"
+    if labeled_count is None or labeled_count <= 0:
+        return "no_labeled_rows_for_horizon"
+    if median_future_return_pct is None:
+        return "missing_median_future_return"
+    return None
+
+
+def _absolute_minimum_gate_failure_reasons(
+    *,
+    sample_count: float | None,
+    labeled_count: float | None,
+    coverage_pct: float | None,
+    median_future_return_pct: float | None,
+) -> list[str]:
+    reasons: list[str] = []
+
+    if sample_count is None or sample_count < MIN_EDGE_CANDIDATE_SAMPLE_COUNT:
+        reasons.append("sample_count_below_absolute_floor")
+
+    has_label_support = (
+        (labeled_count is not None and labeled_count > 0)
+        or (coverage_pct is not None and coverage_pct > 0)
+    )
+    if not has_label_support:
+        reasons.append("no_label_support_for_absolute_minimum_gate")
+
+    if median_future_return_pct is None:
+        reasons.append("missing_median_future_return")
+    elif median_future_return_pct <= 0:
+        reasons.append("median_future_return_non_positive")
+
+    return reasons
+
+
+def _build_joined_candidate_row_from_evaluation(
+    evaluation: dict[str, Any],
+) -> dict[str, Any]:
+    metrics = _coerce_dict(evaluation.get("metrics"))
+    diagnostics = _coerce_dict(evaluation.get("candidate_strength_diagnostics"))
+    sample_count = _to_float(metrics.get("sample_count"))
+    labeled_count = _to_float(metrics.get("labeled_count"))
+    coverage_pct = _to_float(metrics.get("coverage_pct"))
+    median_future_return_pct = _to_float(metrics.get("median_future_return_pct"))
+    positive_rate_pct = _to_float(metrics.get("positive_rate_pct"))
+    robustness_label, robustness_value = _select_robustness_signal(metrics)
 
     major_deficit_breakdown = diagnostics.get("major_deficit_breakdown")
     supporting_major_deficit_count = (
@@ -1323,16 +1934,16 @@ def _extract_joined_edge_candidate(
     )
 
     return {
-        "symbol": symbol,
-        "strategy": strategy,
-        "horizon": horizon,
-        "selected_candidate_strength": candidate_strength,
+        "symbol": evaluation.get("symbol"),
+        "strategy": evaluation.get("strategy"),
+        "horizon": evaluation.get("horizon"),
+        "selected_candidate_strength": evaluation.get("candidate_strength"),
         "selected_stability_label": None,
         "source_preference": None,
         "edge_stability_score": None,
         "drift_direction": None,
         "score_delta": None,
-        "selected_visible_horizons": [horizon],
+        "selected_visible_horizons": [str(evaluation.get("horizon"))],
         "sample_count": int(sample_count or 0),
         "labeled_count": int(labeled_count or 0),
         "coverage_pct": coverage_pct,
@@ -1344,16 +1955,13 @@ def _extract_joined_edge_candidate(
         "flat_rate_pct": _to_float(metrics.get("flat_rate_pct")),
         "robustness_signal": robustness_label,
         "robustness_signal_pct": robustness_value,
-        "aggregate_score": _to_float(diagnostics.get("aggregate_score")),
+        "aggregate_score": _to_float(evaluation.get("aggregate_score")),
         "supporting_major_deficit_count": supporting_major_deficit_count,
-        "visibility_reason": "passed_sample_and_quality_gate",
-        "chosen_metric_summary": _build_candidate_metric_summary(
-            sample_count=int(sample_count or 0),
-            median_future_return_pct=median_future_return_pct or 0.0,
-            positive_rate_pct=positive_rate_pct,
-            robustness_label=robustness_label,
-            robustness_value=robustness_value,
-            diagnostics=diagnostics,
+        "visibility_reason": str(
+            evaluation.get("visibility_reason") or "passed_sample_and_quality_gate"
+        ),
+        "chosen_metric_summary": str(
+            evaluation.get("chosen_metric_summary") or "passed_sample_and_quality_gate"
         ),
     }
 
@@ -1615,6 +2223,7 @@ def _build_markdown(metrics: dict[str, Any]) -> str:
     lines.extend(_markdown_top_highlights(top_highlights))
     lines.extend(_markdown_edge_candidates_preview(edge_candidates_preview))
     lines.extend(_markdown_edge_candidate_rows(edge_candidate_rows))
+    lines.extend(_markdown_identity_horizon_evaluations(edge_candidate_rows))
     lines.extend(_markdown_edge_stability_preview(edge_stability_preview))
 
     lines.append("## Schema Validation")
@@ -1832,7 +2441,11 @@ def _markdown_edge_candidates_preview(
 
 def _markdown_edge_candidate_rows(edge_candidate_rows: dict[str, Any]) -> list[str]:
     lines: list[str] = []
-    rows = edge_candidate_rows.get("rows", []) if isinstance(edge_candidate_rows.get("rows"), list) else []
+    rows = (
+        edge_candidate_rows.get("rows", [])
+        if isinstance(edge_candidate_rows.get("rows"), list)
+        else []
+    )
 
     lines.append("## Edge Candidate Rows")
     lines.append("")
@@ -1850,14 +2463,93 @@ def _markdown_edge_candidate_rows(edge_candidate_rows: dict[str, Any]) -> list[s
             "- "
             f"{row.get('symbol', 'n/a')} / {row.get('strategy', 'n/a')} / {row.get('horizon', 'n/a')} "
             f"(strength={row.get('selected_candidate_strength', 'n/a')}; "
-            f"stability={row.get('selected_stability_label', 'n/a')}; "
-            f"edge_stability_score={row.get('edge_stability_score', 'n/a')}; "
-            f"source_preference={row.get('source_preference', 'n/a')}; "
-            f"score_delta={row.get('score_delta', 'n/a')}; "
-            f"drift_direction={row.get('drift_direction', 'n/a')})"
+            f"actual_joined_eligible_horizons={row.get('actual_joined_eligible_horizons', [])}; "
+            f"raw_symbol_preview={row.get('preview_symbol_visible_horizons', [])}; "
+            f"raw_strategy_preview={row.get('preview_strategy_visible_horizons', [])}; "
+            f"compatibility_symbol_preview={row.get('compatibility_preview_symbol_visible_horizons', [])}; "
+            f"compatibility_strategy_preview={row.get('compatibility_preview_strategy_visible_horizons', [])}; "
+            f"visibility_reason={row.get('visibility_reason', 'n/a')})"
         )
     lines.append("")
     return lines
+
+
+def _markdown_identity_horizon_evaluations(
+    edge_candidate_rows: dict[str, Any],
+) -> list[str]:
+    lines: list[str] = []
+    identity_horizon_evaluations = (
+        edge_candidate_rows.get("identity_horizon_evaluations", [])
+        if isinstance(edge_candidate_rows.get("identity_horizon_evaluations"), list)
+        else []
+    )
+
+    lines.append("## Identity Horizon Diagnostics")
+    lines.append("")
+
+    if not identity_horizon_evaluations:
+        lines.append("No identity horizon diagnostics available.")
+        lines.append("")
+        return lines
+
+    for entry in identity_horizon_evaluations[:12]:
+        raw_preview_visibility = _coerce_dict(entry.get("raw_preview_visibility"))
+        compatibility_filtered_preview_visibility = _coerce_dict(
+            entry.get("compatibility_filtered_preview_visibility")
+        )
+        horizon_evaluations = _coerce_dict(entry.get("horizon_evaluations"))
+
+        lines.append(
+            f"### {entry.get('symbol', 'n/a')} / {entry.get('strategy', 'n/a')}"
+        )
+        lines.append(
+            "- raw_preview_visibility: "
+            f"symbol={_format_preview_visibility_entry(raw_preview_visibility.get('symbol'))}; "
+            f"strategy={_format_preview_visibility_entry(raw_preview_visibility.get('strategy'))}; "
+            f"union={raw_preview_visibility.get('raw_category_union_horizons', [])}; "
+            f"overlap={raw_preview_visibility.get('raw_category_overlap_horizons', [])}; "
+            f"quality_passed_overlap={raw_preview_visibility.get('raw_category_quality_passed_overlap_horizons', [])}"
+        )
+        lines.append(
+            "- compatibility_filtered_preview_visibility: "
+            f"symbol={_format_preview_visibility_entry(compatibility_filtered_preview_visibility.get('symbol'))}; "
+            f"strategy={_format_preview_visibility_entry(compatibility_filtered_preview_visibility.get('strategy'))}; "
+            f"union={compatibility_filtered_preview_visibility.get('compatibility_filtered_category_union_horizons', [])}; "
+            f"overlap={compatibility_filtered_preview_visibility.get('compatibility_filtered_category_overlap_horizons', [])}; "
+            f"quality_passed_overlap={compatibility_filtered_preview_visibility.get('compatibility_filtered_quality_passed_overlap_horizons', [])}; "
+            f"compatible_horizons={compatibility_filtered_preview_visibility.get('strategy_compatible_horizons', [])}"
+        )
+        lines.append(
+            "- actual_joined_eligible_horizons: "
+            f"{entry.get('actual_joined_eligible_horizons', [])} "
+            f"({entry.get('actual_joined_stability_label', 'single_horizon_only')})"
+        )
+        lines.append("- horizon_evaluations:")
+        for horizon in HORIZONS:
+            evaluation = _coerce_dict(horizon_evaluations.get(horizon))
+            lines.append(
+                f"  - {horizon}: status={evaluation.get('status', 'rejected')}, "
+                f"reason={evaluation.get('rejection_reason') or 'selected'}, "
+                f"reasons={evaluation.get('rejection_reasons', [])}, "
+                f"candidate_strength={evaluation.get('candidate_strength', 'n/a')}, "
+                f"sample_gate={evaluation.get('sample_gate', 'n/a')}, "
+                f"quality_gate={evaluation.get('quality_gate', 'n/a')}"
+            )
+        lines.append("")
+
+    return lines
+
+
+def _format_preview_visibility_entry(entry: Any) -> str:
+    if not isinstance(entry, dict):
+        return "none"
+    return (
+        f"visible_horizons={entry.get('visible_horizons', [])}, "
+        f"quality_passed_horizons={entry.get('quality_passed_horizons', [])}, "
+        f"horizon_strengths={entry.get('horizon_strengths', {})}, "
+        f"stability_label={entry.get('stability_label')}, "
+        f"visibility_reason={entry.get('visibility_reason')}"
+    )
 
 
 def _format_edge_candidate_markdown(candidate: Any) -> str:
