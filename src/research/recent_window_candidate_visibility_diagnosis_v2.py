@@ -33,7 +33,10 @@ def _default_output_dir() -> Path:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Diagnose recent-window candidate visibility using true subset datasets."
+        description=(
+            "Diagnose recent-window candidate visibility using full-context datasets "
+            "cut at target-anchor recency boundaries."
+        )
     )
     parser.add_argument("--input", type=Path, default=_default_input_path())
     parser.add_argument("--output-dir", type=Path, default=_default_output_dir())
@@ -155,26 +158,94 @@ def _filter_recent_labeled_rows(
     return labeled[-window:] if window > 0 else labeled
 
 
-def _select_subset(
+def _extract_logged_at(row: dict[str, Any]) -> str:
+    value = row.get("logged_at")
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            return text
+    return ""
+
+
+def _build_full_context_recent_subset(
     dataset: list[dict[str, Any]],
+    *,
     targets: list[tuple[str, str]],
-    horizon: str,
-    window: int,
-) -> list[dict[str, Any]]:
-    ids: set[int] = set()
+    anchor_horizon: str,
+    labeled_window: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """
+    Build a recent-window dataset while preserving full-category context.
+
+    Logic:
+    1. For each target identity, collect recent labeled rows on anchor_horizon.
+    2. Find the earliest logged_at among those selected anchor rows.
+    3. Keep ALL dataset rows whose logged_at is >= that cutoff.
+    4. If logged_at is missing everywhere or cutoff cannot be determined, fall back
+       to target-row-only subset and record fallback metadata.
+    """
+    selected_anchor_rows: list[dict[str, Any]] = []
 
     for symbol, strategy in targets:
-        rows = [
+        identity_rows = [
             row
             for row in dataset
             if _normalize_symbol(row.get("symbol")) == symbol
             and _normalize_strategy(row.get("selected_strategy")) == strategy
         ]
-        subset = _filter_recent_labeled_rows(rows, horizon, window)
-        for row in subset:
-            ids.add(id(row))
+        recent_rows = _filter_recent_labeled_rows(
+            identity_rows,
+            horizon=anchor_horizon,
+            window=labeled_window,
+        )
+        selected_anchor_rows.extend(recent_rows)
 
-    return [row for row in dataset if id(row) in ids]
+    if not selected_anchor_rows:
+        return [], {
+            "subset_mode": "empty",
+            "cutoff_logged_at": None,
+            "selected_anchor_row_count": 0,
+            "full_context_row_count": 0,
+        }
+
+    anchor_logged_ats = [
+        _extract_logged_at(row)
+        for row in selected_anchor_rows
+        if _extract_logged_at(row)
+    ]
+
+    if not anchor_logged_ats:
+        target_ids = {id(row) for row in selected_anchor_rows}
+        fallback_subset = [row for row in dataset if id(row) in target_ids]
+        return fallback_subset, {
+            "subset_mode": "target_row_only_fallback",
+            "cutoff_logged_at": None,
+            "selected_anchor_row_count": len(selected_anchor_rows),
+            "full_context_row_count": len(fallback_subset),
+        }
+
+    cutoff_logged_at = min(anchor_logged_ats)
+    full_context_subset = [
+        row for row in dataset
+        if _extract_logged_at(row) and _extract_logged_at(row) >= cutoff_logged_at
+    ]
+
+    if not full_context_subset:
+        target_ids = {id(row) for row in selected_anchor_rows}
+        fallback_subset = [row for row in dataset if id(row) in target_ids]
+        return fallback_subset, {
+            "subset_mode": "target_row_only_fallback_after_empty_cut",
+            "cutoff_logged_at": cutoff_logged_at,
+            "selected_anchor_row_count": len(selected_anchor_rows),
+            "full_context_row_count": len(fallback_subset),
+        }
+
+    return full_context_subset, {
+        "subset_mode": "full_context_cutoff",
+        "cutoff_logged_at": cutoff_logged_at,
+        "selected_anchor_row_count": len(selected_anchor_rows),
+        "full_context_row_count": len(full_context_subset),
+    }
 
 
 def _write_subset(rows: list[dict[str, Any]], path: Path) -> None:
@@ -401,10 +472,19 @@ def _build_markdown(payload: dict[str, Any]) -> str:
             if isinstance(joined.get("identity_horizon_evaluations"), list)
             else []
         )
+        subset_metadata = snapshot.get("subset_metadata", {}) or {}
 
         lines.append(f"## Window {snapshot.get('labeled_window')}")
         lines.append("")
         lines.append(f"- subset_dataset_rows: {snapshot.get('subset_dataset_rows', 0)}")
+        lines.append(f"- subset_mode: {subset_metadata.get('subset_mode')}")
+        lines.append(f"- cutoff_logged_at: {subset_metadata.get('cutoff_logged_at')}")
+        lines.append(
+            f"- selected_anchor_row_count: {subset_metadata.get('selected_anchor_row_count')}"
+        )
+        lines.append(
+            f"- full_context_row_count: {subset_metadata.get('full_context_row_count')}"
+        )
         lines.append(f"- row_count: {joined.get('row_count', 0)}")
         lines.append(f"- symbol_counter: {joined.get('symbol_counter', {})}")
         lines.append(f"- strategy_counter: {joined.get('strategy_counter', {})}")
@@ -552,7 +632,12 @@ def main() -> None:
     windows_payload: list[dict[str, Any]] = []
 
     for window in args.windows:
-        subset = _select_subset(dataset, targets, args.anchor_horizon, window)
+        subset, subset_metadata = _build_full_context_recent_subset(
+            dataset,
+            targets=targets,
+            anchor_horizon=args.anchor_horizon,
+            labeled_window=window,
+        )
 
         tmp = args.output_dir / f"_tmp_recent_window_{args.anchor_horizon}_{window}.jsonl"
         _write_subset(subset, tmp)
@@ -587,6 +672,7 @@ def main() -> None:
             {
                 "labeled_window": window,
                 "subset_dataset_rows": len(subset),
+                "subset_metadata": subset_metadata,
                 "joined_candidate_rows": _summarize(rows),
                 "preview_summary": _extract_preview_summary(preview, stability),
                 "target_recent_metrics": target_recent_metrics,
