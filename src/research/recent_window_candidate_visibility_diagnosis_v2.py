@@ -34,8 +34,8 @@ def _default_output_dir() -> Path:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Diagnose recent-window candidate visibility using full-context datasets "
-            "cut at target-anchor recency boundaries."
+            "Diagnose recent-window visibility by explicitly separating "
+            "target-only recovery signals from full-context joined-candidate survival."
         )
     )
     parser.add_argument("--input", type=Path, default=_default_input_path())
@@ -96,6 +96,12 @@ def _median_or_none(values: list[float]) -> float | None:
     if not values:
         return None
     return round(float(median(values)), 6)
+
+
+def _avg_or_none(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return round(sum(values) / len(values), 6)
 
 
 def _json_safe_value(value: Any) -> Any:
@@ -170,6 +176,20 @@ def _extract_logged_at(row: dict[str, Any]) -> str | None:
     return None
 
 
+def _filter_identity_rows(
+    dataset: list[dict[str, Any]],
+    *,
+    symbol: str,
+    strategy: str,
+) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in dataset
+        if _normalize_symbol(row.get("symbol")) == symbol
+        and _normalize_strategy(row.get("selected_strategy")) == strategy
+    ]
+
+
 def _build_full_context_recent_subset(
     dataset: list[dict[str, Any]],
     *,
@@ -180,13 +200,14 @@ def _build_full_context_recent_subset(
     """
     Build a recent-window dataset while preserving full-category context.
 
-    Primary strategy:
-    - Find the original dataset indices of each target identity's recent anchor-horizon
-      labeled rows.
-    - Use the earliest selected index as a cutoff.
-    - Keep ALL rows from cutoff_index to the end of the dataset.
+    Strategy:
+    - For each target identity, find recent labeled rows for the anchor horizon.
+    - Collect their original row indices from the full dataset.
+    - Use the earliest selected row index as the cutoff.
+    - Keep ALL rows from cutoff_index to the dataset tail.
 
-    This avoids relying on logged_at, which may be absent after dataset building.
+    This produces a strict full-context subset suitable for analyzer/joined survival
+    diagnosis without relying on logged_at preservation.
     """
     selected_anchor_indices: list[int] = []
 
@@ -198,7 +219,7 @@ def _build_full_context_recent_subset(
             and _normalize_strategy(row.get("selected_strategy")) == strategy
         ]
         recent_indices = _filter_recent_labeled_row_indices(
-            indexed_rows,
+            indexed_rows=indexed_rows,
             horizon=anchor_horizon,
             window=labeled_window,
         )
@@ -237,39 +258,21 @@ def _write_subset(rows: list[dict[str, Any]], path: Path) -> None:
             f.write(json.dumps(safe_row, ensure_ascii=False) + "\n")
 
 
-def _build_target_recent_metrics(
-    dataset: list[dict[str, Any]],
+def _build_metrics_from_rows(
+    rows: list[dict[str, Any]],
     *,
     symbol: str,
     strategy: str,
     horizon: str,
-    labeled_window: int,
+    metric_mode: str,
 ) -> dict[str, Any]:
-    target_rows = [
-        row
-        for row in dataset
-        if _normalize_symbol(row.get("symbol")) == symbol
-        and _normalize_strategy(row.get("selected_strategy")) == strategy
-    ]
-
     label_key = f"future_label_{horizon}"
     return_key = f"future_return_{horizon}"
-
-    recent_labeled_rows = [
-        row
-        for row in target_rows
-        if _normalize_label(row.get(label_key)) is not None
-    ]
-    recent_labeled_rows = (
-        recent_labeled_rows[-labeled_window:]
-        if labeled_window > 0
-        else recent_labeled_rows
-    )
 
     label_counter: Counter[str] = Counter()
     returns: list[float] = []
 
-    for row in recent_labeled_rows:
+    for row in rows:
         label = _normalize_label(row.get(label_key))
         if label is None:
             continue
@@ -285,31 +288,79 @@ def _build_target_recent_metrics(
     down_count = label_counter.get("down", 0)
     flat_count = label_counter.get("flat", 0)
 
-    positive_rate_pct = None
+    directional_dominance_pct = None
     if labeled_count > 0:
-        positive_rate_pct = max(
+        directional_dominance_pct = max(
             _pct(up_count, labeled_count) or 0.0,
             _pct(down_count, labeled_count) or 0.0,
         )
 
     return {
+        "metric_mode": metric_mode,
         "symbol": symbol,
         "strategy": strategy,
         "horizon": horizon,
-        "target_row_count": len(target_rows),
-        "available_labeled_total": len(
-            [row for row in target_rows if _normalize_label(row.get(label_key)) is not None]
-        ),
+        "row_count": len(rows),
         "subset_labeled_count": labeled_count,
+        "up_count": up_count,
+        "down_count": down_count,
+        "flat_count": flat_count,
         "up_rate_pct": _pct(up_count, labeled_count),
         "down_rate_pct": _pct(down_count, labeled_count),
         "flat_rate_pct": _pct(flat_count, labeled_count),
-        "positive_rate_pct": positive_rate_pct,
-        "avg_future_return_pct": (
-            round(sum(returns) / len(returns), 6) if returns else None
-        ),
+        "directional_dominance_pct": directional_dominance_pct,
+        "avg_future_return_pct": _avg_or_none(returns),
         "median_future_return_pct": _median_or_none(returns),
     }
+
+
+def _build_target_only_recent_metrics(
+    dataset: list[dict[str, Any]],
+    *,
+    symbol: str,
+    strategy: str,
+    horizon: str,
+    labeled_window: int,
+) -> dict[str, Any]:
+    target_rows = _filter_identity_rows(dataset, symbol=symbol, strategy=strategy)
+    label_key = f"future_label_{horizon}"
+
+    labeled_target_rows = [
+        row
+        for row in target_rows
+        if _normalize_label(row.get(label_key)) is not None
+    ]
+    recent_rows = labeled_target_rows[-labeled_window:] if labeled_window > 0 else labeled_target_rows
+
+    metrics = _build_metrics_from_rows(
+        recent_rows,
+        symbol=symbol,
+        strategy=strategy,
+        horizon=horizon,
+        metric_mode="target_only_recent_labeled_rows",
+    )
+    metrics["target_row_count_total"] = len(target_rows)
+    metrics["available_labeled_total"] = len(labeled_target_rows)
+    return metrics
+
+
+def _build_subset_context_target_metrics(
+    subset: list[dict[str, Any]],
+    *,
+    symbol: str,
+    strategy: str,
+    horizon: str,
+) -> dict[str, Any]:
+    subset_target_rows = _filter_identity_rows(subset, symbol=symbol, strategy=strategy)
+    metrics = _build_metrics_from_rows(
+        subset_target_rows,
+        symbol=symbol,
+        strategy=strategy,
+        horizon=horizon,
+        metric_mode="full_context_subset_target_rows",
+    )
+    metrics["subset_target_row_count_total"] = len(subset_target_rows)
+    return metrics
 
 
 def _summarize(rows_block: dict[str, Any]) -> dict[str, Any]:
@@ -370,6 +421,96 @@ def _scope_label(horizons: list[str]) -> str:
     if len(horizons) == 1:
         return "single_horizon"
     return "empty"
+
+
+def _extract_identity_entry(
+    joined_candidate_rows: dict[str, Any],
+    identity_key: str,
+) -> dict[str, Any] | None:
+    entries = joined_candidate_rows.get("identity_horizon_evaluations", [])
+    if not isinstance(entries, list):
+        return None
+
+    for entry in entries:
+        if str(entry.get("identity_key")) == identity_key:
+            return entry
+    return None
+
+
+def _build_recovery_vs_survival_summary(
+    *,
+    identity_key: str,
+    identity_entry: dict[str, Any] | None,
+    target_only_metrics: dict[str, Any],
+    subset_context_metrics: dict[str, Any],
+) -> dict[str, Any]:
+    joined_horizons = []
+    joined_stability_label = None
+    rejection_reasons: dict[str, str] = {}
+
+    if identity_entry:
+        joined_horizons = identity_entry.get("actual_joined_eligible_horizons", []) or []
+        joined_stability_label = identity_entry.get("actual_joined_stability_label")
+        horizon_evaluations = identity_entry.get("horizon_evaluations", {}) or {}
+        for horizon in HORIZONS:
+            evaluation = horizon_evaluations.get(horizon, {}) or {}
+            if evaluation.get("status") == "selected":
+                rejection_reasons[horizon] = "selected"
+            else:
+                rejection_reasons[horizon] = str(
+                    evaluation.get("rejection_reason") or "unknown"
+                )
+    else:
+        joined_stability_label = "identity_not_present_in_evaluations"
+        rejection_reasons = {h: "identity_not_present_in_evaluations" for h in HORIZONS}
+
+    horizon_summary: dict[str, Any] = {}
+    for horizon in HORIZONS:
+        target_metric = target_only_metrics.get(horizon, {}) or {}
+        subset_metric = subset_context_metrics.get(horizon, {}) or {}
+
+        target_labeled = target_metric.get("subset_labeled_count")
+        subset_labeled = subset_metric.get("subset_labeled_count")
+        target_median = target_metric.get("median_future_return_pct")
+        subset_median = subset_metric.get("median_future_return_pct")
+        target_dom = target_metric.get("directional_dominance_pct")
+        subset_dom = subset_metric.get("directional_dominance_pct")
+
+        local_recovery_signal = (
+            (target_labeled or 0) > 0 and (
+                target_median is not None or target_dom is not None
+            )
+        )
+        subset_signal_present = (
+            (subset_labeled or 0) > 0 and (
+                subset_median is not None or subset_dom is not None
+            )
+        )
+        survives_joined = horizon in joined_horizons
+
+        if survives_joined:
+            diagnosis = "local_recovery_and_joined_survival"
+        elif local_recovery_signal and subset_signal_present:
+            diagnosis = "local_recovery_present_but_joined_survival_failed"
+        elif local_recovery_signal and not subset_signal_present:
+            diagnosis = "target_only_recovery_present_but_subset_context_thin_or_empty"
+        else:
+            diagnosis = "no_meaningful_local_recovery_signal"
+
+        horizon_summary[horizon] = {
+            "target_only_recent_metrics": target_metric,
+            "subset_context_target_metrics": subset_metric,
+            "survives_joined": survives_joined,
+            "joined_status_or_rejection_reason": rejection_reasons.get(horizon),
+            "diagnosis": diagnosis,
+        }
+
+    return {
+        "identity_key": identity_key,
+        "actual_joined_eligible_horizons": joined_horizons,
+        "actual_joined_stability_label": joined_stability_label,
+        "by_horizon": horizon_summary,
+    }
 
 
 def _build_interpretation(entry: dict[str, Any]) -> list[str]:
@@ -440,19 +581,26 @@ def _build_interpretation(entry: dict[str, Any]) -> list[str]:
 
 def _build_markdown(payload: dict[str, Any]) -> str:
     lines: list[str] = []
-    lines.append("# Recent Window Candidate Visibility Diagnosis")
+    lines.append("# Recent Window Candidate Visibility Diagnosis v2")
+    lines.append("")
+    lines.append(
+        "This report explicitly separates target-only recovery signals from full-context joined-candidate survival."
+    )
     lines.append("")
     lines.append(f"- generated_at: {payload.get('generated_at')}")
     lines.append(f"- input_path: {payload.get('input_path')}")
     lines.append(f"- dataset_rows: {payload.get('dataset_rows')}")
     lines.append(f"- anchor_horizon: {payload.get('anchor_horizon')}")
+    lines.append(f"- targets: {payload.get('targets')}")
     lines.append("")
 
     for snapshot in payload.get("windows", []):
         joined = snapshot.get("joined_candidate_rows", {}) or {}
         preview = snapshot.get("preview_summary", {}) or {}
         raw_preview_by_horizon = preview.get("raw_preview_by_horizon", {}) or {}
-        target_recent_metrics = snapshot.get("target_recent_metrics", {}) or {}
+        target_only_metrics = snapshot.get("target_only_recent_metrics", {}) or {}
+        subset_context_metrics = snapshot.get("subset_context_target_metrics", {}) or {}
+        recovery_vs_survival = snapshot.get("recovery_vs_survival", {}) or {}
         identity_horizon_evaluations = (
             joined.get("identity_horizon_evaluations", [])
             if isinstance(joined.get("identity_horizon_evaluations"), list)
@@ -477,10 +625,6 @@ def _build_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- strategy_counter: {joined.get('strategy_counter', {})}")
         lines.append(f"- horizon_counter: {joined.get('horizon_counter', {})}")
         lines.append(f"- stability_counter: {joined.get('stability_counter', {})}")
-        lines.append("")
-        lines.append(
-            "Preview is category-level, while joined candidate rows are identity-level and filtered by strategy-horizon compatibility plus candidate quality gates."
-        )
         lines.append("")
 
         lines.append("### Joined Candidate Rows")
@@ -589,20 +733,83 @@ def _build_markdown(payload: dict[str, Any]) -> str:
             lines.append("No identity visibility diagnostics available.")
             lines.append("")
 
-        lines.append("### Target Recent Metrics")
+        lines.append("### Recovery vs Survival")
         lines.append("")
-        for identity, metrics_by_horizon in target_recent_metrics.items():
+        for identity_key, identity_summary in recovery_vs_survival.items():
+            lines.append(f"#### {identity_key}")
+            lines.append(
+                f"- actual_joined_eligible_horizons: {identity_summary.get('actual_joined_eligible_horizons')}"
+            )
+            lines.append(
+                f"- actual_joined_stability_label: {identity_summary.get('actual_joined_stability_label')}"
+            )
+            lines.append("")
+
+            by_horizon = identity_summary.get("by_horizon", {}) or {}
+            for horizon in HORIZONS:
+                horizon_summary = by_horizon.get(horizon, {}) or {}
+                target_metric = horizon_summary.get("target_only_recent_metrics", {}) or {}
+                subset_metric = horizon_summary.get("subset_context_target_metrics", {}) or {}
+
+                lines.append(f"- {horizon}:")
+                lines.append(
+                    f"  - diagnosis: {horizon_summary.get('diagnosis')}"
+                )
+                lines.append(
+                    f"  - survives_joined: {horizon_summary.get('survives_joined')}"
+                )
+                lines.append(
+                    f"  - joined_status_or_rejection_reason: {horizon_summary.get('joined_status_or_rejection_reason')}"
+                )
+                lines.append(
+                    "  - target_only_recent_metrics: "
+                    f"labeled_count={target_metric.get('subset_labeled_count')}, "
+                    f"dominance_pct={target_metric.get('directional_dominance_pct')}, "
+                    f"avg_return={target_metric.get('avg_future_return_pct')}, "
+                    f"median_return={target_metric.get('median_future_return_pct')}"
+                )
+                lines.append(
+                    "  - subset_context_target_metrics: "
+                    f"labeled_count={subset_metric.get('subset_labeled_count')}, "
+                    f"dominance_pct={subset_metric.get('directional_dominance_pct')}, "
+                    f"avg_return={subset_metric.get('avg_future_return_pct')}, "
+                    f"median_return={subset_metric.get('median_future_return_pct')}"
+                )
+            lines.append("")
+
+        lines.append("### Target-Only Recent Metrics")
+        lines.append("")
+        for identity, metrics_by_horizon in target_only_metrics.items():
             lines.append(f"#### {identity}")
             for horizon in HORIZONS:
                 metric = metrics_by_horizon.get(horizon, {}) or {}
                 lines.append(
                     "- "
                     f"{horizon}: "
-                    f"subset_labeled_count={metric.get('subset_labeled_count')}, "
+                    f"labeled_count={metric.get('subset_labeled_count')}, "
                     f"up_rate_pct={metric.get('up_rate_pct')}, "
                     f"down_rate_pct={metric.get('down_rate_pct')}, "
                     f"flat_rate_pct={metric.get('flat_rate_pct')}, "
-                    f"positive_rate_pct={metric.get('positive_rate_pct')}, "
+                    f"directional_dominance_pct={metric.get('directional_dominance_pct')}, "
+                    f"avg_future_return_pct={metric.get('avg_future_return_pct')}, "
+                    f"median_future_return_pct={metric.get('median_future_return_pct')}"
+                )
+            lines.append("")
+
+        lines.append("### Subset-Context Target Metrics")
+        lines.append("")
+        for identity, metrics_by_horizon in subset_context_metrics.items():
+            lines.append(f"#### {identity}")
+            for horizon in HORIZONS:
+                metric = metrics_by_horizon.get(horizon, {}) or {}
+                lines.append(
+                    "- "
+                    f"{horizon}: "
+                    f"labeled_count={metric.get('subset_labeled_count')}, "
+                    f"up_rate_pct={metric.get('up_rate_pct')}, "
+                    f"down_rate_pct={metric.get('down_rate_pct')}, "
+                    f"flat_rate_pct={metric.get('flat_rate_pct')}, "
+                    f"directional_dominance_pct={metric.get('directional_dominance_pct')}, "
                     f"avg_future_return_pct={metric.get('avg_future_return_pct')}, "
                     f"median_future_return_pct={metric.get('median_future_return_pct')}"
                 )
@@ -642,27 +849,51 @@ def main() -> None:
             if not args.keep_temp_files and tmp.exists():
                 tmp.unlink()
 
-        target_recent_metrics: dict[str, Any] = {}
+        joined_summary = _summarize(rows)
+
+        target_only_recent_metrics: dict[str, Any] = {}
+        subset_context_target_metrics: dict[str, Any] = {}
+        recovery_vs_survival: dict[str, Any] = {}
+
         for symbol, strategy in targets:
             identity_key = f"{symbol}:{strategy}"
-            target_recent_metrics[identity_key] = {}
+
+            target_only_recent_metrics[identity_key] = {}
+            subset_context_target_metrics[identity_key] = {}
+
             for horizon in HORIZONS:
-                target_recent_metrics[identity_key][horizon] = _build_target_recent_metrics(
+                target_only_recent_metrics[identity_key][horizon] = _build_target_only_recent_metrics(
                     dataset,
                     symbol=symbol,
                     strategy=strategy,
                     horizon=horizon,
                     labeled_window=window,
                 )
+                subset_context_target_metrics[identity_key][horizon] = _build_subset_context_target_metrics(
+                    subset,
+                    symbol=symbol,
+                    strategy=strategy,
+                    horizon=horizon,
+                )
+
+            identity_entry = _extract_identity_entry(joined_summary, identity_key)
+            recovery_vs_survival[identity_key] = _build_recovery_vs_survival_summary(
+                identity_key=identity_key,
+                identity_entry=identity_entry,
+                target_only_metrics=target_only_recent_metrics[identity_key],
+                subset_context_metrics=subset_context_target_metrics[identity_key],
+            )
 
         windows_payload.append(
             {
                 "labeled_window": window,
                 "subset_dataset_rows": len(subset),
                 "subset_metadata": subset_metadata,
-                "joined_candidate_rows": _summarize(rows),
+                "joined_candidate_rows": joined_summary,
                 "preview_summary": _extract_preview_summary(preview, stability),
-                "target_recent_metrics": target_recent_metrics,
+                "target_only_recent_metrics": target_only_recent_metrics,
+                "subset_context_target_metrics": subset_context_target_metrics,
+                "recovery_vs_survival": recovery_vs_survival,
             }
         )
 
