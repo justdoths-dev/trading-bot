@@ -153,7 +153,9 @@ class TradeAnalysisLogger:
 
         rule_engine_bias = self._value_or_unknown(selected_result.get("bias"))
         rule_engine_reason = self._value_or_unknown(selected_result.get("reason"))
+
         timeframe_summary = self._build_timeframe_summary(strategy_result)
+        timeframe_summary_text = self._build_timeframe_summary_text(strategy_result)
 
         record = {
             "logged_at": self._now_iso(),
@@ -162,6 +164,7 @@ class TradeAnalysisLogger:
             "bias": rule_engine_bias,
             "reason": rule_engine_reason,
             "timeframe_summary": timeframe_summary,
+            "timeframe_summary_text": timeframe_summary_text,
             "scalping_result": {
                 "strategy": scalping_result.get("strategy"),
                 "signal": scalping_result.get("signal"),
@@ -254,7 +257,32 @@ class TradeAnalysisLogger:
             "is_aligned": aligned,
         }
 
-    def _build_timeframe_summary(self, strategy_result: dict[str, Any]) -> str:
+    def _build_timeframe_summary(self, strategy_result: dict[str, Any]) -> dict[str, Any]:
+        """
+        Preserve the detector-based structured timeframe summary.
+
+        This should remain a dict so that research/diagnostics can access:
+        - context_layer
+        - setup_layer
+        - trigger_layer
+        - timeframe-specific states
+        """
+        selected_result = strategy_result.get("selected_result", {}) or {}
+        timeframe_summary_raw = selected_result.get("timeframe_summary", {})
+
+        if isinstance(timeframe_summary_raw, dict):
+            return self._json_safe_copy(timeframe_summary_raw) or {}
+
+        # Backward-compatible fallback for unexpected legacy values.
+        return {"legacy_value": timeframe_summary_raw}
+
+    def _build_timeframe_summary_text(self, strategy_result: dict[str, Any]) -> str:
+        """
+        Build a legacy-friendly human-readable timeframe summary string.
+
+        This is kept as a separate field for grep/debug convenience, while
+        timeframe_summary itself stays structured.
+        """
         selected_result = strategy_result.get("selected_result", {}) or {}
         timeframe_summary_raw = selected_result.get("timeframe_summary", {})
 
