@@ -91,11 +91,15 @@ def main() -> None:
     if args.write_latest_copy:
         written_paths = write_report_files(report, args.output_dir)
 
+    metadata = report["metadata"]
     summary = {
         "report_type": REPORT_TYPE,
-        "input_path_used": report["metadata"]["input_path_used"],
-        "selected_rows_seen": report["metadata"]["selected_rows_seen"],
-        "filtered_selected_rows_used": report["metadata"]["selected_row_count"],
+        "input_path_used": metadata["input_path_used"],
+        "selected_rows_seen": metadata["selected_rows_seen"],
+        "filtered_selected_row_count_before_recent_limit": metadata[
+            "filtered_selected_row_count_before_recent_limit"
+        ],
+        "selected_row_count_used": metadata["selected_row_count_used"],
         "verdict": report["verdict"]["label"],
         "written_paths": written_paths,
     }
@@ -180,6 +184,7 @@ def build_report(
         for row in selected_rows_all
         if _matches_filters(row, symbol=symbol, strategy=strategy, horizon=horizon)
     ]
+    filtered_selected_row_count_before_recent_limit = len(filtered_rows)
     limited_rows = _apply_recent_selected_limit(filtered_rows, recent_selected)
 
     returns_summary = {
@@ -198,7 +203,8 @@ def build_report(
         "input_path_used": str(input_path),
         "total_rows_read": total_rows_read,
         "selected_rows_seen": selected_rows_seen,
-        "selected_row_count": len(limited_rows),
+        "filtered_selected_row_count_before_recent_limit": filtered_selected_row_count_before_recent_limit,
+        "selected_row_count_used": len(limited_rows),
         "malformed_row_count": malformed_row_count,
         "skipped_non_selected_count": skipped_non_selected_count,
         "skipped_filter_mismatch_count": skipped_filter_mismatch_count,
@@ -253,7 +259,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- input_path: {metadata.get('input_path_used')}",
         f"- total_rows_read: {metadata.get('total_rows_read', 0)}",
         f"- selected_rows_seen: {metadata.get('selected_rows_seen', 0)}",
-        f"- filtered_selected_rows_used: {metadata.get('selected_row_count', 0)}",
+        f"- filtered_selected_row_count_before_recent_limit: {metadata.get('filtered_selected_row_count_before_recent_limit', 0)}",
+        f"- selected_row_count_used: {metadata.get('selected_row_count_used', 0)}",
         f"- malformed_rows: {metadata.get('malformed_row_count', 0)}",
         f"- skipped_non_selected_count: {metadata.get('skipped_non_selected_count', 0)}",
         f"- skipped_filter_mismatch_count: {metadata.get('skipped_filter_mismatch_count', 0)}",
@@ -330,6 +337,13 @@ def _clean_text(value: Any) -> str | None:
     return text or None
 
 
+def _normalize_text(value: str | None) -> str | None:
+    cleaned = _clean_text(value)
+    if cleaned is None:
+        return None
+    return cleaned.casefold()
+
+
 def _safe_float(value: Any) -> float | None:
     if value is None or isinstance(value, bool):
         return None
@@ -396,11 +410,19 @@ def _matches_filters(
     strategy: str | None,
     horizon: str | None,
 ) -> bool:
-    if symbol is not None and row.selected_symbol != symbol:
+    row_symbol = _normalize_text(row.selected_symbol)
+    row_strategy = _normalize_text(row.selected_strategy)
+    row_horizon = _normalize_text(row.selected_horizon)
+
+    filter_symbol = _normalize_text(symbol)
+    filter_strategy = _normalize_text(strategy)
+    filter_horizon = _normalize_text(horizon)
+
+    if filter_symbol is not None and row_symbol != filter_symbol:
         return False
-    if strategy is not None and row.selected_strategy != strategy:
+    if filter_strategy is not None and row_strategy != filter_strategy:
         return False
-    if horizon is not None and row.selected_horizon != horizon:
+    if filter_horizon is not None and row_horizon != filter_horizon:
         return False
     return True
 
@@ -503,19 +525,19 @@ def _interpret_report(
     notes = [
         (
             "15m: "
-            f"positive_rate={_format_pct(metrics_15m.get('positive_rate_pct'))}%, "
+            f"positive_rate={_format_pct(metrics_15m.get('positive_rate_pct'))}, "
             f"median={_format_pct(metrics_15m.get('median_return_pct'))}, "
             f"mean={_format_pct(metrics_15m.get('mean_return_pct'))}"
         ),
         (
             "1h: "
-            f"positive_rate={_format_pct(metrics_1h.get('positive_rate_pct'))}%, "
+            f"positive_rate={_format_pct(metrics_1h.get('positive_rate_pct'))}, "
             f"median={_format_pct(metrics_1h.get('median_return_pct'))}, "
             f"mean={_format_pct(metrics_1h.get('mean_return_pct'))}"
         ),
         (
             "4h: "
-            f"positive_rate={_format_pct(metrics_4h.get('positive_rate_pct'))}%, "
+            f"positive_rate={_format_pct(metrics_4h.get('positive_rate_pct'))}, "
             f"median={_format_pct(metrics_4h.get('median_return_pct'))}, "
             f"mean={_format_pct(metrics_4h.get('mean_return_pct'))}"
         ),
@@ -531,7 +553,10 @@ def _interpret_report(
     if _is_outlier_driven(metrics_15m) or _is_outlier_driven(metrics_1h) or _is_outlier_driven(metrics_4h):
         return (
             notes
-            + ["Mean returns are materially above median returns on at least one horizon, suggesting outlier dependence."],
+            + [
+                "Mean returns are materially above median returns on at least one horizon, "
+                "suggesting outlier dependence."
+            ],
             "outlier_driven_recovery",
             "Recovered selection appears to rely on a small number of outsized winners rather than broad quality.",
         )
@@ -616,7 +641,11 @@ def _is_outlier_driven(metrics: dict[str, int | float | None]) -> bool:
         return False
     if mean_minus_median is None or mean_return is None or median_return is None:
         return False
-    return mean_return > 0.0 and median_return <= 0.0 and mean_minus_median >= OUTLIER_DIVERGENCE_THRESHOLD_PCT
+    return (
+        mean_return > 0.0
+        and median_return <= 0.0
+        and mean_minus_median >= OUTLIER_DIVERGENCE_THRESHOLD_PCT
+    )
 
 
 def _optional_float(value: Any) -> float | None:
