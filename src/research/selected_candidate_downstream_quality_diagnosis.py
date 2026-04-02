@@ -100,6 +100,8 @@ def main() -> None:
             "filtered_selected_row_count_before_recent_limit"
         ],
         "selected_row_count_used": metadata["selected_row_count_used"],
+        "downstream_return_fields_available": metadata["downstream_return_fields_available"],
+        "downstream_non_null_total_count": metadata["downstream_non_null_total_count"],
         "verdict": report["verdict"]["label"],
         "written_paths": written_paths,
     }
@@ -192,9 +194,16 @@ def build_report(
         for field in RETURN_FIELDS
     }
     score_summary = _compute_score_summary([row.top_score for row in limited_rows])
+
+    downstream_non_null_total_count = sum(
+        int(returns_summary[field].get("non_null_count", 0)) for field in RETURN_FIELDS
+    )
+    downstream_return_fields_available = downstream_non_null_total_count > 0
+
     interpretation_notes, verdict_label, verdict_explanation = _interpret_report(
         selected_row_count=len(limited_rows),
         returns_summary=returns_summary,
+        downstream_return_fields_available=downstream_return_fields_available,
     )
 
     metadata = {
@@ -209,6 +218,8 @@ def build_report(
         "skipped_non_selected_count": skipped_non_selected_count,
         "skipped_filter_mismatch_count": skipped_filter_mismatch_count,
         "unique_selected_candidate_count": len(selected_identities),
+        "downstream_return_fields_available": downstream_return_fields_available,
+        "downstream_non_null_total_count": downstream_non_null_total_count,
         "filters": {
             "symbol": symbol,
             "strategy": strategy,
@@ -265,6 +276,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- skipped_non_selected_count: {metadata.get('skipped_non_selected_count', 0)}",
         f"- skipped_filter_mismatch_count: {metadata.get('skipped_filter_mismatch_count', 0)}",
         f"- unique_selected_candidate_count: {metadata.get('unique_selected_candidate_count', 0)}",
+        f"- downstream_return_fields_available: {metadata.get('downstream_return_fields_available')}",
+        f"- downstream_non_null_total_count: {metadata.get('downstream_non_null_total_count', 0)}",
         "",
         "## Candidate Filter",
         "",
@@ -387,7 +400,9 @@ def _build_selected_row(
     if isinstance(ranking, list) and ranking:
         first_entry = _safe_dict(ranking[0])
         if first_entry is not None:
-            top_score = _safe_float(first_entry.get("score"))
+            top_score = _safe_float(first_entry.get("score")) or _safe_float(
+                first_entry.get("selection_score")
+            )
 
     returns = {field: _safe_float(payload.get(field)) for field in RETURN_FIELDS}
 
@@ -518,6 +533,7 @@ def _interpret_report(
     *,
     selected_row_count: int,
     returns_summary: dict[str, dict[str, int | float | None]],
+    downstream_return_fields_available: bool,
 ) -> tuple[list[str], str, str]:
     metrics_15m = returns_summary["future_return_15m"]
     metrics_1h = returns_summary["future_return_1h"]
@@ -548,6 +564,17 @@ def _interpret_report(
             notes + ["Selected sample is still small, so the recovery signal is not yet robust."],
             "insufficient_selected_rows",
             "There are too few filtered selected rows to make a stable downstream quality call.",
+        )
+
+    if not downstream_return_fields_available:
+        return (
+            notes
+            + [
+                "Selected rows are present, but downstream future-return fields are not yet populated in the input rows.",
+                "This input appears to be unlabeled or not yet matured for realized downstream quality evaluation.",
+            ],
+            "downstream_returns_not_yet_available",
+            "Selected rows exist, but downstream future-return labels are not yet available, so realized quality cannot be evaluated yet.",
         )
 
     if _is_outlier_driven(metrics_15m) or _is_outlier_driven(metrics_1h) or _is_outlier_driven(metrics_4h):
