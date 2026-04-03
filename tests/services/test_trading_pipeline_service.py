@@ -60,26 +60,59 @@ class _FakePipeline:
         }
 
 
-def test_run_shadow_observation_returns_success_context(monkeypatch) -> None:
+
+def test_run_shadow_observation_passes_quality_gated_candidates_to_engine(monkeypatch) -> None:
     service = TradingPipelineService()
     mapper_payload = {
         "generated_at": "2026-03-26T00:00:00+00:00",
-        "candidates": [{"symbol": "BTCUSDT", "score": 0.91}],
+        "candidates": [
+            {"symbol": "BTCUSDT", "strategy": "swing", "horizon": "4h"},
+            {"symbol": "ETHUSDT", "strategy": "swing", "horizon": "4h"},
+        ],
+    }
+    gate_result = {
+        "kept_candidates": [{"symbol": "BTCUSDT", "strategy": "swing", "horizon": "4h"}],
+        "dropped_candidates": [
+            {
+                "candidate": {"symbol": "ETHUSDT", "strategy": "swing", "horizon": "4h"},
+                "reason": "median_return_pct_negative",
+                "metrics": {
+                    "positive_rate_pct": 40.0,
+                    "median_return_pct": -0.2,
+                    "sample_count": 30,
+                },
+            }
+        ],
+        "input_path_used": "logs/trade_analysis_cumulative.jsonl",
+        "total_candidates": 2,
+        "kept_count": 1,
+        "dropped_count": 1,
+        "fallback_applied": False,
     }
     shadow_output = {
         "selection_status": "selected",
         "selected_symbol": "BTCUSDT",
-        "candidates_considered": 2,
+        "candidates_considered": 1,
     }
     output_path = Path("logs/research_reports/edge_selection_shadow.json")
+    captured_payloads: list[dict[str, Any]] = []
 
     monkeypatch.setattr(
         "src.services.trading_pipeline_service.map_edge_selection_input",
         lambda _: mapper_payload,
     )
     monkeypatch.setattr(
+        "src.services.trading_pipeline_service.apply_candidate_quality_gate",
+        lambda candidates: gate_result,
+    )
+
+    def _run_engine(payload: dict[str, Any]) -> dict[str, Any]:
+        captured_payloads.append(payload)
+        return shadow_output
+
+    monkeypatch.setattr(
         "src.services.trading_pipeline_service.run_edge_selection_engine",
-        lambda payload: shadow_output if payload is mapper_payload else {},
+        _run_engine,
     )
     monkeypatch.setattr(
         "src.services.trading_pipeline_service.write_edge_selection_shadow_output",
@@ -89,16 +122,28 @@ def test_run_shadow_observation_returns_success_context(monkeypatch) -> None:
 
     result = service._run_shadow_observation(trigger_symbol="BTCUSDT")
     metadata = result["edge_selection_metadata"]
+    gated_payload = result["edge_selection_mapper_payload"]
 
-    assert result["edge_selection_mapper_payload"] == mapper_payload
+    assert len(captured_payloads) == 1
+    assert captured_payloads[0]["candidates"] == gate_result["kept_candidates"]
+    assert captured_payloads[0]["candidate_quality_gate"]["dropped_count"] == 1
+    assert captured_payloads[0]["candidate_quality_gate"]["fallback_applied"] is False
+
+    assert gated_payload["candidates"] == gate_result["kept_candidates"]
+    assert gated_payload["candidate_quality_gate"]["input_path_used"] == gate_result["input_path_used"]
     assert result["edge_selection_output"] == shadow_output
     assert metadata["replay_ready"] is True
     assert metadata["shadow_status"] == "success"
     assert metadata["shadow_output_path"] == str(output_path)
     assert metadata["mapper_version"] == "edge_selection_input_mapper_v1"
+    assert metadata["quality_gate_version"] == "candidate_quality_gate_v1"
     assert metadata["engine_version"] == "edge_selection_engine_v1"
     assert metadata["trigger_symbol"] == "BTCUSDT"
     assert metadata["selection_status"] == "selected"
+    assert metadata["quality_gate_kept_count"] == 1
+    assert metadata["quality_gate_dropped_count"] == 1
+    assert metadata["quality_gate_fallback_applied"] is False
+
 
 
 def test_run_shadow_observation_forced_failure_returns_failed_metadata(monkeypatch) -> None:
@@ -115,6 +160,7 @@ def test_run_shadow_observation_forced_failure_returns_failed_metadata(monkeypat
     assert metadata["error_type"] == "RuntimeError"
     assert FORCE_SHADOW_FAILURE_ENV_VAR in metadata["error_message"]
     assert metadata["trigger_symbol"] == "BTCUSDT"
+
 
 
 def test_run_returns_main_pipeline_result_even_when_shadow_fails(monkeypatch) -> None:
