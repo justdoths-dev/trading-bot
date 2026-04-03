@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from src.notifications.shadow_event_notifier import ShadowEventNotifier
+from src.research.candidate_quality_gate import apply_candidate_quality_gate
 from src.research.edge_selection_engine import run_edge_selection_engine
 from src.research.edge_selection_input_mapper import map_edge_selection_input
 from src.research.edge_selection_shadow_writer import write_edge_selection_shadow_output
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 RESEARCH_REPORTS_DIR = Path("logs/research_reports")
 EDGE_SELECTION_MAPPER_VERSION = "edge_selection_input_mapper_v1"
 EDGE_SELECTION_ENGINE_VERSION = "edge_selection_engine_v1"
+CANDIDATE_QUALITY_GATE_VERSION = "candidate_quality_gate_v1"
 FORCE_SHADOW_FAILURE_ENV_VAR = "EDGE_SELECTION_FORCE_SHADOW_FAILURE"
 
 
@@ -116,6 +118,7 @@ class TradingPipelineService:
         """
         base_metadata: dict[str, Any] = {
             "mapper_version": EDGE_SELECTION_MAPPER_VERSION,
+            "quality_gate_version": CANDIDATE_QUALITY_GATE_VERSION,
             "engine_version": EDGE_SELECTION_ENGINE_VERSION,
             "replay_ready": False,
             "shadow_status": "not_started",
@@ -133,14 +136,21 @@ class TradingPipelineService:
                 )
 
             mapped_payload = map_edge_selection_input(RESEARCH_REPORTS_DIR)
-            shadow_result = run_edge_selection_engine(mapped_payload)
+            gated_payload = self._apply_candidate_quality_gate(mapped_payload)
+            shadow_result = run_edge_selection_engine(gated_payload)
             output_path = write_edge_selection_shadow_output(shadow_result)
 
+            quality_gate = gated_payload.get("candidate_quality_gate")
+            quality_gate_dict = quality_gate if isinstance(quality_gate, dict) else {}
+
             logger.info(
-                "Shadow observation output written: trigger_symbol=%s status=%s candidates=%s path=%s",
+                "Shadow observation output written: trigger_symbol=%s status=%s candidates=%s kept=%s dropped=%s fallback=%s path=%s",
                 trigger_symbol,
                 shadow_result.get("selection_status"),
                 shadow_result.get("candidates_considered"),
+                quality_gate_dict.get("kept_count"),
+                quality_gate_dict.get("dropped_count"),
+                quality_gate_dict.get("fallback_applied"),
                 output_path,
             )
 
@@ -155,17 +165,21 @@ class TradingPipelineService:
                     "replay_ready": True,
                     "shadow_status": "success",
                     "shadow_output_path": str(output_path),
-                    "mapper_generated_at": mapped_payload.get("generated_at")
-                    if isinstance(mapped_payload, dict)
+                    "mapper_generated_at": gated_payload.get("generated_at")
+                    if isinstance(gated_payload, dict)
                     else None,
                     "selection_status": shadow_result.get("selection_status")
                     if isinstance(shadow_result, dict)
                     else None,
+                    "quality_gate_input_path": quality_gate_dict.get("input_path_used"),
+                    "quality_gate_kept_count": quality_gate_dict.get("kept_count"),
+                    "quality_gate_dropped_count": quality_gate_dict.get("dropped_count"),
+                    "quality_gate_fallback_applied": quality_gate_dict.get("fallback_applied"),
                 }
             )
 
             return {
-                "edge_selection_mapper_payload": mapped_payload,
+                "edge_selection_mapper_payload": gated_payload,
                 "edge_selection_output": shadow_result,
                 "edge_selection_metadata": metadata,
             }
@@ -189,6 +203,26 @@ class TradingPipelineService:
                 "edge_selection_output": None,
                 "edge_selection_metadata": metadata,
             }
+
+    def _apply_candidate_quality_gate(self, mapped_payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(mapped_payload, dict):
+            return mapped_payload
+
+        raw_candidates = mapped_payload.get("candidates")
+        candidates = raw_candidates if isinstance(raw_candidates, list) else []
+        quality_gate_result = apply_candidate_quality_gate(candidates)
+
+        gated_payload = dict(mapped_payload)
+        gated_payload["candidates"] = list(quality_gate_result.get("kept_candidates") or [])
+        gated_payload["candidate_quality_gate"] = {
+            "input_path_used": quality_gate_result.get("input_path_used"),
+            "total_candidates": quality_gate_result.get("total_candidates", len(candidates)),
+            "kept_count": quality_gate_result.get("kept_count", len(candidates)),
+            "dropped_count": quality_gate_result.get("dropped_count", 0),
+            "fallback_applied": quality_gate_result.get("fallback_applied", False),
+            "dropped_candidates": quality_gate_result.get("dropped_candidates") or [],
+        }
+        return gated_payload
 
     def _enrich_trade_analysis_log_record(
         self,
