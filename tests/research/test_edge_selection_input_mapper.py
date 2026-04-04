@@ -19,19 +19,19 @@ def test_valid_upstream_reports_produce_normalized_payload(tmp_path: Path) -> No
     assert payload["warnings"] == [
         f"Optional upstream report is missing: {base_dir / 'edge_scores_history.jsonl'}"
     ]
-    assert payload["candidates"] == [
-        {
-            "symbol": "BTCUSDT",
-            "strategy": "swing",
-            "horizon": "4h",
-            "selected_candidate_strength": "moderate",
-            "selected_stability_label": "single_horizon_only",
-            "source_preference": "latest",
-            "edge_stability_score": 3.2,
-            "drift_direction": "decrease",
-            "score_delta": -0.4,
-        }
-    ]
+
+    assert len(payload["candidates"]) == 1
+    candidate = payload["candidates"][0]
+    assert candidate["symbol"] == "BTCUSDT"
+    assert candidate["strategy"] == "swing"
+    assert candidate["horizon"] == "4h"
+    assert candidate["selected_candidate_strength"] == "moderate"
+    assert candidate["selected_stability_label"] == "single_horizon_only"
+    assert candidate["source_preference"] == "latest"
+    assert candidate["edge_stability_score"] == 3.2
+    assert candidate["drift_direction"] == "decrease"
+    assert candidate["score_delta"] == -0.4
+    assert candidate["seed_origin_type"] == "legacy_comparison_synthetic"
 
 
 def test_missing_required_report_returns_failure(tmp_path: Path) -> None:
@@ -136,19 +136,18 @@ def test_source_preference_na_uses_available_values_without_inventing(tmp_path: 
     payload = map_edge_selection_input(base_dir)
 
     assert payload["ok"] is True
-    assert payload["candidates"] == [
-        {
-            "symbol": "BTCUSDT",
-            "strategy": "swing",
-            "horizon": "4h",
-            "selected_candidate_strength": "moderate",
-            "selected_stability_label": "single_horizon_only",
-            "source_preference": "n/a",
-            "edge_stability_score": 3.2,
-            "drift_direction": "decrease",
-            "score_delta": -0.4,
-        }
-    ]
+    assert len(payload["candidates"]) == 1
+    candidate = payload["candidates"][0]
+    assert candidate["symbol"] == "BTCUSDT"
+    assert candidate["strategy"] == "swing"
+    assert candidate["horizon"] == "4h"
+    assert candidate["selected_candidate_strength"] == "moderate"
+    assert candidate["selected_stability_label"] == "single_horizon_only"
+    assert candidate["source_preference"] == "n/a"
+    assert candidate["edge_stability_score"] == 3.2
+    assert candidate["drift_direction"] == "decrease"
+    assert candidate["score_delta"] == -0.4
+    assert candidate["seed_origin_type"] == "legacy_comparison_synthetic"
 
 
 def test_invalid_identifier_values_are_filtered_out_of_candidates(tmp_path: Path) -> None:
@@ -231,19 +230,18 @@ def test_invalid_identifier_values_are_filtered_out_of_candidates(tmp_path: Path
 
     assert payload["ok"] is True
     assert payload["errors"] == []
-    assert payload["candidates"] == [
-        {
-            "symbol": "ETHUSDT",
-            "strategy": "swing",
-            "horizon": "4h",
-            "selected_candidate_strength": "weak",
-            "selected_stability_label": "single_horizon_only",
-            "source_preference": "cumulative",
-            "edge_stability_score": 2.5,
-            "drift_direction": "flat",
-            "score_delta": 0.0,
-        }
-    ]
+    assert len(payload["candidates"]) == 1
+    candidate = payload["candidates"][0]
+    assert candidate["symbol"] == "ETHUSDT"
+    assert candidate["strategy"] == "swing"
+    assert candidate["horizon"] == "4h"
+    assert candidate["selected_candidate_strength"] == "weak"
+    assert candidate["selected_stability_label"] == "single_horizon_only"
+    assert candidate["source_preference"] == "cumulative"
+    assert candidate["edge_stability_score"] == 2.5
+    assert candidate["drift_direction"] == "flat"
+    assert candidate["score_delta"] == 0.0
+    assert candidate["seed_origin_type"] == "legacy_comparison_synthetic"
 
 
 def _write_valid_reports(

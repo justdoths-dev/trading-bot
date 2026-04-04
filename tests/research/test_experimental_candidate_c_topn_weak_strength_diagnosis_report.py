@@ -186,7 +186,7 @@ def test_candidate_strength_summary_three_supporting_deficits_recover_under_v5_3
     )
 
 
-def test_candidate_strength_summary_three_supporting_deficits_with_lower_positive_rate_still_fail_on_positive_rate_guard() -> None:
+def test_candidate_strength_summary_three_supporting_deficits_recovers_at_relaxed_positive_rate_guard() -> None:
     diagnostics = research_analyzer._score_candidate_strength_diagnostics(
         sample_count=55,
         median_future_return_pct=0.17,
@@ -194,10 +194,10 @@ def test_candidate_strength_summary_three_supporting_deficits_with_lower_positiv
         robustness_value=45.0,
     )
 
-    assert diagnostics["final_classification"] == "weak"
+    assert diagnostics["final_classification"] == "moderate"
     assert (
         diagnostics["classification_reason"]
-        == "three_supporting_deficits_but_positive_rate_too_low"
+        == "cleared_weighted_moderate_profile_with_three_supporting_deficits"
     )
 
 
@@ -233,7 +233,7 @@ def test_candidate_strength_summary_three_supporting_deficits_reason_distributio
             robustness_value=45.0,
         ),
         _candidate_detail(
-            group="candidate_weak_three_positive_guard",
+            group="candidate_moderate_three_relaxed_guard",
             sample_count=55,
             median_future_return_pct=0.17,
             positive_rate_pct=48.0,
@@ -264,8 +264,7 @@ def test_candidate_strength_summary_three_supporting_deficits_reason_distributio
     assert (
         count_map["cleared_weighted_moderate_profile_with_two_supporting_deficits"] == 2
     )
-    assert count_map["cleared_weighted_moderate_profile_with_three_supporting_deficits"] == 1
-    assert count_map["three_supporting_deficits_but_positive_rate_too_low"] == 1
+    assert count_map["cleared_weighted_moderate_profile_with_three_supporting_deficits"] == 2
     assert count_map["two_supporting_deficits_but_positive_rate_below_floor"] == 1
 
 

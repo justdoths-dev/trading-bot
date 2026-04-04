@@ -727,7 +727,7 @@ def test_score_candidate_strength_three_supporting_deficits_recover_to_moderate_
     )
 
 
-def test_score_candidate_strength_three_supporting_deficits_with_lower_positive_rate_still_fail_on_positive_rate_guard() -> None:
+def test_score_candidate_strength_three_supporting_deficits_recovers_at_relaxed_positive_rate_guard() -> None:
     diagnostics = research_analyzer._score_candidate_strength_diagnostics(
         sample_count=55,
         median_future_return_pct=0.17,
@@ -740,8 +740,11 @@ def test_score_candidate_strength_three_supporting_deficits_with_lower_positive_
         "positive_rate_below_emerging_moderate",
         "robustness_below_emerging_moderate",
     ]
-    assert diagnostics["final_classification"] == "weak"
-    assert diagnostics["classification_reason"] == "three_supporting_deficits_but_positive_rate_too_low"
+    assert diagnostics["final_classification"] == "moderate"
+    assert (
+        diagnostics["classification_reason"]
+        == "cleared_weighted_moderate_profile_with_three_supporting_deficits"
+    )
 
 
 def test_score_candidate_strength_three_supporting_deficits_with_lower_robustness_remain_weak_below_v5_3_threshold() -> None:

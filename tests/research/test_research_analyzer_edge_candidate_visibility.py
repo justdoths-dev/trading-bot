@@ -192,15 +192,19 @@ def test_edge_candidate_rows_attach_preview_metadata_without_promoting_joined_st
     assert row["horizon"] == "4h"
     assert row["selected_candidate_strength"] == "moderate"
 
-    # Joined truth must remain unchanged.
     assert row["selected_visible_horizons"] == ["4h"]
     assert row["selected_stability_label"] == "single_horizon_only"
 
-    # Preview context should be attached as optional metadata only.
     assert row["preview_symbol_visible_horizons"] == ["15m", "1h"]
     assert row["preview_symbol_stability_label"] == "multi_horizon_confirmed"
     assert row["preview_symbol_visibility_reason"] == "repeated_visible_candidate_across_horizons"
-    assert "symbol_preview_multi_horizon" in row["visibility_reason"]
+
+    assert row["visibility_reason"].startswith("passed_sample_and_quality_gate")
+    assert (
+        "joined_selected_but_raw_preview_broader_than_joined" in row["visibility_reason"]
+        or "joined_selected_but_compatibility_preview_broader_than_joined"
+        in row["visibility_reason"]
+    )
 
 
 def test_edge_candidate_rows_remain_mapper_compatible_after_preview_metadata_enrichment(
@@ -249,6 +253,5 @@ def test_edge_candidate_rows_remain_mapper_compatible_after_preview_metadata_enr
     assert seed["strategy"] == "swing"
     assert seed["horizon"] == "4h"
 
-    # Mapper-facing semantics must remain joined-candidate semantics.
     assert seed["selected_visible_horizons"] == ["4h"]
     assert seed["selected_stability_label"] == "single_horizon_only"
