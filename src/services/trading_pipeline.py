@@ -237,16 +237,24 @@ class TradingPipeline:
             "generated_at": 0,
             "analysis": {
                 "market_structure": "AI analysis skipped for this cycle.",
-                "rule_engine_assessment": "Using scheduler cycle without new AI call.",
+                "rule_engine_assessment": (
+                    "Using scheduler cycle without new AI call. "
+                    "Rule engine remains authoritative."
+                ),
                 "key_bottlenecks": ["AI call skipped on this cycle."],
                 "long_scenario": "Unavailable on skipped AI cycle.",
                 "short_scenario": "Unavailable on skipped AI cycle.",
-                "final_stance": "hold",
-                "stance_reason": "AI was skipped for this cycle to reduce cost and token usage.",
+                "interpretation_bias": "neutral_bias",
+                "confidence_note": "AI was skipped for this cycle, so interpretation confidence is unavailable.",
+                "caution_flags": [
+                    "AI analysis skipped",
+                    "Use rule-engine output only",
+                ],
+                "execution_note": "AI was skipped. Do not change execution authority.",
                 "telegram_briefing": [
                     "AI analysis skipped for this cycle.",
                     "Rule engine and risk engine still executed normally.",
-                    "Telegram is only sent when execution is allowed.",
+                    "Rule engine remains authoritative.",
                 ],
             },
         }

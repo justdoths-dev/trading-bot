@@ -102,11 +102,12 @@ class OpenAIAnalyzer:
 
     def _build_input(self, payload: dict[str, Any], prompt: str) -> list[dict[str, Any]]:
         system_instruction = (
-            "You are a higher-level trading interpreter inside a crypto trading system. "
-            "The rule-based engine remains the primary decision-maker. "
+            "You are a read-only higher-level market interpreter inside a crypto trading system. "
+            "The rule-based engine remains the sole authoritative decision-maker. "
             "Do not invent missing market data. "
-            "Do not casually override the execution plan. "
-            "Interpret structure, bottlenecks, and required confirmations. "
+            "Do not override the rule engine. "
+            "Do not recommend changing ranking, edge selection, or execution authority. "
+            "Interpret market structure, bottlenecks, volatility context, Bollinger context, and missing confirmations only. "
             "Return only valid JSON matching the provided schema."
         )
 
@@ -136,11 +137,16 @@ class OpenAIAnalyzer:
                 },
                 "long_scenario": {"type": "string"},
                 "short_scenario": {"type": "string"},
-                "final_stance": {
+                "interpretation_bias": {
                     "type": "string",
-                    "enum": ["long", "short", "hold"],
+                    "enum": ["long_bias", "short_bias", "neutral_bias", "mixed_bias"],
                 },
-                "stance_reason": {"type": "string"},
+                "confidence_note": {"type": "string"},
+                "caution_flags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "execution_note": {"type": "string"},
                 "telegram_briefing": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -154,8 +160,10 @@ class OpenAIAnalyzer:
                 "key_bottlenecks",
                 "long_scenario",
                 "short_scenario",
-                "final_stance",
-                "stance_reason",
+                "interpretation_bias",
+                "confidence_note",
+                "caution_flags",
+                "execution_note",
                 "telegram_briefing",
             ],
         }
@@ -168,16 +176,18 @@ class OpenAIAnalyzer:
             "generated_at": int(time.time()),
             "analysis": {
                 "market_structure": "AI interpretation unavailable.",
-                "rule_engine_assessment": "Fallback active.",
+                "rule_engine_assessment": "Fallback active. Rule-engine output should be used without AI augmentation.",
                 "key_bottlenecks": [f"AI unavailable: {error_message}"],
                 "long_scenario": "Unavailable.",
                 "short_scenario": "Unavailable.",
-                "final_stance": "hold",
-                "stance_reason": "Fallback mode active.",
+                "interpretation_bias": "neutral_bias",
+                "confidence_note": "Fallback mode active. Confidence in AI interpretation is unavailable.",
+                "caution_flags": ["AI unavailable", "Use rule-engine output only"],
+                "execution_note": "No AI interpretation available. Do not change execution authority.",
                 "telegram_briefing": [
                     "AI interpretation unavailable.",
                     "Fallback mode active.",
-                    "Hold until system is restored.",
+                    "Rule engine remains authoritative.",
                 ],
             },
         }

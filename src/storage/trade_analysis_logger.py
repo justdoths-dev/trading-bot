@@ -221,9 +221,18 @@ class TradeAnalysisLogger:
                 "key_bottlenecks": analysis.get("key_bottlenecks", []),
                 "long_scenario": analysis.get("long_scenario"),
                 "short_scenario": analysis.get("short_scenario"),
-                "final_stance": analysis.get("final_stance"),
-                "stance_reason": analysis.get("stance_reason"),
+                "interpretation_bias": analysis.get("interpretation_bias"),
+                "confidence_note": analysis.get("confidence_note"),
+                "caution_flags": analysis.get("caution_flags", []),
+                "execution_note": analysis.get("execution_note"),
                 "telegram_briefing": analysis.get("telegram_briefing", []),
+                "decision_policy": {
+                    "rule_engine_authoritative": True,
+                    "ai_role": "read_only_interpreter",
+                    "ai_must_not_override_rule_engine": True,
+                    "ai_must_not_modify_ranking_or_selection": True,
+                    "ai_must_not_trigger_execution": True,
+                },
             },
             "edge_selection_mapper_payload": None,
             "edge_selection_output": None,
@@ -236,24 +245,26 @@ class TradeAnalysisLogger:
 
     def _build_alignment(self, record: dict[str, Any]) -> dict[str, Any]:
         """
-        Compare execution action and AI final stance at a simple semantic level.
+        Compare execution action and AI interpretation bias at a simple semantic level.
+
+        This is intentionally coarse and informational only.
         """
         execution_action = record["execution"].get("action")
-        ai_stance = record["ai"].get("final_stance")
+        interpretation_bias = record["ai"].get("interpretation_bias")
 
-        execution_to_ai = {
-            "buy": "long",
-            "sell": "short",
-            "hold": "hold",
+        execution_to_bias = {
+            "buy": "long_bias",
+            "sell": "short_bias",
+            "hold": "neutral_bias",
         }
 
-        normalized_execution_stance = execution_to_ai.get(execution_action, "hold")
-        aligned = normalized_execution_stance == ai_stance
+        normalized_execution_bias = execution_to_bias.get(execution_action, "neutral_bias")
+        aligned = normalized_execution_bias == interpretation_bias
 
         return {
             "execution_action": execution_action,
-            "ai_final_stance": ai_stance,
-            "normalized_execution_stance": normalized_execution_stance,
+            "ai_interpretation_bias": interpretation_bias,
+            "normalized_execution_bias": normalized_execution_bias,
             "is_aligned": aligned,
         }
 
@@ -270,11 +281,41 @@ class TradeAnalysisLogger:
         selected_result = strategy_result.get("selected_result", {}) or {}
         timeframe_summary_raw = selected_result.get("timeframe_summary", {})
 
-        if isinstance(timeframe_summary_raw, dict):
-            return self._json_safe_copy(timeframe_summary_raw) or {}
+        if not isinstance(timeframe_summary_raw, dict):
+            return {"legacy_value": timeframe_summary_raw}
 
-        # Backward-compatible fallback for unexpected legacy values.
-        return {"legacy_value": timeframe_summary_raw}
+        safe_summary = self._json_safe_copy(timeframe_summary_raw) or {}
+
+        for timeframe in ("1d", "4h", "1h", "15m", "5m", "1m"):
+            timeframe_value = safe_summary.get(timeframe)
+            if isinstance(timeframe_value, dict):
+                timeframe_value["bollinger_20_2"] = self._build_bollinger_snapshot(timeframe_value)
+
+        return safe_summary
+
+    def _build_bollinger_snapshot(self, timeframe_row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "middle": self._safe_float(timeframe_row.get("bb_middle_20")),
+            "std": self._safe_float(timeframe_row.get("bb_std_20")),
+            "upper": self._safe_float(timeframe_row.get("bb_upper_20_2")),
+            "lower": self._safe_float(timeframe_row.get("bb_lower_20_2")),
+            "bandwidth": self._safe_float(timeframe_row.get("bb_bandwidth_20_2")),
+            "percent_b": self._safe_float(timeframe_row.get("bb_percent_b_20_2")),
+        }
+
+    def _safe_float(self, value: Any) -> float | None:
+        if value is None:
+            return None
+
+        try:
+            value_float = float(value)
+        except (TypeError, ValueError):
+            return None
+
+        if value_float != value_float:  # NaN check
+            return None
+
+        return round(value_float, 6)
 
     def _build_timeframe_summary_text(self, strategy_result: dict[str, Any]) -> str:
         """
