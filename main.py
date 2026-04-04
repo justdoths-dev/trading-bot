@@ -17,26 +17,43 @@ def main() -> None:
 
     logger = logging.getLogger(__name__)
 
-    schedulers = [
-        TradingScheduler(
-            symbol=symbol,
-            interval_minutes=settings.scheduler.interval_minutes,
-            send_telegram=settings.pipeline.send_telegram,
-        )
-        for symbol in settings.pipeline.symbols
-    ]
+    interval_seconds = settings.scheduler.interval_minutes * 60
+    if interval_seconds <= 0:
+        raise ValueError("scheduler.interval_minutes must be greater than 0")
 
-    for index, scheduler in enumerate(schedulers):
-        if index > 0:
-            delay_seconds = STARTUP_STAGGER_SECONDS
-            logger.info(
-                "Waiting %s seconds before starting scheduler for symbol=%s",
-                delay_seconds,
-                scheduler.symbol,
+    schedulers: list[TradingScheduler] = []
+    used_offsets: dict[int, str] = {}
+
+    for index, symbol in enumerate(settings.pipeline.symbols):
+        raw_offset_seconds = index * STARTUP_STAGGER_SECONDS
+        offset_seconds = raw_offset_seconds % interval_seconds
+
+        if offset_seconds in used_offsets:
+            logger.warning(
+                "Scheduler offset collision detected: symbol=%s offset=%ss collides with symbol=%s. "
+                "This means two symbols will share the same aligned schedule slot.",
+                symbol,
+                offset_seconds,
+                used_offsets[offset_seconds],
             )
-            time.sleep(delay_seconds)
+        else:
+            used_offsets[offset_seconds] = symbol
 
-        logger.info("Starting scheduler for symbol=%s", scheduler.symbol)
+        schedulers.append(
+            TradingScheduler(
+                symbol=symbol,
+                interval_minutes=settings.scheduler.interval_minutes,
+                send_telegram=settings.pipeline.send_telegram,
+                offset_seconds=offset_seconds,
+            )
+        )
+
+    for scheduler in schedulers:
+        logger.info(
+            "Starting scheduler for symbol=%s with aligned offset=%ss",
+            scheduler.symbol,
+            scheduler.offset_seconds,
+        )
         scheduler.start()
 
     try:
