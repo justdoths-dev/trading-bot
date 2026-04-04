@@ -31,6 +31,7 @@ ADVISORY_REASON_MAP = {
     "preferred_symbol_support": "CANDIDATE_SYMBOL_SUPPORT_PREFERRED_RANGE",
     "preferred_strategy_support": "CANDIDATE_STRATEGY_SUPPORT_PREFERRED_RANGE",
     "single_horizon_relaxed": "CANDIDATE_STABILITY_SINGLE_HORIZON_RELAXED",
+    "low_edge_score_relaxed": "CANDIDATE_EDGE_STABILITY_SCORE_RELAXED",
 }
 STATUS_PRIORITY = {
     "eligible": 2,
@@ -83,6 +84,10 @@ PREFERRED_SYMBOL_SUPPORT_MIN = 150
 PREFERRED_SYMBOL_SUPPORT_MAX = 249
 PREFERRED_STRATEGY_SUPPORT_MIN = 120
 PREFERRED_STRATEGY_SUPPORT_MAX = 199
+
+LOW_EDGE_SCORE_RELAXED_MIN_AGGREGATE_SCORE = 80.0
+LOW_EDGE_SCORE_RELAXED_MIN_POSITIVE_RATE_PCT = 65.0
+LOW_EDGE_SCORE_RELAXED_MIN_MEDIAN_RETURN_PCT = 0.25
 
 
 def run_edge_selection_engine(mapped_payload: dict[str, Any]) -> dict[str, Any]:
@@ -330,12 +335,25 @@ def _evaluate_candidate(candidate: Any) -> dict[str, Any]:
         drift_direction=drift_direction,
         edge_stability_score=edge_stability_score,
     )
+    relaxed_low_edge_score = _should_relax_low_edge_score_penalty(
+        strength=strength,
+        stability=stability,
+        drift_direction=drift_direction,
+        edge_stability_score=edge_stability_score,
+        aggregate_score=aggregate_score,
+        positive_rate_pct=positive_rate_pct,
+        median_future_return_pct=median_future_return_pct,
+    )
+
     effective_penalty_reasons = _apply_relaxed_penalties(
         penalty_reasons=penalty_reasons,
         relaxed_single_horizon=relaxed_single_horizon,
+        relaxed_low_edge_score=relaxed_low_edge_score,
     )
     if relaxed_single_horizon:
         advisory_reason_codes.append(ADVISORY_REASON_MAP["single_horizon_relaxed"])
+    if relaxed_low_edge_score:
+        advisory_reason_codes.append(ADVISORY_REASON_MAP["low_edge_score_relaxed"])
 
     if blocked_reasons:
         candidate_status = "blocked"
@@ -374,6 +392,7 @@ def _evaluate_candidate(candidate: Any) -> dict[str, Any]:
         penalty_reasons=effective_penalty_reasons,
         advisory_reason_codes=advisory_reason_codes,
         relaxed_single_horizon=relaxed_single_horizon,
+        relaxed_low_edge_score=relaxed_low_edge_score,
     )
 
     ranking_signals = {
@@ -518,19 +537,61 @@ def _should_relax_single_horizon_penalty(
     return True
 
 
+def _should_relax_low_edge_score_penalty(
+    *,
+    strength: str,
+    stability: str,
+    drift_direction: str,
+    edge_stability_score: float | int | None,
+    aggregate_score: float | int | None,
+    positive_rate_pct: float | int | None,
+    median_future_return_pct: float | int | None,
+) -> bool:
+    if strength not in {"moderate", "strong"}:
+        return False
+    if stability != "multi_horizon_confirmed":
+        return False
+    if drift_direction == "decrease":
+        return False
+    if edge_stability_score is None:
+        return False
+    if float(edge_stability_score) >= SHADOW_MIN_EDGE_STABILITY_SCORE:
+        return False
+    if aggregate_score is None or float(aggregate_score) < LOW_EDGE_SCORE_RELAXED_MIN_AGGREGATE_SCORE:
+        return False
+    if positive_rate_pct is None or float(positive_rate_pct) < LOW_EDGE_SCORE_RELAXED_MIN_POSITIVE_RATE_PCT:
+        return False
+    if (
+        median_future_return_pct is None
+        or float(median_future_return_pct) < LOW_EDGE_SCORE_RELAXED_MIN_MEDIAN_RETURN_PCT
+    ):
+        return False
+    return True
+
+
 def _apply_relaxed_penalties(
     *,
     penalty_reasons: list[str],
     relaxed_single_horizon: bool,
+    relaxed_low_edge_score: bool,
 ) -> list[str]:
-    if not relaxed_single_horizon:
-        return list(penalty_reasons)
+    effective = list(penalty_reasons)
 
-    return [
-        reason
-        for reason in penalty_reasons
-        if reason != PENALTY_REASON_MAP["single_horizon_stability"]
-    ]
+    if relaxed_single_horizon:
+        effective = [
+            reason
+            for reason in effective
+            if reason != PENALTY_REASON_MAP["single_horizon_stability"]
+        ]
+
+    if relaxed_low_edge_score:
+        effective = [
+            reason
+            for reason in effective
+            if reason != PENALTY_REASON_MAP["low_edge_score"]
+        ]
+
+    return effective
 
 
 def _advisory_reasons(
@@ -859,11 +920,13 @@ def _build_gate_diagnostics(
     penalty_reasons: list[str],
     advisory_reason_codes: list[str],
     relaxed_single_horizon: bool,
+    relaxed_low_edge_score: bool,
 ) -> dict[str, dict[str, Any]]:
     score_gate_reasons: list[str] = []
     if (
         edge_stability_score is not None
         and float(edge_stability_score) < SHADOW_MIN_EDGE_STABILITY_SCORE
+        and not relaxed_low_edge_score
     ):
         score_gate_reasons.append(PENALTY_REASON_MAP["low_edge_score"])
 
@@ -887,6 +950,7 @@ def _build_gate_diagnostics(
         "score_gate": {
             "passed": len(score_gate_reasons) == 0,
             "reason_codes": score_gate_reasons,
+            "relaxed_low_edge_score": relaxed_low_edge_score,
         },
         "stability_gate": {
             "passed": len(stability_gate_reasons) == 0,
@@ -901,6 +965,7 @@ def _build_gate_diagnostics(
             "passed": candidate_status == "eligible",
             "reason_codes": eligibility_gate_reasons,
             "relaxed_single_horizon": relaxed_single_horizon,
+            "relaxed_low_edge_score": relaxed_low_edge_score,
         },
         "advisory": {
             "reason_codes": list(advisory_reason_codes),

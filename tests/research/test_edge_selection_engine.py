@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from src.research.edge_selection_engine import run_edge_selection_engine
+from src.research.edge_selection_engine import (
+    ADVISORY_REASON_MAP,
+    PENALTY_REASON_MAP,
+    run_edge_selection_engine,
+)
 from src.research.edge_selection_schema_validator import validate_shadow_output
 
 
@@ -355,6 +359,174 @@ def test_tied_abstain_includes_compared_candidate_diagnosis() -> None:
     assert result["selection_status"] == "abstain"
     assert result["abstain_diagnosis"]["category"] == "tied_top_candidates"
     assert result["abstain_diagnosis"]["compared_candidate"]["symbol"] == "BNBUSDT"
+
+
+def test_low_edge_score_is_relaxed_for_high_quality_multi_horizon_candidate() -> None:
+    payload = _base_mapper_payload(
+        candidates=[
+            {
+                "symbol": "BTCUSDT",
+                "strategy": "swing",
+                "horizon": "4h",
+                "selected_candidate_strength": "moderate",
+                "selected_stability_label": "multi_horizon_confirmed",
+                "drift_direction": "flat",
+                "score_delta": 0.0,
+                "source_preference": "latest",
+                "edge_stability_score": 2.2,
+                "selected_visible_horizons": ["1h", "4h"],
+                "aggregate_score": 84.85,
+                "sample_count": 291,
+                "labeled_count": 9,
+                "coverage_pct": 3.09,
+                "median_future_return_pct": 0.38,
+                "avg_future_return_pct": 0.45,
+                "positive_rate_pct": 88.89,
+                "robustness_signal_pct": 22.22,
+                "supporting_major_deficit_count": 1,
+            }
+        ]
+    )
+
+    result = run_edge_selection_engine(payload)
+
+    assert result["selection_status"] == "selected"
+    ranking = result["ranking"]
+    assert len(ranking) == 1
+
+    top = ranking[0]
+    assert top["candidate_status"] == "eligible"
+    assert top["reason_codes"] == ["ELIGIBLE_CONSERVATIVE_PASS"]
+    assert ADVISORY_REASON_MAP["low_edge_score_relaxed"] in top["advisory_reason_codes"]
+    assert top["selected_candidate_strength"] == "moderate"
+    assert top["selected_stability_label"] == "multi_horizon_confirmed"
+    assert top["edge_stability_score"] == 2.2
+
+
+def test_low_edge_score_remains_penalized_when_drift_is_decreasing() -> None:
+    payload = _base_mapper_payload(
+        candidates=[
+            {
+                "symbol": "BTCUSDT",
+                "strategy": "swing",
+                "horizon": "4h",
+                "selected_candidate_strength": "moderate",
+                "selected_stability_label": "multi_horizon_confirmed",
+                "drift_direction": "decrease",
+                "score_delta": 0.0,
+                "source_preference": "latest",
+                "edge_stability_score": 2.2,
+                "selected_visible_horizons": ["1h", "4h"],
+                "aggregate_score": 84.85,
+                "sample_count": 291,
+                "labeled_count": 9,
+                "coverage_pct": 3.09,
+                "median_future_return_pct": 0.38,
+                "avg_future_return_pct": 0.45,
+                "positive_rate_pct": 88.89,
+                "robustness_signal_pct": 22.22,
+                "supporting_major_deficit_count": 1,
+            }
+        ]
+    )
+
+    result = run_edge_selection_engine(payload)
+
+    assert result["selection_status"] == "abstain"
+    ranking = result["ranking"]
+    assert len(ranking) == 1
+
+    top = ranking[0]
+    assert top["candidate_status"] == "penalized"
+    assert PENALTY_REASON_MAP["low_edge_score"] in top["reason_codes"]
+    assert PENALTY_REASON_MAP["decreasing_drift"] in top["reason_codes"]
+    assert ADVISORY_REASON_MAP["low_edge_score_relaxed"] not in top.get(
+        "advisory_reason_codes", []
+    )
+
+
+def test_low_edge_score_remains_penalized_for_weak_candidate() -> None:
+    payload = _base_mapper_payload(
+        candidates=[
+            {
+                "symbol": "BTCUSDT",
+                "strategy": "swing",
+                "horizon": "4h",
+                "selected_candidate_strength": "weak",
+                "selected_stability_label": "multi_horizon_confirmed",
+                "drift_direction": "flat",
+                "score_delta": 0.0,
+                "source_preference": "latest",
+                "edge_stability_score": 2.2,
+                "selected_visible_horizons": ["1h", "4h"],
+                "aggregate_score": 84.85,
+                "sample_count": 291,
+                "labeled_count": 9,
+                "coverage_pct": 3.09,
+                "median_future_return_pct": 0.38,
+                "avg_future_return_pct": 0.45,
+                "positive_rate_pct": 88.89,
+                "robustness_signal_pct": 22.22,
+                "supporting_major_deficit_count": 1,
+            }
+        ]
+    )
+
+    result = run_edge_selection_engine(payload)
+
+    assert result["selection_status"] == "abstain"
+    ranking = result["ranking"]
+    assert len(ranking) == 1
+
+    top = ranking[0]
+    assert top["candidate_status"] == "penalized"
+    assert PENALTY_REASON_MAP["low_edge_score"] in top["reason_codes"]
+    assert PENALTY_REASON_MAP["weak_strength"] in top["reason_codes"]
+    assert ADVISORY_REASON_MAP["low_edge_score_relaxed"] not in top.get(
+        "advisory_reason_codes", []
+    )
+
+
+def test_low_edge_score_remains_penalized_when_quality_metrics_do_not_meet_relaxation_bar() -> None:
+    payload = _base_mapper_payload(
+        candidates=[
+            {
+                "symbol": "BTCUSDT",
+                "strategy": "swing",
+                "horizon": "4h",
+                "selected_candidate_strength": "moderate",
+                "selected_stability_label": "multi_horizon_confirmed",
+                "drift_direction": "flat",
+                "score_delta": 0.0,
+                "source_preference": "latest",
+                "edge_stability_score": 2.2,
+                "selected_visible_horizons": ["1h", "4h"],
+                "aggregate_score": 79.9,
+                "sample_count": 291,
+                "labeled_count": 9,
+                "coverage_pct": 3.09,
+                "median_future_return_pct": 0.24,
+                "avg_future_return_pct": 0.45,
+                "positive_rate_pct": 64.9,
+                "robustness_signal_pct": 22.22,
+                "supporting_major_deficit_count": 1,
+            }
+        ]
+    )
+
+    result = run_edge_selection_engine(payload)
+
+    assert result["selection_status"] == "abstain"
+    ranking = result["ranking"]
+    assert len(ranking) == 1
+
+    top = ranking[0]
+    assert top["candidate_status"] == "penalized"
+    assert PENALTY_REASON_MAP["low_edge_score"] in top["reason_codes"]
+    assert ADVISORY_REASON_MAP["low_edge_score_relaxed"] not in top.get(
+        "advisory_reason_codes", []
+    )
+
 
 def _base_mapper_payload(
     *,
