@@ -5,6 +5,7 @@ from __future__ import annotations
 import pandas as pd
 
 from .atr import ATRIndicator
+from .bollinger_bands import BollingerBandsIndicator
 from .ema import EMAIndicator
 from .macd import MACDIndicator
 from .rsi import RSIIndicator
@@ -24,6 +25,8 @@ class IndicatorEngine:
         macd_slow_period: int = 26,
         macd_signal_period: int = 9,
         atr_period: int = 14,
+        bollinger_period: int = 20,
+        bollinger_std_multiplier: float = 2.0,
     ) -> None:
         self.rsi = RSIIndicator(period=rsi_period)
         self.ema_fast = EMAIndicator(period=ema_fast_period)
@@ -34,6 +37,10 @@ class IndicatorEngine:
             signal_period=macd_signal_period,
         )
         self.atr = ATRIndicator(period=atr_period)
+        self.bollinger_bands = BollingerBandsIndicator(
+            period=bollinger_period,
+            std_multiplier=bollinger_std_multiplier,
+        )
 
     def enrich(self, multi_timeframe_data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
         """Return timeframe -> DataFrame enriched with indicator columns."""
@@ -61,6 +68,7 @@ class IndicatorEngine:
             ema_slow_series = self.ema_slow.calculate(result)
             macd_df = self.macd.calculate(result)
             atr_series = self.atr.calculate(result)
+            bollinger_df = self.bollinger_bands.calculate(result)
 
             result[rsi_series.name] = rsi_series
             result[ema_fast_series.name] = ema_fast_series
@@ -70,6 +78,9 @@ class IndicatorEngine:
                 result[column] = macd_df[column]
 
             result[atr_series.name] = atr_series
+
+            for column in bollinger_df.columns:
+                result[column] = bollinger_df[column]
 
             enriched[timeframe] = result
 

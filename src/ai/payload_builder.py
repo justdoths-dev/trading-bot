@@ -112,20 +112,23 @@ class AIPayloadBuilder:
                 "reason": execution_result.get("reason"),
             },
             "decision_policy": {
-                "rule_based_priority": False,
-                "decision_architecture": "detector_composed",
-                "ai_role": "higher_level_interpreter_and_decision_support",
+                "rule_based_priority": True,
+                "decision_architecture": "rule_engine_authoritative_ai_read_only_interpreter",
+                "ai_role": "read_only_higher_level_interpreter_and_context_summarizer",
                 "ai_must_not_replace_indicator_calculations": True,
+                "ai_must_not_override_rule_engine": True,
+                "ai_must_not_modify_ranking_or_selection": True,
+                "ai_must_not_trigger_execution": True,
             },
             "ai_task": {
-                "role": "higher_level_market_interpreter",
+                "role": "read_only_higher_level_market_interpreter",
                 "objectives": [
                     "Summarize current market structure across timeframes.",
-                    "Compare scalping, intraday, and swing outputs before focusing on the selected strategy.",
-                    "Explain whether long, short, or no-trade is most reasonable.",
-                    "Explain whether the rule-based engine looks too strict or appropriate.",
-                    "Describe what confirmation would be needed for a valid long or short.",
-                    "Provide a concise trading briefing suitable for Telegram.",
+                    "Interpret volatility, momentum, and Bollinger context without changing any rule-based decision.",
+                    "Compare scalping, intraday, and swing outputs before explaining the already-selected rule-based result.",
+                    "Explain whether the current rule-based bias appears supported, conflicted, or incomplete.",
+                    "Describe what additional confirmation the rule-based engine may still require.",
+                    "Provide a concise read-only trading briefing suitable for Telegram.",
                 ],
             },
         }
@@ -142,16 +145,18 @@ class AIPayloadBuilder:
                 continue
 
             latest = df.iloc[-1]
-            prev = df.iloc[-2] if len(df) >= 2 else latest
+            prev = df.iloc[-2] if len(df) >= 2 else None
 
             close_value = self._safe_float(latest.get("close"))
             ema_20_value = self._safe_float(latest.get("ema_20"))
             ema_50_value = self._safe_float(latest.get("ema_50"))
             macd_hist_value = self._safe_float(latest.get("macd_hist_12_26_9"))
-            macd_hist_prev_value = self._safe_float(prev.get("macd_hist_12_26_9"))
+            macd_hist_prev_value = self._safe_float(
+                prev.get("macd_hist_12_26_9") if prev is not None else None
+            )
 
             summary[timeframe] = {
-                "timestamp": str(latest.get("timestamp")),
+                "timestamp": self._safe_string(latest.get("timestamp")),
                 "close": close_value,
                 "rsi_14": self._safe_float(latest.get("rsi_14")),
                 "ema_20": ema_20_value,
@@ -164,6 +169,7 @@ class AIPayloadBuilder:
                     macd_hist_value,
                     macd_hist_prev_value,
                 ),
+                "bollinger_20_2": self._build_bollinger_snapshot(latest),
                 "price_vs_ema20": self._compare_price_to_level(close_value, ema_20_value),
                 "price_vs_ema50": self._compare_price_to_level(close_value, ema_50_value),
                 "rsi_zone": self._determine_rsi_zone(self._safe_float(latest.get("rsi_14"))),
@@ -311,6 +317,16 @@ class AIPayloadBuilder:
             return "bearish_zone"
         return "neutral_zone"
 
+    def _build_bollinger_snapshot(self, row: pd.Series) -> dict[str, float | None]:
+        return {
+            "middle": self._safe_float(row.get("bb_middle_20")),
+            "std": self._safe_float(row.get("bb_std_20")),
+            "upper": self._safe_float(row.get("bb_upper_20_2")),
+            "lower": self._safe_float(row.get("bb_lower_20_2")),
+            "bandwidth": self._safe_float(row.get("bb_bandwidth_20_2")),
+            "percent_b": self._safe_float(row.get("bb_percent_b_20_2")),
+        }
+
     def _safe_float(self, value: Any) -> float | None:
         if value is None:
             return None
@@ -321,3 +337,15 @@ class AIPayloadBuilder:
             return round(float(value), 6)
         except (TypeError, ValueError):
             return None
+
+    def _safe_string(self, value: Any) -> str | None:
+        if value is None:
+            return None
+
+        try:
+            if pd.isna(value):
+                return None
+        except TypeError:
+            pass
+
+        return str(value)
