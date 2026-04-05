@@ -29,26 +29,39 @@ def apply_candidate_quality_gate(
     The gate evaluates each candidate by exact selected identity:
     (selected_symbol, selected_strategy, selected_horizon)
 
+    Stage semantics:
+    - strict_kept_*: candidates that pass strict evaluation
+    - strict_dropped_*: candidates that fail strict evaluation
+    - fallback_restored_*: candidates restored only because strict evaluation
+      dropped all candidates
+    - final_kept_*: candidates ultimately passed to the selection engine
+
     Fallback behavior:
-    - If every candidate is dropped, restore the original candidates so the
-      pipeline does not re-enter candidate starvation.
+    - If every candidate is dropped under strict evaluation, restore the
+      original candidates so the pipeline does not re-enter candidate starvation.
+
+    Compatibility fields are retained temporarily:
+    - kept_candidates == final_kept_candidates
+    - dropped_candidates == strict_dropped_candidates
+    - kept_count == final_kept_count
+    - dropped_count == strict_dropped_count
     """
     normalized_candidates = [candidate for candidate in candidates if isinstance(candidate, dict)]
     resolved_path = resolve_trade_analysis_path(trade_analysis_path)
     records = load_trade_analysis_records(resolved_path)
 
-    kept_candidates: list[dict[str, Any]] = []
-    dropped_candidates: list[dict[str, Any]] = []
+    strict_kept_candidates: list[dict[str, Any]] = []
+    strict_dropped_candidates: list[dict[str, Any]] = []
 
     for candidate in normalized_candidates:
         metrics = compute_candidate_metrics(candidate, records)
         drop_reason = determine_drop_reason(metrics)
 
         if drop_reason is None:
-            kept_candidates.append(candidate)
+            strict_kept_candidates.append(candidate)
             continue
 
-        dropped_candidates.append(
+        strict_dropped_candidates.append(
             {
                 "candidate": candidate,
                 "reason": drop_reason,
@@ -57,18 +70,31 @@ def apply_candidate_quality_gate(
         )
 
     fallback_applied = False
-    if normalized_candidates and not kept_candidates:
-        kept_candidates = list(normalized_candidates)
+    fallback_restored_candidates: list[dict[str, Any]] = []
+    final_kept_candidates = list(strict_kept_candidates)
+
+    if normalized_candidates and not strict_kept_candidates:
         fallback_applied = True
+        fallback_restored_candidates = list(normalized_candidates)
+        final_kept_candidates = list(normalized_candidates)
 
     return {
-        "kept_candidates": kept_candidates,
-        "dropped_candidates": dropped_candidates,
         "input_path_used": str(resolved_path),
         "total_candidates": len(normalized_candidates),
-        "kept_count": len(kept_candidates),
-        "dropped_count": len(dropped_candidates),
+        "strict_kept_candidates": strict_kept_candidates,
+        "strict_kept_count": len(strict_kept_candidates),
+        "strict_dropped_candidates": strict_dropped_candidates,
+        "strict_dropped_count": len(strict_dropped_candidates),
         "fallback_applied": fallback_applied,
+        "fallback_restored_candidates": fallback_restored_candidates,
+        "fallback_restored_count": len(fallback_restored_candidates),
+        "final_kept_candidates": final_kept_candidates,
+        "final_kept_count": len(final_kept_candidates),
+        # Compatibility aliases
+        "kept_candidates": final_kept_candidates,
+        "dropped_candidates": strict_dropped_candidates,
+        "kept_count": len(final_kept_candidates),
+        "dropped_count": len(strict_dropped_candidates),
     }
 
 

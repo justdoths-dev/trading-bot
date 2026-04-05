@@ -60,7 +60,6 @@ class _FakePipeline:
         }
 
 
-
 def test_run_shadow_observation_passes_quality_gated_candidates_to_engine(monkeypatch) -> None:
     service = TradingPipelineService()
     mapper_payload = {
@@ -71,6 +70,32 @@ def test_run_shadow_observation_passes_quality_gated_candidates_to_engine(monkey
         ],
     }
     gate_result = {
+        "input_path_used": "logs/trade_analysis_cumulative.jsonl",
+        "total_candidates": 2,
+        "strict_kept_candidates": [
+            {"symbol": "BTCUSDT", "strategy": "swing", "horizon": "4h"}
+        ],
+        "strict_kept_count": 1,
+        "strict_dropped_candidates": [
+            {
+                "candidate": {"symbol": "ETHUSDT", "strategy": "swing", "horizon": "4h"},
+                "reason": "median_return_pct_negative",
+                "metrics": {
+                    "positive_rate_pct": 40.0,
+                    "median_return_pct": -0.2,
+                    "sample_count": 30,
+                },
+            }
+        ],
+        "strict_dropped_count": 1,
+        "fallback_applied": False,
+        "fallback_restored_candidates": [],
+        "fallback_restored_count": 0,
+        "final_kept_candidates": [
+            {"symbol": "BTCUSDT", "strategy": "swing", "horizon": "4h"}
+        ],
+        "final_kept_count": 1,
+        # compatibility
         "kept_candidates": [{"symbol": "BTCUSDT", "strategy": "swing", "horizon": "4h"}],
         "dropped_candidates": [
             {
@@ -83,11 +108,8 @@ def test_run_shadow_observation_passes_quality_gated_candidates_to_engine(monkey
                 },
             }
         ],
-        "input_path_used": "logs/trade_analysis_cumulative.jsonl",
-        "total_candidates": 2,
         "kept_count": 1,
         "dropped_count": 1,
-        "fallback_applied": False,
     }
     shadow_output = {
         "selection_status": "selected",
@@ -125,12 +147,21 @@ def test_run_shadow_observation_passes_quality_gated_candidates_to_engine(monkey
     gated_payload = result["edge_selection_mapper_payload"]
 
     assert len(captured_payloads) == 1
-    assert captured_payloads[0]["candidates"] == gate_result["kept_candidates"]
-    assert captured_payloads[0]["candidate_quality_gate"]["dropped_count"] == 1
-    assert captured_payloads[0]["candidate_quality_gate"]["fallback_applied"] is False
+    assert captured_payloads[0]["candidates"] == gate_result["final_kept_candidates"]
 
-    assert gated_payload["candidates"] == gate_result["kept_candidates"]
+    gate_snapshot = captured_payloads[0]["candidate_quality_gate"]
+    assert gate_snapshot["strict_kept_count"] == 1
+    assert gate_snapshot["strict_dropped_count"] == 1
+    assert gate_snapshot["fallback_restored_count"] == 0
+    assert gate_snapshot["final_kept_count"] == 1
+    assert gate_snapshot["fallback_applied"] is False
+
+    assert gated_payload["candidates"] == gate_result["final_kept_candidates"]
     assert gated_payload["candidate_quality_gate"]["input_path_used"] == gate_result["input_path_used"]
+    assert gated_payload["candidate_quality_gate"]["strict_dropped_candidates"] == gate_result[
+        "strict_dropped_candidates"
+    ]
+
     assert result["edge_selection_output"] == shadow_output
     assert metadata["replay_ready"] is True
     assert metadata["shadow_status"] == "success"
@@ -140,10 +171,17 @@ def test_run_shadow_observation_passes_quality_gated_candidates_to_engine(monkey
     assert metadata["engine_version"] == "edge_selection_engine_v1"
     assert metadata["trigger_symbol"] == "BTCUSDT"
     assert metadata["selection_status"] == "selected"
+
+    assert metadata["quality_gate_total_candidates"] == 2
+    assert metadata["quality_gate_strict_kept_count"] == 1
+    assert metadata["quality_gate_strict_dropped_count"] == 1
+    assert metadata["quality_gate_fallback_applied"] is False
+    assert metadata["quality_gate_fallback_restored_count"] == 0
+    assert metadata["quality_gate_final_kept_count"] == 1
+
+    # compatibility
     assert metadata["quality_gate_kept_count"] == 1
     assert metadata["quality_gate_dropped_count"] == 1
-    assert metadata["quality_gate_fallback_applied"] is False
-
 
 
 def test_run_shadow_observation_forced_failure_returns_failed_metadata(monkeypatch) -> None:
@@ -160,7 +198,6 @@ def test_run_shadow_observation_forced_failure_returns_failed_metadata(monkeypat
     assert metadata["error_type"] == "RuntimeError"
     assert FORCE_SHADOW_FAILURE_ENV_VAR in metadata["error_message"]
     assert metadata["trigger_symbol"] == "BTCUSDT"
-
 
 
 def test_run_returns_main_pipeline_result_even_when_shadow_fails(monkeypatch) -> None:

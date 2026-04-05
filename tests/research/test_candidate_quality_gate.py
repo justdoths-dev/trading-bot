@@ -180,6 +180,10 @@ def test_compute_candidate_metrics_ignores_malformed_or_non_selected_rows() -> N
     }
 
 
+# -----------------------------
+# 핵심: strict / fallback / final 검증
+# -----------------------------
+
 def test_apply_candidate_quality_gate_drops_for_insufficient_sample(tmp_path: Path) -> None:
     candidate = _candidate()
     path = _write_jsonl(
@@ -189,9 +193,18 @@ def test_apply_candidate_quality_gate_drops_for_insufficient_sample(tmp_path: Pa
 
     result = apply_candidate_quality_gate([candidate], trade_analysis_path=path)
 
+    assert result["total_candidates"] == 1
+    assert result["strict_kept_count"] == 0
+    assert result["strict_dropped_count"] == 1
     assert result["fallback_applied"] is True
-    assert result["dropped_candidates"][0]["reason"] == "sample_count_below_minimum"
-    assert result["dropped_candidates"][0]["metrics"]["sample_count"] == 29
+    assert result["fallback_restored_count"] == 1
+    assert result["final_kept_count"] == 1
+
+    assert result["strict_dropped_candidates"][0]["reason"] == "sample_count_below_minimum"
+    assert result["fallback_restored_candidates"] == [candidate]
+    assert result["final_kept_candidates"] == [candidate]
+
+    # compatibility
     assert result["kept_candidates"] == [candidate]
 
 
@@ -205,10 +218,14 @@ def test_apply_candidate_quality_gate_drops_for_negative_median(tmp_path: Path) 
 
     result = apply_candidate_quality_gate([candidate], trade_analysis_path=path)
 
+    assert result["strict_kept_count"] == 0
+    assert result["strict_dropped_count"] == 1
     assert result["fallback_applied"] is True
-    assert result["dropped_candidates"][0]["reason"] == "median_return_pct_negative"
-    assert result["dropped_candidates"][0]["metrics"]["median_return_pct"] == -2.0
-    assert result["kept_candidates"] == [candidate]
+    assert result["fallback_restored_count"] == 1
+    assert result["final_kept_count"] == 1
+
+    assert result["strict_dropped_candidates"][0]["reason"] == "median_return_pct_negative"
+    assert result["final_kept_candidates"] == [candidate]
 
 
 def test_apply_candidate_quality_gate_drops_for_low_positive_rate(tmp_path: Path) -> None:
@@ -221,10 +238,13 @@ def test_apply_candidate_quality_gate_drops_for_low_positive_rate(tmp_path: Path
 
     result = apply_candidate_quality_gate([candidate], trade_analysis_path=path)
 
+    assert result["strict_kept_count"] == 0
+    assert result["strict_dropped_count"] == 1
     assert result["fallback_applied"] is True
-    assert result["dropped_candidates"][0]["reason"] == "positive_rate_pct_below_minimum"
-    assert result["dropped_candidates"][0]["metrics"]["positive_rate_pct"] == 42.5
-    assert result["kept_candidates"] == [candidate]
+    assert result["fallback_restored_count"] == 1
+    assert result["final_kept_count"] == 1
+
+    assert result["strict_dropped_candidates"][0]["reason"] == "positive_rate_pct_below_minimum"
 
 
 def test_apply_candidate_quality_gate_keeps_and_drops_mixed_candidates(tmp_path: Path) -> None:
@@ -242,11 +262,17 @@ def test_apply_candidate_quality_gate_keeps_and_drops_mixed_candidates(tmp_path:
         trade_analysis_path=path,
     )
 
+    assert result["total_candidates"] == 2
+    assert result["strict_kept_count"] == 1
+    assert result["strict_dropped_count"] == 1
     assert result["fallback_applied"] is False
-    assert result["kept_candidates"] == [btc_candidate]
-    assert result["dropped_count"] == 1
-    assert result["dropped_candidates"][0]["candidate"]["symbol"] == "ETHUSDT"
-    assert result["dropped_candidates"][0]["reason"] == "median_return_pct_negative"
+    assert result["fallback_restored_count"] == 0
+    assert result["final_kept_count"] == 1
+
+    assert result["strict_kept_candidates"] == [btc_candidate]
+    assert result["final_kept_candidates"] == [btc_candidate]
+
+    assert result["strict_dropped_candidates"][0]["candidate"]["symbol"] == "ETHUSDT"
 
 
 def test_apply_candidate_quality_gate_restores_original_candidates_when_all_drop(tmp_path: Path) -> None:
@@ -262,10 +288,11 @@ def test_apply_candidate_quality_gate_restores_original_candidates_when_all_drop
         trade_analysis_path=path,
     )
 
+    assert result["strict_kept_count"] == 0
+    assert result["strict_dropped_count"] == 2
     assert result["fallback_applied"] is True
-    assert result["kept_candidates"] == [first_candidate, second_candidate]
-    assert result["dropped_count"] == 2
-    assert {item["candidate"]["symbol"] for item in result["dropped_candidates"]} == {
-        "BTCUSDT",
-        "ETHUSDT",
-    }
+    assert result["fallback_restored_count"] == 2
+    assert result["final_kept_count"] == 2
+
+    assert result["fallback_restored_candidates"] == [first_candidate, second_candidate]
+    assert result["final_kept_candidates"] == [first_candidate, second_candidate]

@@ -144,12 +144,19 @@ class TradingPipelineService:
             quality_gate_dict = quality_gate if isinstance(quality_gate, dict) else {}
 
             logger.info(
-                "Shadow observation output written: trigger_symbol=%s status=%s candidates=%s kept=%s dropped=%s fallback=%s path=%s",
+                (
+                    "Shadow observation output written: "
+                    "trigger_symbol=%s status=%s candidates=%s "
+                    "strict_kept=%s strict_dropped=%s fallback_restored=%s "
+                    "final_kept=%s fallback=%s path=%s"
+                ),
                 trigger_symbol,
                 shadow_result.get("selection_status"),
                 shadow_result.get("candidates_considered"),
-                quality_gate_dict.get("kept_count"),
-                quality_gate_dict.get("dropped_count"),
+                quality_gate_dict.get("strict_kept_count"),
+                quality_gate_dict.get("strict_dropped_count"),
+                quality_gate_dict.get("fallback_restored_count"),
+                quality_gate_dict.get("final_kept_count"),
                 quality_gate_dict.get("fallback_applied"),
                 output_path,
             )
@@ -172,9 +179,17 @@ class TradingPipelineService:
                     if isinstance(shadow_result, dict)
                     else None,
                     "quality_gate_input_path": quality_gate_dict.get("input_path_used"),
-                    "quality_gate_kept_count": quality_gate_dict.get("kept_count"),
-                    "quality_gate_dropped_count": quality_gate_dict.get("dropped_count"),
+                    "quality_gate_total_candidates": quality_gate_dict.get("total_candidates"),
+                    "quality_gate_strict_kept_count": quality_gate_dict.get("strict_kept_count"),
+                    "quality_gate_strict_dropped_count": quality_gate_dict.get("strict_dropped_count"),
                     "quality_gate_fallback_applied": quality_gate_dict.get("fallback_applied"),
+                    "quality_gate_fallback_restored_count": quality_gate_dict.get(
+                        "fallback_restored_count"
+                    ),
+                    "quality_gate_final_kept_count": quality_gate_dict.get("final_kept_count"),
+                    # Compatibility fields retained temporarily
+                    "quality_gate_kept_count": quality_gate_dict.get("final_kept_count"),
+                    "quality_gate_dropped_count": quality_gate_dict.get("strict_dropped_count"),
                 }
             )
 
@@ -212,15 +227,40 @@ class TradingPipelineService:
         candidates = raw_candidates if isinstance(raw_candidates, list) else []
         quality_gate_result = apply_candidate_quality_gate(candidates)
 
+        final_kept_candidates = list(quality_gate_result.get("final_kept_candidates") or [])
+
         gated_payload = dict(mapped_payload)
-        gated_payload["candidates"] = list(quality_gate_result.get("kept_candidates") or [])
+        gated_payload["candidates"] = final_kept_candidates
         gated_payload["candidate_quality_gate"] = {
             "input_path_used": quality_gate_result.get("input_path_used"),
             "total_candidates": quality_gate_result.get("total_candidates", len(candidates)),
-            "kept_count": quality_gate_result.get("kept_count", len(candidates)),
-            "dropped_count": quality_gate_result.get("dropped_count", 0),
+            "strict_kept_count": quality_gate_result.get("strict_kept_count", 0),
+            "strict_kept_candidates": quality_gate_result.get("strict_kept_candidates") or [],
+            "strict_dropped_count": quality_gate_result.get("strict_dropped_count", 0),
+            "strict_dropped_candidates": quality_gate_result.get("strict_dropped_candidates") or [],
             "fallback_applied": quality_gate_result.get("fallback_applied", False),
-            "dropped_candidates": quality_gate_result.get("dropped_candidates") or [],
+            "fallback_restored_count": quality_gate_result.get("fallback_restored_count", 0),
+            "fallback_restored_candidates": quality_gate_result.get(
+                "fallback_restored_candidates"
+            )
+            or [],
+            "final_kept_count": quality_gate_result.get(
+                "final_kept_count",
+                len(final_kept_candidates),
+            ),
+            "final_kept_candidates": final_kept_candidates,
+            # Compatibility fields retained temporarily
+            "kept_count": quality_gate_result.get(
+                "kept_count",
+                quality_gate_result.get("final_kept_count", len(final_kept_candidates)),
+            ),
+            "dropped_count": quality_gate_result.get(
+                "dropped_count",
+                quality_gate_result.get("strict_dropped_count", 0),
+            ),
+            "dropped_candidates": quality_gate_result.get("dropped_candidates")
+            or quality_gate_result.get("strict_dropped_candidates")
+            or [],
         }
         return gated_payload
 
