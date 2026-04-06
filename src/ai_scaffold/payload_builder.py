@@ -76,10 +76,6 @@ def build_payload(
     return asdict(request)
 
 
-# ----------------------------
-# normalization helpers
-# ----------------------------
-
 def _normalize_timeframes(
     timeframe_summaries: Mapping[str, Mapping[str, Any]]
     | Sequence[Mapping[str, Any]]
@@ -147,7 +143,7 @@ def _normalize_strategy_context(
         ),
         directional_bias=_normalize_bias(raw.get("directional_bias", raw.get("bias"))),
         setup_state=_normalize_text(raw.get("setup_state"), fallback="unknown"),
-        alignment_state=_normalize_text(raw.get("alignment_state"), fallback="unknown"),
+        selection_state=_normalize_text(raw.get("selection_state"), fallback="unknown"),
     )
 
 
@@ -173,7 +169,6 @@ def _normalize_bias(value: Any) -> str:
     if text in _VALID_BIASES:
         return text
 
-    # fallback mapping
     if "long" in text:
         return "long"
     if "short" in text:

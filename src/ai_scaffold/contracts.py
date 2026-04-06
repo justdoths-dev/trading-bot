@@ -21,7 +21,7 @@ class StrategyContextSummary:
     strategy_name: str = "unknown"
     directional_bias: Bias = "neutral"
     setup_state: str = "unknown"
-    alignment_state: str = "unknown"
+    selection_state: str = "unknown"
 
 
 @dataclass(slots=True)

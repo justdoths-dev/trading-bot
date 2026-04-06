@@ -11,6 +11,7 @@ from typing import Any
 @dataclass
 class TradeAnalysisLoggerConfig:
     """Configuration for trade analysis logging."""
+
     log_dir: str = "logs"
     filename: str = "trade_analysis.jsonl"
     utc_timestamp: bool = True
@@ -72,6 +73,7 @@ class TradeAnalysisLogger:
         edge_selection_mapper_payload: dict[str, Any] | None = None,
         edge_selection_output: dict[str, Any] | None = None,
         edge_selection_metadata: dict[str, Any] | None = None,
+        ai_scaffold_shadow: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Add replay-ready edge-selection context to the latest matching log row."""
         with self._lock:
@@ -126,6 +128,13 @@ class TradeAnalysisLogger:
             updated_record["edge_selection_metadata"] = (
                 self._build_edge_selection_metadata_snapshot(edge_selection_metadata)
             )
+
+            if ai_scaffold_shadow is not None:
+                updated_record["ai_scaffold_shadow"] = (
+                    self._build_ai_scaffold_shadow_snapshot(ai_scaffold_shadow)
+                )
+            else:
+                updated_record.pop("ai_scaffold_shadow", None)
 
             lines[target_index] = json.dumps(updated_record, ensure_ascii=False) + "\n"
 
@@ -429,6 +438,12 @@ class TradeAnalysisLogger:
     ) -> dict[str, Any] | None:
         return self._json_safe_copy(payload)
 
+    def _build_ai_scaffold_shadow_snapshot(
+        self,
+        payload: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        return self._json_safe_copy(payload)
+
     def _json_safe_copy(self, value: Any) -> Any:
         if value is None:
             return None
@@ -443,10 +458,7 @@ class TradeAnalysisLogger:
             return value.isoformat()
 
         if isinstance(value, dict):
-            return {
-                str(key): self._json_safe_copy(item)
-                for key, item in value.items()
-            }
+            return {str(key): self._json_safe_copy(item) for key, item in value.items()}
 
         if isinstance(value, (list, tuple, set)):
             return [self._json_safe_copy(item) for item in value]

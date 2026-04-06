@@ -34,7 +34,7 @@ def test_static_mock_interpreter_returns_expected_structure() -> None:
             strategy_name="trend_follow",
             directional_bias="long",
             setup_state="confirmed",
-            alignment_state="aligned",
+            selection_state="selected",
         ),
         risk_context=RiskContextSummary(
             execution_allowed=True,
@@ -86,7 +86,7 @@ def test_static_mock_interpreter_is_deterministic_for_blocked_or_conflicted_inpu
             strategy_name="mean_revert",
             directional_bias="short",
             setup_state="forming",
-            alignment_state="mixed",
+            selection_state="abstain",
         ),
         risk_context=RiskContextSummary(
             execution_allowed=False,

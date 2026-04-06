@@ -15,13 +15,16 @@ class _FakeLogger:
 
     def enrich_latest_record(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
-        return {
+        record = {
             "logged_at": kwargs["logged_at"],
             "symbol": kwargs["symbol"],
             "edge_selection_mapper_payload": kwargs["edge_selection_mapper_payload"],
             "edge_selection_output": kwargs["edge_selection_output"],
             "edge_selection_metadata": kwargs["edge_selection_metadata"],
         }
+        if kwargs.get("ai_scaffold_shadow") is not None:
+            record["ai_scaffold_shadow"] = kwargs["ai_scaffold_shadow"]
+        return record
 
 
 class _FakePipeline:
@@ -58,6 +61,13 @@ class _FakePipeline:
             },
             "telegram_send_result": {"sent": False},
         }
+
+
+class _ExplodingAnnotator:
+    enabled = True
+
+    def annotate(self, **_: Any) -> dict[str, Any]:
+        raise RuntimeError("forced ai scaffold failure")
 
 
 def test_run_shadow_observation_passes_quality_gated_candidates_to_engine(monkeypatch) -> None:
@@ -233,3 +243,159 @@ def test_run_returns_main_pipeline_result_even_when_shadow_fails(monkeypatch) ->
     assert metadata["replay_ready"] is False
     assert metadata["shadow_status"] == "failed"
     assert metadata["error_type"] == "RuntimeError"
+
+
+def test_run_with_ai_scaffold_disabled_preserves_existing_behavior(monkeypatch) -> None:
+    service = TradingPipelineService(ai_scaffold_shadow_enabled=False)
+    fake_pipeline = _FakePipeline()
+    shadow_context = {
+        "edge_selection_mapper_payload": {"generated_at": "2026-03-26T00:00:00+00:00"},
+        "edge_selection_output": {"selection_status": "selected"},
+        "edge_selection_metadata": {"shadow_status": "success", "replay_ready": True},
+    }
+
+    monkeypatch.setattr(
+        service,
+        "_get_pipeline",
+        lambda *, symbol, send_telegram: fake_pipeline,
+    )
+    monkeypatch.setattr(
+        service,
+        "_run_shadow_observation",
+        lambda trigger_symbol: shadow_context,
+    )
+
+    result = service.run(symbol="BTCUSDT", run_ai=True, send_telegram=False)
+    call = fake_pipeline.logger.calls[0]
+
+    assert "ai_scaffold_shadow" not in result["log_record"]
+    assert call.get("ai_scaffold_shadow") is None
+    assert result["strategy_result"] == {"selected_strategy": "momentum_breakout"}
+    assert result["risk_result"] == {"execution_allowed": True}
+    assert result["execution_result"] == {"action": "buy"}
+    assert result["ai_output"]["result"]["source"] == "openai"
+
+
+def test_run_with_ai_scaffold_enabled_adds_read_only_annotation(monkeypatch) -> None:
+    service = TradingPipelineService(ai_scaffold_shadow_enabled=True)
+    fake_pipeline = _FakePipeline()
+    shadow_context = {
+        "edge_selection_mapper_payload": {"generated_at": "2026-03-26T00:00:00+00:00"},
+        "edge_selection_output": {"selection_status": "selected"},
+        "edge_selection_metadata": {"shadow_status": "success", "replay_ready": True},
+    }
+
+    monkeypatch.setattr(
+        service,
+        "_get_pipeline",
+        lambda *, symbol, send_telegram: fake_pipeline,
+    )
+    monkeypatch.setattr(
+        service,
+        "_run_shadow_observation",
+        lambda trigger_symbol: shadow_context,
+    )
+
+    result = service.run(symbol="BTCUSDT", run_ai=True, send_telegram=False)
+    annotation = result["log_record"]["ai_scaffold_shadow"]
+
+    assert annotation["enabled"] is True
+    assert annotation["source"] == "ai_scaffold_static_mock"
+    assert annotation["annotation_mode"] == "read_only_shadow"
+    assert annotation["decision_impact"] is False
+    assert annotation["request"]["symbol"] == "btcusdt"
+    assert annotation["request"]["strategy_context"]["selection_state"] == "selected"
+    assert "alignment_state" not in annotation["request"]["strategy_context"]
+    assert annotation["response"]["model_version"] == "static_mock_v1"
+    assert annotation["error"] is None
+
+
+def test_run_with_ai_scaffold_failure_is_captured_without_breaking_pipeline(monkeypatch) -> None:
+    service = TradingPipelineService(
+        ai_scaffold_shadow_enabled=True,
+        ai_scaffold_shadow_annotator=_ExplodingAnnotator(),
+    )
+    fake_pipeline = _FakePipeline()
+    shadow_context = {
+        "edge_selection_mapper_payload": {"generated_at": "2026-03-26T00:00:00+00:00"},
+        "edge_selection_output": {"selection_status": "selected"},
+        "edge_selection_metadata": {"shadow_status": "success", "replay_ready": True},
+    }
+
+    monkeypatch.setattr(
+        service,
+        "_get_pipeline",
+        lambda *, symbol, send_telegram: fake_pipeline,
+    )
+    monkeypatch.setattr(
+        service,
+        "_run_shadow_observation",
+        lambda trigger_symbol: shadow_context,
+    )
+
+    result = service.run(symbol="BTCUSDT", run_ai=True, send_telegram=False)
+    annotation = result["log_record"]["ai_scaffold_shadow"]
+
+    assert result["strategy_result"] == {"selected_strategy": "momentum_breakout"}
+    assert result["risk_result"] == {"execution_allowed": True}
+    assert result["execution_result"] == {"action": "buy"}
+    assert annotation["enabled"] is True
+    assert annotation["decision_impact"] is False
+    assert annotation["response"] == {}
+    assert annotation["error"] == {
+        "type": "RuntimeError",
+        "message": "forced ai scaffold failure",
+    }
+
+
+def test_rule_engine_outputs_remain_identical_with_ai_scaffold_enabled(monkeypatch) -> None:
+    fake_pipeline_disabled = _FakePipeline()
+    fake_pipeline_enabled = _FakePipeline()
+
+    disabled_service = TradingPipelineService(ai_scaffold_shadow_enabled=False)
+    enabled_service = TradingPipelineService(ai_scaffold_shadow_enabled=True)
+
+    shadow_context = {
+        "edge_selection_mapper_payload": {"generated_at": "2026-03-26T00:00:00+00:00"},
+        "edge_selection_output": {"selection_status": "selected"},
+        "edge_selection_metadata": {"shadow_status": "success", "replay_ready": True},
+    }
+
+    monkeypatch.setattr(
+        disabled_service,
+        "_get_pipeline",
+        lambda *, symbol, send_telegram: fake_pipeline_disabled,
+    )
+    monkeypatch.setattr(
+        enabled_service,
+        "_get_pipeline",
+        lambda *, symbol, send_telegram: fake_pipeline_enabled,
+    )
+    monkeypatch.setattr(
+        disabled_service,
+        "_run_shadow_observation",
+        lambda trigger_symbol: shadow_context,
+    )
+    monkeypatch.setattr(
+        enabled_service,
+        "_run_shadow_observation",
+        lambda trigger_symbol: shadow_context,
+    )
+
+    disabled_result = disabled_service.run(
+        symbol="BTCUSDT",
+        run_ai=True,
+        send_telegram=False,
+    )
+    enabled_result = enabled_service.run(
+        symbol="BTCUSDT",
+        run_ai=True,
+        send_telegram=False,
+    )
+
+    assert enabled_result["strategy_result"] == disabled_result["strategy_result"]
+    assert enabled_result["risk_result"] == disabled_result["risk_result"]
+    assert enabled_result["execution_result"] == disabled_result["execution_result"]
+    assert enabled_result["ai_output"] == disabled_result["ai_output"]
+    assert "ai_scaffold_shadow" not in disabled_result["log_record"]
+    assert enabled_result["log_record"]["ai_scaffold_shadow"]["decision_impact"] is False

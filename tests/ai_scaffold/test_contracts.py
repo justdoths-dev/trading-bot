@@ -28,7 +28,7 @@ def test_contracts_expose_expected_request_and_response_fields() -> None:
             strategy_name="trend_follow",
             directional_bias="long",
             setup_state="confirmed",
-            alignment_state="aligned",
+            selection_state="selected",
         ),
         risk_context=RiskContextSummary(
             execution_allowed=True,
@@ -55,6 +55,7 @@ def test_contracts_expose_expected_request_and_response_fields() -> None:
     assert request_payload["symbol"] == "BTCUSDT"
     assert request_payload["timeframes"][0]["timeframe"] == "1h"
     assert request_payload["strategy_context"]["directional_bias"] == "long"
+    assert request_payload["strategy_context"]["selection_state"] == "selected"
     assert request_payload["risk_context"]["execution_allowed"] is True
 
     assert response_payload["bias"] == "long"

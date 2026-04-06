@@ -3,9 +3,15 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.ai_scaffold.shadow_annotation import (
+    AIScaffoldShadowAnnotator,
+    AI_SCAFFOLD_SHADOW_MODE,
+    AI_SCAFFOLD_SHADOW_SOURCE,
+)
 from src.notifications.shadow_event_notifier import ShadowEventNotifier
 from src.research.candidate_quality_gate import apply_candidate_quality_gate
 from src.research.edge_selection_engine import run_edge_selection_engine
@@ -25,11 +31,20 @@ FORCE_SHADOW_FAILURE_ENV_VAR = "EDGE_SELECTION_FORCE_SHADOW_FAILURE"
 class TradingPipelineService:
     """Service wrapper for one full trading cycle execution."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        ai_scaffold_shadow_enabled: bool = False,
+        ai_scaffold_shadow_annotator: AIScaffoldShadowAnnotator | None = None,
+    ) -> None:
         self._pipelines: dict[str, TradingPipeline] = {}
         self._pipeline_send_telegram_flags: dict[str, bool] = {}
         self._last_ai_results: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self._ai_scaffold_shadow_annotator = (
+            ai_scaffold_shadow_annotator
+            or AIScaffoldShadowAnnotator(enabled=ai_scaffold_shadow_enabled)
+        )
 
     def run(self, symbol: str, run_ai: bool, send_telegram: bool) -> dict[str, Any]:
         """Run one trading cycle and return the full pipeline result payload."""
@@ -62,11 +77,16 @@ class TradingPipelineService:
                     self._last_ai_results[symbol] = ai_result
 
         shadow_context = self._run_shadow_observation(trigger_symbol=symbol)
+        ai_scaffold_shadow = self._build_ai_scaffold_shadow_annotation(
+            log_record=result.get("log_record"),
+            shadow_context=shadow_context,
+        )
         enriched_record = self._enrich_trade_analysis_log_record(
             pipeline=pipeline,
             symbol=symbol,
             log_record=result.get("log_record"),
             shadow_context=shadow_context,
+            ai_scaffold_shadow=ai_scaffold_shadow,
         )
         if enriched_record is not None:
             result["log_record"] = enriched_record
@@ -271,6 +291,7 @@ class TradingPipelineService:
         symbol: str,
         log_record: Any,
         shadow_context: dict[str, Any] | None,
+        ai_scaffold_shadow: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
         if not isinstance(log_record, dict):
             return None
@@ -291,6 +312,7 @@ class TradingPipelineService:
                 ),
                 edge_selection_output=shadow_context.get("edge_selection_output"),
                 edge_selection_metadata=shadow_context.get("edge_selection_metadata"),
+                ai_scaffold_shadow=ai_scaffold_shadow,
             )
             logger.debug(
                 "Trade-analysis record enriched with replay-ready edge-selection context: symbol=%s logged_at=%s",
@@ -305,6 +327,44 @@ class TradingPipelineService:
                 logged_at,
             )
             return None
+
+    def _build_ai_scaffold_shadow_annotation(
+        self,
+        *,
+        log_record: Any,
+        shadow_context: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        annotator = self._ai_scaffold_shadow_annotator
+        if annotator is None or annotator.enabled is not True:
+            return None
+
+        edge_selection_output = None
+        if isinstance(shadow_context, dict):
+            edge_selection_output = shadow_context.get("edge_selection_output")
+
+        try:
+            return annotator.annotate(
+                log_record=log_record if isinstance(log_record, dict) else None,
+                edge_selection_output=(
+                    edge_selection_output
+                    if isinstance(edge_selection_output, dict)
+                    else None
+                ),
+            )
+        except Exception as exc:
+            return {
+                "enabled": True,
+                "source": AI_SCAFFOLD_SHADOW_SOURCE,
+                "generated_at": pipeline_safe_utc_now_iso(),
+                "annotation_mode": AI_SCAFFOLD_SHADOW_MODE,
+                "decision_impact": False,
+                "request": {},
+                "response": {},
+                "error": {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            }
 
     def _notify_shadow_events(
         self,
@@ -335,3 +395,7 @@ class TradingPipelineService:
     def _is_forced_shadow_failure_enabled(self) -> bool:
         value = os.getenv(FORCE_SHADOW_FAILURE_ENV_VAR, "")
         return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def pipeline_safe_utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()

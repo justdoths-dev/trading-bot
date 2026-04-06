@@ -232,6 +232,119 @@ def test_enrich_latest_record_keeps_mapper_and_output_null_on_failure(tmp_path: 
     assert enriched["edge_selection_metadata"]["error_message"] == "forced shadow failure"
 
 
+def test_enrich_latest_record_stores_ai_scaffold_shadow_annotation(tmp_path: Path) -> None:
+    logger = _build_logger(tmp_path)
+    base_record = logger.log(
+        symbol="BTCUSDT",
+        strategy_result=_build_strategy_result(),
+        risk_result=_build_risk_result(),
+        execution_result=_build_execution_result(),
+        ai_result=_build_ai_result(),
+    )
+
+    ai_scaffold_shadow = {
+        "enabled": True,
+        "source": "ai_scaffold_static_mock",
+        "generated_at": datetime(2026, 3, 26, 0, 10, tzinfo=timezone.utc),
+        "annotation_mode": "read_only_shadow",
+        "decision_impact": False,
+        "request": {
+            "symbol": "btcusdt",
+            "strategy_context": {
+                "strategy": "momentum_breakout",
+                "bias": "long",
+                "setup_state": "ready",
+                "selection_state": "selected",
+            },
+        },
+        "response": {
+            "bias": "long",
+            "confidence": "medium",
+            "regime_label": "directional_trend",
+        },
+        "error": None,
+    }
+
+    enriched = logger.enrich_latest_record(
+        symbol="BTCUSDT",
+        logged_at=base_record["logged_at"],
+        edge_selection_mapper_payload=None,
+        edge_selection_output=None,
+        edge_selection_metadata=None,
+        ai_scaffold_shadow=ai_scaffold_shadow,
+    )
+
+    assert "ai_scaffold_shadow" in enriched
+    assert enriched["ai_scaffold_shadow"] == {
+        "enabled": True,
+        "source": "ai_scaffold_static_mock",
+        "generated_at": "2026-03-26T00:10:00+00:00",
+        "annotation_mode": "read_only_shadow",
+        "decision_impact": False,
+        "request": {
+            "symbol": "btcusdt",
+            "strategy_context": {
+                "strategy": "momentum_breakout",
+                "bias": "long",
+                "setup_state": "ready",
+                "selection_state": "selected",
+            },
+        },
+        "response": {
+            "bias": "long",
+            "confidence": "medium",
+            "regime_label": "directional_trend",
+        },
+        "error": None,
+    }
+
+    persisted_records = _read_jsonl(logger.log_path)
+    assert persisted_records == [enriched]
+
+
+def test_enrich_latest_record_removes_stale_ai_scaffold_shadow_when_none(tmp_path: Path) -> None:
+    logger = _build_logger(tmp_path)
+    base_record = logger.log(
+        symbol="BTCUSDT",
+        strategy_result=_build_strategy_result(),
+        risk_result=_build_risk_result(),
+        execution_result=_build_execution_result(),
+        ai_result=_build_ai_result(),
+    )
+
+    first = logger.enrich_latest_record(
+        symbol="BTCUSDT",
+        logged_at=base_record["logged_at"],
+        edge_selection_mapper_payload=None,
+        edge_selection_output=None,
+        edge_selection_metadata=None,
+        ai_scaffold_shadow={
+            "enabled": True,
+            "source": "ai_scaffold_static_mock",
+            "generated_at": "2026-03-26T00:10:00+00:00",
+            "annotation_mode": "read_only_shadow",
+            "decision_impact": False,
+            "request": {"symbol": "btcusdt"},
+            "response": {"bias": "long"},
+            "error": None,
+        },
+    )
+    assert "ai_scaffold_shadow" in first
+
+    second = logger.enrich_latest_record(
+        symbol="BTCUSDT",
+        logged_at=base_record["logged_at"],
+        edge_selection_mapper_payload=None,
+        edge_selection_output=None,
+        edge_selection_metadata=None,
+        ai_scaffold_shadow=None,
+    )
+
+    assert "ai_scaffold_shadow" not in second
+    persisted_records = _read_jsonl(logger.log_path)
+    assert persisted_records == [second]
+
+
 def test_enrich_latest_record_is_idempotent_for_same_payload(tmp_path: Path) -> None:
     logger = _build_logger(tmp_path)
     base_record = logger.log(
@@ -306,3 +419,64 @@ def test_enrich_latest_record_targets_latest_matching_row_only(tmp_path: Path) -
     assert records[1] == enriched
     assert records[1]["logged_at"] == second_record["logged_at"]
     assert records[1]["edge_selection_metadata"]["shadow_status"] == "success"
+
+
+def test_ai_scaffold_shadow_is_the_only_difference_between_disabled_and_enabled_records(
+    tmp_path: Path,
+) -> None:
+    logger = _build_logger(tmp_path)
+
+    base_record = logger.log(
+        symbol="BTCUSDT",
+        strategy_result=_build_strategy_result(),
+        risk_result=_build_risk_result(),
+        execution_result=_build_execution_result(),
+        ai_result=_build_ai_result(),
+    )
+
+    disabled_enriched = logger.enrich_latest_record(
+        symbol="BTCUSDT",
+        logged_at=base_record["logged_at"],
+        edge_selection_mapper_payload={"generated_at": "2026-03-26T00:00:00+00:00"},
+        edge_selection_output={"selection_status": "selected"},
+        edge_selection_metadata={"shadow_status": "success", "replay_ready": True},
+        ai_scaffold_shadow=None,
+    )
+
+    enabled_shadow = {
+        "enabled": True,
+        "source": "ai_scaffold_static_mock",
+        "generated_at": "2026-03-26T00:10:00+00:00",
+        "annotation_mode": "read_only_shadow",
+        "decision_impact": False,
+        "request": {
+            "symbol": "btcusdt",
+            "strategy_context": {
+                "strategy": "momentum_breakout",
+                "bias": "long",
+                "setup_state": "ready",
+                "selection_state": "selected",
+            },
+        },
+        "response": {
+            "bias": "long",
+            "confidence": "medium",
+            "regime_label": "directional_trend",
+        },
+        "error": None,
+    }
+
+    enabled_enriched = logger.enrich_latest_record(
+        symbol="BTCUSDT",
+        logged_at=base_record["logged_at"],
+        edge_selection_mapper_payload={"generated_at": "2026-03-26T00:00:00+00:00"},
+        edge_selection_output={"selection_status": "selected"},
+        edge_selection_metadata={"shadow_status": "success", "replay_ready": True},
+        ai_scaffold_shadow=enabled_shadow,
+    )
+
+    enabled_without_shadow = dict(enabled_enriched)
+    enabled_without_shadow.pop("ai_scaffold_shadow", None)
+
+    assert enabled_without_shadow == disabled_enriched
+    assert enabled_enriched["ai_scaffold_shadow"]["decision_impact"] is False
