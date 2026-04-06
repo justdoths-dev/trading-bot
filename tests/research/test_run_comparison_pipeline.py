@@ -128,7 +128,12 @@ def test_run_comparison_pipeline_returns_output_paths_correctly(
 def test_default_paths_resolve_correctly() -> None:
     logs_dir = run_comparison_pipeline._default_logs_dir()
 
-    assert run_comparison_pipeline._default_cumulative_output() == logs_dir / "trade_analysis_cumulative.jsonl"
+    assert run_comparison_pipeline._default_cumulative_output() == (
+        logs_dir
+        / "research_reports"
+        / "cumulative"
+        / "trade_analysis_cumulative_snapshot.jsonl"
+    )
     assert run_comparison_pipeline._default_latest_summary() == logs_dir / "research_reports" / "latest" / "summary.json"
     assert run_comparison_pipeline._default_cumulative_output_dir() == logs_dir / "research_reports" / "cumulative"
     assert run_comparison_pipeline._default_comparison_output_dir() == logs_dir / "research_reports" / "comparison"

@@ -12,6 +12,8 @@ from src.research.edge_stability_score_builder import build_edge_stability_score
 from src.research.research_analyzer import run_research_analyzer
 from src.research.score_drift_analyzer import build_score_drift_report
 
+DEFAULT_CUMULATIVE_SNAPSHOT_FILENAME = "trade_analysis_cumulative_snapshot.jsonl"
+
 
 def run_comparison_pipeline(
     logs_dir: Path | None = None,
@@ -121,7 +123,7 @@ def _default_logs_dir() -> Path:
 
 
 def _default_cumulative_output() -> Path:
-    return _default_logs_dir() / "trade_analysis_cumulative.jsonl"
+    return _default_cumulative_output_dir() / DEFAULT_CUMULATIVE_SNAPSHOT_FILENAME
 
 
 def _default_latest_summary() -> Path:
@@ -171,7 +173,7 @@ def _parse_args() -> argparse.Namespace:
         "--cumulative-output",
         type=Path,
         default=_default_cumulative_output(),
-        help="Path to write cumulative trade analysis JSONL",
+        help="Path to write the rebuilt cumulative snapshot JSONL",
     )
     parser.add_argument(
         "--cumulative-output-dir",

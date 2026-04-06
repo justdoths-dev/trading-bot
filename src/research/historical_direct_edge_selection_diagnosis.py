@@ -169,7 +169,7 @@ def run_comparison_pipeline_step(
     reports_dir = logs_dir / "research_reports"
 
     latest_summary = reports_dir / "latest" / "summary.json"
-    cumulative_output = logs_dir / "trade_analysis_cumulative.jsonl"
+    cumulative_output = reports_dir / "cumulative" / "trade_analysis_cumulative_snapshot.jsonl"
     cumulative_output_dir = reports_dir / "cumulative"
     comparison_output_dir = reports_dir / "comparison"
     edge_scores_output_dir = reports_dir / "edge_scores"
