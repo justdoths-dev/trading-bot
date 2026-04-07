@@ -337,3 +337,4 @@ class DecisionComposer:
 
     def _bounded(self, value: float) -> float:
         return max(0.0, min(value, 1.0))
+

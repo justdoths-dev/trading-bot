@@ -262,3 +262,5 @@ class TriggerDetector:
                 )
 
         return latest, prev
+
+
