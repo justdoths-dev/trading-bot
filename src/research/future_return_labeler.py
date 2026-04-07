@@ -3,27 +3,26 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import ccxt
 
+from src.research.future_return_labeling_common import (
+    DEFAULT_LABEL_THRESHOLDS_PCT,
+    HORIZONS,
+    apply_future_update,
+    build_future_update_from_prices,
+    extract_entry_price,
+    has_future_fields_for_horizon,
+    horizon_to_timedelta,
+    normalize_symbol,
+    parse_logged_at_to_utc,
+)
+from src.research.future_return_market_data import fetch_horizon_prices
 from src.services.cron_health import CronHealthReporter
 
 LOGGER = logging.getLogger(__name__)
-
-HORIZONS: dict[str, timedelta] = {
-    "15m": timedelta(minutes=15),
-    "1h": timedelta(hours=1),
-    "4h": timedelta(hours=4),
-}
-
-DEFAULT_LABEL_THRESHOLDS_PCT: dict[str, float] = {
-    "15m": 0.05,
-    "1h": 0.10,
-    "4h": 0.15,
-}
 
 
 def label_dataset(
@@ -31,7 +30,7 @@ def label_dataset(
     log_path: Path | None = None,
     force_relabel: bool = False,
     label_thresholds_pct: dict[str, float] | None = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Label or relabel future returns for the research dataset."""
     resolved_log_path = (
         log_path
@@ -89,25 +88,24 @@ def label_dataset(
             continue
 
         for horizon, future_price in horizon_prices.items():
-            future_return = ((future_price - entry_price) / entry_price) * 100
-
-            record[f"future_return_{horizon}"] = round(future_return, 6)
-            record[f"future_label_{horizon}"] = _to_label(
-                future_return=future_return,
+            update = build_future_update_from_prices(
+                entry_price=entry_price,
+                future_price=future_price,
                 horizon=horizon,
                 label_thresholds_pct=resolved_thresholds,
             )
+            if update is None:
+                continue
+            record = apply_future_update(record, update)
 
         updated_records += 1
         updated_lines.append(json.dumps(record, ensure_ascii=False))
 
     tmp_path = resolved_log_path.with_suffix(".jsonl.tmp")
-
     tmp_path.write_text(
         "\n".join(updated_lines) + ("\n" if updated_lines else ""),
         encoding="utf-8",
     )
-
     tmp_path.replace(resolved_log_path)
 
     skipped_records = total_records - updated_records
@@ -160,138 +158,35 @@ def _resolve_label_thresholds(
 
 
 def _is_fully_labeled(record: dict[str, Any]) -> bool:
-    required_keys = (
-        "future_return_15m",
-        "future_return_1h",
-        "future_return_4h",
-        "future_label_15m",
-        "future_label_1h",
-        "future_label_4h",
+    return all(
+        has_future_fields_for_horizon(record, horizon)
+        for horizon in HORIZONS.keys()
     )
-
-    return all(key in record for key in required_keys)
 
 
 def _normalize_symbol(raw_symbol: Any) -> str | None:
-    if raw_symbol is None:
-        return None
-
-    symbol = str(raw_symbol).strip().upper()
-
-    if not symbol:
-        return None
-
-    if "/" in symbol:
-        return symbol
-
-    if symbol.endswith("USDT") and len(symbol) > 4:
-        base = symbol[:-4]
-        return f"{base}/USDT"
-
-    return symbol
+    return normalize_symbol(raw_symbol)
 
 
-def _parse_logged_at(raw_logged_at: Any) -> datetime | None:
-    if raw_logged_at is None:
-        return None
-
-    text = str(raw_logged_at).strip()
-
-    if not text:
-        return None
-
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-
-    return parsed.astimezone(UTC)
+def _parse_logged_at(raw_logged_at: Any):
+    return parse_logged_at_to_utc(raw_logged_at)
 
 
 def _extract_entry_price(record: dict[str, Any]) -> float | None:
-    candidate_values = [
-        record.get("entry_price"),
-        (record.get("execution") or {}).get("entry_price"),
-        (record.get("risk") or {}).get("entry_price"),
-    ]
-
-    for value in candidate_values:
-        if value is None:
-            continue
-
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            continue
-
-    return None
+    return extract_entry_price(record)
 
 
 def _fetch_horizon_prices(
-    exchange: ccxt.binance,
-    symbol: str,
-    logged_at: datetime,
-) -> dict[str, float] | None:
-    now_utc = datetime.now(UTC)
-    prices: dict[str, float] = {}
-
-    for horizon, delta in HORIZONS.items():
-        target_dt = logged_at + delta
-
-        if target_dt > now_utc:
-            return None
-
-        since_ms = int(target_dt.timestamp() * 1000)
-
-        try:
-            candles = exchange.fetch_ohlcv(
-                symbol,
-                timeframe="1m",
-                since=since_ms,
-                limit=1,
-            )
-        except Exception as exc:
-            LOGGER.warning(
-                "Failed to fetch OHLCV for %s horizon=%s: %s",
-                symbol,
-                horizon,
-                exc,
-            )
-            return None
-
-        if not candles:
-            return None
-
-        candle = candles[0]
-        close_price = float(candle[4])
-
-        prices[horizon] = close_price
-
-    return prices
-
-
-def _to_label(
     *,
-    future_return: float,
-    horizon: str,
-    label_thresholds_pct: dict[str, float],
-) -> str:
-    """Assign up/down/flat label using horizon-specific absolute return threshold."""
-    threshold_pct = label_thresholds_pct[horizon]
-
-    if future_return > threshold_pct:
-        return "up"
-
-    if future_return < -threshold_pct:
-        return "down"
-
-    return "flat"
+    exchange: Any,
+    symbol: str,
+    logged_at,
+) -> dict[str, float] | None:
+    return fetch_horizon_prices(
+        exchange=exchange,
+        symbol=symbol,
+        logged_at=logged_at,
+    )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -359,5 +254,4 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
-
     main()
