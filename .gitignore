@@ -29,3 +29,4 @@ logs/
 build/
 dist/
 *.egg-info/
+.gaslight/
