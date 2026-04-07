@@ -272,6 +272,25 @@ def _empty_edge_candidate_rows() -> dict[str, Any]:
     return {
         "row_count": 0,
         "rows": [],
+        "diagnostic_row_count": 0,
+        "diagnostic_rows": [],
+        "empty_reason_summary": {
+            "has_eligible_rows": False,
+            "diagnostic_row_count": 0,
+            "diagnostic_rejection_reason_counts": {},
+            "diagnostic_category_counts": {},
+            "dominant_rejection_reason": None,
+            "dominant_diagnostic_category": None,
+            "identity_count": 0,
+            "identities_with_eligible_rows": 0,
+            "identities_without_eligible_rows": 0,
+            "identities_blocked_only_by_incompatibility": [],
+            "strategies_without_analyzer_compatible_horizons": [],
+            "empty_state_category": "no_joined_candidates_evaluated",
+            "has_only_incompatibility_rejections": False,
+            "has_only_weak_or_insufficient_candidates": False,
+            "note": "No joined candidates were evaluated.",
+        },
         "dropped_row_count": 0,
         "dropped_rows": [],
         "identity_horizon_evaluations": [],
@@ -1027,6 +1046,7 @@ def _build_edge_candidate_rows(
     dataset = build_dataset(path=input_path)
     grouped_rows: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     dropped_rows: list[dict[str, Any]] = []
+    diagnostic_rows: list[dict[str, Any]] = []
 
     for index, row in enumerate(dataset):
         symbol = _joined_symbol(row)
@@ -1087,6 +1107,9 @@ def _build_edge_candidate_rows(
             horizon_evaluations[horizon] = evaluation
 
             if evaluation.get("status") != "selected":
+                diagnostic_rows.append(
+                    _build_joined_candidate_diagnostic_row_from_evaluation(evaluation)
+                )
                 continue
 
             candidate_row = _build_joined_candidate_row_from_evaluation(evaluation)
@@ -1190,10 +1213,27 @@ def _build_edge_candidate_rows(
             str(item.get("strategy") or ""),
         )
     )
+    diagnostic_rows.sort(
+        key=lambda item: (
+            str(item.get("horizon") or ""),
+            str(item.get("symbol") or ""),
+            str(item.get("strategy") or ""),
+            str(item.get("rejection_reason") or ""),
+        )
+    )
+
+    empty_reason_summary = _build_edge_candidate_empty_reason_summary(
+        rows=rows,
+        diagnostic_rows=diagnostic_rows,
+        identity_horizon_evaluations=identity_horizon_evaluations,
+    )
 
     return {
         "row_count": len(rows),
         "rows": rows,
+        "diagnostic_row_count": len(diagnostic_rows),
+        "diagnostic_rows": diagnostic_rows,
+        "empty_reason_summary": empty_reason_summary,
         "dropped_row_count": len(dropped_rows),
         "dropped_rows": dropped_rows[:25],
         "identity_horizon_evaluations": identity_horizon_evaluations,
@@ -1298,6 +1338,41 @@ def _build_category_preview_visibility(
 def _sorted_compatible_horizons(strategy: str) -> list[str]:
     compatible = STRATEGY_HORIZON_COMPATIBILITY.get(strategy, set())
     return [horizon for horizon in HORIZONS if horizon in compatible]
+
+
+def _build_strategy_horizon_compatibility_detail(
+    *,
+    strategy: str,
+    horizon: str,
+) -> dict[str, Any]:
+    configured_horizons = sorted(STRATEGY_HORIZON_COMPATIBILITY.get(strategy, set()))
+    analyzer_supported_horizons = list(HORIZONS)
+    analyzer_compatible_horizons = [
+        item for item in analyzer_supported_horizons if item in configured_horizons
+    ]
+
+    if analyzer_compatible_horizons:
+        detail = (
+            f"Strategy '{strategy}' excludes analyzer horizon '{horizon}'. "
+            f"Analyzer evaluates {analyzer_supported_horizons}; "
+            f"strategy allows {configured_horizons}; "
+            f"overlap is {analyzer_compatible_horizons}."
+        )
+    else:
+        detail = (
+            f"Strategy '{strategy}' cannot participate in this analyzer horizon set. "
+            f"Analyzer evaluates {analyzer_supported_horizons}; "
+            f"strategy allows {configured_horizons}; "
+            f"overlap is empty."
+        )
+
+    return {
+        "configured_horizons": configured_horizons,
+        "analyzer_supported_horizons": analyzer_supported_horizons,
+        "analyzer_compatible_horizons": analyzer_compatible_horizons,
+        "has_analyzer_compatible_horizon": bool(analyzer_compatible_horizons),
+        "detail": detail,
+    }
 
 
 def _build_identity_preview_visibility(
@@ -1730,6 +1805,10 @@ def _evaluate_joined_edge_candidate_horizon(
     rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     if horizon not in STRATEGY_HORIZON_COMPATIBILITY.get(strategy, set()):
+        compatibility_detail = _build_strategy_horizon_compatibility_detail(
+            strategy=strategy,
+            horizon=horizon,
+        )
         return {
             "symbol": symbol,
             "strategy": strategy,
@@ -1746,6 +1825,7 @@ def _evaluate_joined_edge_candidate_horizon(
             "aggregate_score": None,
             "visibility_reason": "strategy_horizon_incompatible",
             "chosen_metric_summary": "strategy_horizon_incompatible",
+            "strategy_horizon_compatibility_detail": compatibility_detail,
         }
 
     metrics = _build_joined_group_metrics(rows, horizon)
@@ -1840,7 +1920,9 @@ def _evaluate_joined_edge_candidate_horizon(
             ),
         }
 
-    classification_reason = str(diagnostics.get("classification_reason") or "candidate_strength_weak")
+    classification_reason = str(
+        diagnostics.get("classification_reason") or "candidate_strength_weak"
+    )
     rejection_reasons = ["candidate_strength_weak"]
     if classification_reason not in rejection_reasons:
         rejection_reasons.append(classification_reason)
@@ -1965,6 +2047,212 @@ def _build_joined_candidate_row_from_evaluation(
         ),
     }
 
+
+def _diagnostic_category_from_evaluation(evaluation: dict[str, Any]) -> str:
+    rejection_reason = str(evaluation.get("rejection_reason") or "")
+    candidate_strength = str(evaluation.get("candidate_strength") or "")
+
+    if rejection_reason == "strategy_horizon_incompatible":
+        return "incompatibility"
+    if rejection_reason in {
+        "sample_count_zero",
+        "no_labeled_rows_for_horizon",
+        "missing_median_future_return",
+        "failed_absolute_minimum_gate",
+    }:
+        return "insufficient_data"
+    if candidate_strength == "weak" or rejection_reason == "candidate_strength_weak":
+        return "quality_rejected"
+    return "other_rejection"
+
+
+def _build_joined_candidate_diagnostic_row_from_evaluation(
+    evaluation: dict[str, Any],
+) -> dict[str, Any]:
+    metrics = _coerce_dict(evaluation.get("metrics"))
+    diagnostics = _coerce_dict(evaluation.get("candidate_strength_diagnostics"))
+    compatibility_detail = _coerce_dict(
+        evaluation.get("strategy_horizon_compatibility_detail")
+    )
+    sample_count = _to_float(metrics.get("sample_count"))
+    labeled_count = _to_float(metrics.get("labeled_count"))
+    coverage_pct = _to_float(metrics.get("coverage_pct"))
+    median_future_return_pct = _to_float(metrics.get("median_future_return_pct"))
+    positive_rate_pct = _to_float(metrics.get("positive_rate_pct"))
+    robustness_label, robustness_value = _select_robustness_signal(metrics)
+    strategy = str(evaluation.get("strategy") or "")
+
+    return {
+        "symbol": evaluation.get("symbol"),
+        "strategy": evaluation.get("strategy"),
+        "horizon": evaluation.get("horizon"),
+        "status": evaluation.get("status"),
+        "diagnostic_category": _diagnostic_category_from_evaluation(evaluation),
+        "strategy_horizon_compatible": bool(
+            evaluation.get("strategy_horizon_compatible")
+        ),
+        "rejection_reason": evaluation.get("rejection_reason"),
+        "rejection_reasons": evaluation.get("rejection_reasons", []),
+        "sample_gate": evaluation.get("sample_gate"),
+        "quality_gate": evaluation.get("quality_gate"),
+        "candidate_strength": evaluation.get("candidate_strength"),
+        "classification_reason": diagnostics.get("classification_reason"),
+        "aggregate_score": _to_float(evaluation.get("aggregate_score")),
+        "chosen_metric_summary": evaluation.get("chosen_metric_summary"),
+        "visibility_reason": evaluation.get("visibility_reason"),
+        "sample_count": int(sample_count or 0),
+        "labeled_count": int(labeled_count or 0),
+        "coverage_pct": coverage_pct,
+        "median_future_return_pct": median_future_return_pct,
+        "positive_rate_pct": positive_rate_pct,
+        "robustness_signal": robustness_label,
+        "robustness_signal_pct": robustness_value,
+        "strategy_configured_horizons": sorted(
+            STRATEGY_HORIZON_COMPATIBILITY.get(strategy, set())
+        ),
+        "analyzer_supported_horizons": list(HORIZONS),
+        "analyzer_compatible_horizons": _sorted_compatible_horizons(strategy),
+        "strategy_horizon_compatibility_detail": compatibility_detail or None,
+    }
+
+
+def _build_edge_candidate_empty_reason_summary(
+    *,
+    rows: list[dict[str, Any]],
+    diagnostic_rows: list[dict[str, Any]],
+    identity_horizon_evaluations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    rejection_reason_counts: dict[str, int] = {}
+    diagnostic_category_counts: dict[str, int] = {}
+    strategies_without_analyzer_compatible_horizons: set[str] = set()
+    identities_blocked_only_by_incompatibility: list[str] = []
+
+    for row in diagnostic_rows:
+        reason = str(row.get("rejection_reason") or "unknown")
+        rejection_reason_counts[reason] = rejection_reason_counts.get(reason, 0) + 1
+
+        diagnostic_category = str(row.get("diagnostic_category") or "other_rejection")
+        diagnostic_category_counts[diagnostic_category] = (
+            diagnostic_category_counts.get(diagnostic_category, 0) + 1
+        )
+
+        if reason != "strategy_horizon_incompatible":
+            continue
+
+        strategy = _normalize_text(row.get("strategy"))
+        analyzer_compatible_horizons = row.get("analyzer_compatible_horizons")
+        if (
+            strategy is not None
+            and isinstance(analyzer_compatible_horizons, list)
+            and not analyzer_compatible_horizons
+        ):
+            strategies_without_analyzer_compatible_horizons.add(strategy)
+
+    identities_with_eligible_rows = 0
+    identities_without_eligible_rows = 0
+
+    for entry in identity_horizon_evaluations:
+        actual_joined_eligible_horizons = (
+            _normalize_horizon_list(entry.get("actual_joined_eligible_horizons")) or []
+        )
+        if actual_joined_eligible_horizons:
+            identities_with_eligible_rows += 1
+            continue
+
+        identities_without_eligible_rows += 1
+        horizon_evaluations = _coerce_dict(entry.get("horizon_evaluations"))
+        rejection_reasons = [
+            _normalize_text(
+                _coerce_dict(horizon_evaluations.get(horizon)).get("rejection_reason")
+            )
+            for horizon in HORIZONS
+        ]
+        filtered_rejection_reasons = [reason for reason in rejection_reasons if reason]
+        if filtered_rejection_reasons and all(
+            reason == "strategy_horizon_incompatible"
+            for reason in filtered_rejection_reasons
+        ):
+            identity_key = _normalize_text(entry.get("identity_key"))
+            if identity_key is not None:
+                identities_blocked_only_by_incompatibility.append(identity_key)
+
+    dominant_rejection_reason = None
+    if rejection_reason_counts:
+        dominant_rejection_reason = min(
+            rejection_reason_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )[0]
+
+    dominant_diagnostic_category = None
+    if diagnostic_category_counts:
+        dominant_diagnostic_category = min(
+            diagnostic_category_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )[0]
+
+    has_only_incompatibility_rejections = bool(diagnostic_rows) and all(
+        str(row.get("rejection_reason") or "") == "strategy_horizon_incompatible"
+        for row in diagnostic_rows
+    )
+    has_only_weak_or_insufficient_candidates = bool(diagnostic_rows) and all(
+        str(row.get("diagnostic_category") or "")
+        in {"quality_rejected", "insufficient_data"}
+        for row in diagnostic_rows
+    )
+
+    if rows:
+        empty_state_category = "has_eligible_rows"
+        note = (
+            "Engine-facing eligible rows remain strict: only joined moderate/strong "
+            "selections are emitted in rows. Rejected joined candidates are exposed "
+            "separately in diagnostic_rows."
+        )
+    elif diagnostic_rows:
+        if has_only_incompatibility_rejections:
+            empty_state_category = "only_incompatibility_rejections"
+        elif has_only_weak_or_insufficient_candidates:
+            empty_state_category = "only_weak_or_insufficient_candidates"
+        else:
+            empty_state_category = "mixed_rejections_without_eligible_rows"
+
+        note_parts = [
+            "No engine-facing eligible joined candidate rows were produced.",
+            f"Joined candidates were evaluated, but all were rejected; dominant rejection_reason is {dominant_rejection_reason or 'unknown'}.",
+        ]
+        if strategies_without_analyzer_compatible_horizons:
+            note_parts.append(
+                "Strategies with no overlap against analyzer horizons "
+                f"{list(HORIZONS)} cannot participate in this analyzer path: "
+                f"{sorted(strategies_without_analyzer_compatible_horizons)}."
+            )
+        note = " ".join(note_parts)
+    else:
+        empty_state_category = "no_joined_candidates_evaluated"
+        note = "No joined candidates were evaluated."
+
+    return {
+        "has_eligible_rows": bool(rows),
+        "diagnostic_row_count": len(diagnostic_rows),
+        "diagnostic_rejection_reason_counts": rejection_reason_counts,
+        "diagnostic_category_counts": diagnostic_category_counts,
+        "dominant_rejection_reason": dominant_rejection_reason,
+        "dominant_diagnostic_category": dominant_diagnostic_category,
+        "identity_count": len(identity_horizon_evaluations),
+        "identities_with_eligible_rows": identities_with_eligible_rows,
+        "identities_without_eligible_rows": identities_without_eligible_rows,
+        "identities_blocked_only_by_incompatibility": (
+            identities_blocked_only_by_incompatibility
+        ),
+        "strategies_without_analyzer_compatible_horizons": sorted(
+            strategies_without_analyzer_compatible_horizons
+        ),
+        "empty_state_category": empty_state_category,
+        "has_only_incompatibility_rejections": has_only_incompatibility_rejections,
+        "has_only_weak_or_insufficient_candidates": (
+            has_only_weak_or_insufficient_candidates
+        ),
+        "note": note,
+    }
 
 def _build_joined_group_metrics(
     rows: list[dict[str, Any]],
@@ -2446,15 +2734,60 @@ def _markdown_edge_candidate_rows(edge_candidate_rows: dict[str, Any]) -> list[s
         if isinstance(edge_candidate_rows.get("rows"), list)
         else []
     )
+    diagnostic_rows = (
+        edge_candidate_rows.get("diagnostic_rows", [])
+        if isinstance(edge_candidate_rows.get("diagnostic_rows"), list)
+        else []
+    )
+    empty_reason_summary = _coerce_dict(edge_candidate_rows.get("empty_reason_summary"))
 
     lines.append("## Edge Candidate Rows")
     lines.append("")
     lines.append(f"- row_count: {edge_candidate_rows.get('row_count', 0)}")
+    lines.append(
+        f"- diagnostic_row_count: {edge_candidate_rows.get('diagnostic_row_count', 0)}"
+    )
     lines.append(f"- dropped_row_count: {edge_candidate_rows.get('dropped_row_count', 0)}")
+    lines.append(
+        "- diagnostic_rejection_reason_counts: "
+        f"{empty_reason_summary.get('diagnostic_rejection_reason_counts', {})}"
+    )
+    lines.append(
+        "- diagnostic_category_counts: "
+        f"{empty_reason_summary.get('diagnostic_category_counts', {})}"
+    )
+    lines.append(
+        f"- dominant_rejection_reason: {empty_reason_summary.get('dominant_rejection_reason', 'n/a')}"
+    )
+    lines.append(
+        f"- dominant_diagnostic_category: {empty_reason_summary.get('dominant_diagnostic_category', 'n/a')}"
+    )
+    lines.append(
+        f"- empty_state_category: {empty_reason_summary.get('empty_state_category', 'n/a')}"
+    )
+    lines.append(
+        "- strategies_without_analyzer_compatible_horizons: "
+        f"{empty_reason_summary.get('strategies_without_analyzer_compatible_horizons', [])}"
+    )
+    lines.append(f"- note: {empty_reason_summary.get('note', 'n/a')}")
     lines.append("")
 
     if not rows:
-        lines.append("No joined candidate rows available.")
+        lines.append("No engine-facing eligible joined candidate rows available.")
+        if diagnostic_rows:
+            lines.append("")
+            lines.append("Diagnostic rejected joined candidates:")
+            for row in diagnostic_rows[:12]:
+                lines.append(
+                    "- "
+                    f"{row.get('symbol', 'n/a')} / {row.get('strategy', 'n/a')} / {row.get('horizon', 'n/a')} "
+                    f"(category={row.get('diagnostic_category', 'n/a')}; "
+                    f"reason={row.get('rejection_reason', 'unknown')}; "
+                    f"candidate_strength={row.get('candidate_strength', 'n/a')}; "
+                    f"sample_gate={row.get('sample_gate', 'n/a')}; "
+                    f"quality_gate={row.get('quality_gate', 'n/a')}; "
+                    f"analyzer_compatible_horizons={row.get('analyzer_compatible_horizons', [])})"
+                )
         lines.append("")
         return lines
 
@@ -2470,6 +2803,19 @@ def _markdown_edge_candidate_rows(edge_candidate_rows: dict[str, Any]) -> list[s
             f"compatibility_strategy_preview={row.get('compatibility_preview_strategy_visible_horizons', [])}; "
             f"visibility_reason={row.get('visibility_reason', 'n/a')})"
         )
+    if diagnostic_rows:
+        lines.append("")
+        lines.append("Rejected joined candidate diagnostics:")
+        for row in diagnostic_rows[:12]:
+            lines.append(
+                "- "
+                f"{row.get('symbol', 'n/a')} / {row.get('strategy', 'n/a')} / {row.get('horizon', 'n/a')} "
+                f"(category={row.get('diagnostic_category', 'n/a')}; "
+                f"reason={row.get('rejection_reason', 'unknown')}; "
+                f"candidate_strength={row.get('candidate_strength', 'n/a')}; "
+                f"classification_reason={row.get('classification_reason', 'n/a')}; "
+                f"analyzer_compatible_horizons={row.get('analyzer_compatible_horizons', [])})"
+            )
     lines.append("")
     return lines
 
