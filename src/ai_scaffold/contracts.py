@@ -49,6 +49,8 @@ class AIInterpretationResponse:
     bias: Bias
     confidence: Confidence
     regime_label: str
+    reason: str = "unknown"
+    timeframe_summary: dict[str, dict[str, str]] = field(default_factory=dict)
     reasoning: list[str] = field(default_factory=list)
     caution_flags: list[str] = field(default_factory=list)
     recommended_action: str = "wait"

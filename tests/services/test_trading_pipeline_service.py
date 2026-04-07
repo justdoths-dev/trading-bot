@@ -58,6 +58,30 @@ class _FakePipeline:
             "log_record": {
                 "logged_at": "2026-03-26T00:00:00+00:00",
                 "symbol": "BTCUSDT",
+                "timeframe_summary": {
+                    "1h": {
+                        "bias": "long",
+                        "momentum_state": "supportive",
+                        "volatility_state": "contained",
+                        "trigger_state": "armed",
+                    },
+                    "4h": {
+                        "bias": "long",
+                        "momentum_state": "supportive",
+                        "volatility_state": "contained",
+                        "trigger_state": "watching",
+                    },
+                },
+                "rule_engine": {
+                    "strategy": "momentum_breakout",
+                    "signal": "long",
+                    "bias": "bullish",
+                },
+                "risk": {
+                    "execution_allowed": True,
+                    "risk_reward_ratio": 2.0,
+                    "volatility_state": "normal",
+                },
             },
             "telegram_send_result": {"sent": False},
         }
@@ -306,6 +330,25 @@ def test_run_with_ai_scaffold_enabled_adds_read_only_annotation(monkeypatch) -> 
     assert annotation["request"]["symbol"] == "btcusdt"
     assert annotation["request"]["strategy_context"]["selection_state"] == "selected"
     assert "alignment_state" not in annotation["request"]["strategy_context"]
+    assert annotation["response"]["bias"] == "long"
+    assert annotation["response"]["reason"] == (
+        "Directional inputs are aligned to the long side in shadow analysis."
+    )
+    assert annotation["response"]["confidence"] == "high"
+    assert annotation["response"]["timeframe_summary"] == {
+        "1h": {
+            "bias": "long",
+            "momentum_state": "supportive",
+            "volatility_state": "contained",
+            "trigger_state": "armed",
+        },
+        "4h": {
+            "bias": "long",
+            "momentum_state": "supportive",
+            "volatility_state": "contained",
+            "trigger_state": "watching",
+        },
+    }
     assert annotation["response"]["model_version"] == "static_mock_v1"
     assert annotation["error"] is None
 

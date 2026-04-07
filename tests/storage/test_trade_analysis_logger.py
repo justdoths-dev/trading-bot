@@ -261,6 +261,15 @@ def test_enrich_latest_record_stores_ai_scaffold_shadow_annotation(tmp_path: Pat
             "bias": "long",
             "confidence": "medium",
             "regime_label": "directional_trend",
+            "reason": "Directional inputs are aligned to the long side in shadow analysis.",
+            "timeframe_summary": {
+                "1h": {
+                    "bias": "long",
+                    "momentum_state": "supportive",
+                    "volatility_state": "contained",
+                    "trigger_state": "armed",
+                }
+            },
         },
         "error": None,
     }
@@ -294,6 +303,15 @@ def test_enrich_latest_record_stores_ai_scaffold_shadow_annotation(tmp_path: Pat
             "bias": "long",
             "confidence": "medium",
             "regime_label": "directional_trend",
+            "reason": "Directional inputs are aligned to the long side in shadow analysis.",
+            "timeframe_summary": {
+                "1h": {
+                    "bias": "long",
+                    "momentum_state": "supportive",
+                    "volatility_state": "contained",
+                    "trigger_state": "armed",
+                }
+            },
         },
         "error": None,
     }
@@ -325,7 +343,12 @@ def test_enrich_latest_record_removes_stale_ai_scaffold_shadow_when_none(tmp_pat
             "annotation_mode": "read_only_shadow",
             "decision_impact": False,
             "request": {"symbol": "btcusdt"},
-            "response": {"bias": "long"},
+            "response": {
+                "bias": "long",
+                "reason": "Directional inputs are aligned to the long side in shadow analysis.",
+                "confidence": "medium",
+                "timeframe_summary": {},
+            },
             "error": None,
         },
     )
@@ -462,6 +485,15 @@ def test_ai_scaffold_shadow_is_the_only_difference_between_disabled_and_enabled_
             "bias": "long",
             "confidence": "medium",
             "regime_label": "directional_trend",
+            "reason": "Directional inputs are aligned to the long side in shadow analysis.",
+            "timeframe_summary": {
+                "1h": {
+                    "bias": "long",
+                    "momentum_state": "supportive",
+                    "volatility_state": "contained",
+                    "trigger_state": "armed",
+                }
+            },
         },
         "error": None,
     }

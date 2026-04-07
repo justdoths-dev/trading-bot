@@ -50,6 +50,21 @@ def test_static_mock_interpreter_returns_expected_structure() -> None:
     assert response.bias == "long"
     assert response.confidence == "high"
     assert response.regime_label == "directional_trend"
+    assert response.reason == "Directional inputs are aligned to the long side in shadow analysis."
+    assert response.timeframe_summary == {
+        "1h": {
+            "bias": "long",
+            "momentum_state": "supportive",
+            "volatility_state": "contained",
+            "trigger_state": "armed",
+        },
+        "4h": {
+            "bias": "long",
+            "momentum_state": "supportive",
+            "volatility_state": "contained",
+            "trigger_state": "watching",
+        },
+    }
 
     assert response.reasoning == [
         "strategy_bias=long",
@@ -104,6 +119,24 @@ def test_static_mock_interpreter_is_deterministic_for_blocked_or_conflicted_inpu
     assert first_response.bias == "neutral"
     assert first_response.confidence == "low"
     assert first_response.regime_label == "volatile_expansion"
+    assert (
+        first_response.reason
+        == "Timeframe signals conflict, so the shadow view remains neutral."
+    )
+    assert first_response.timeframe_summary == {
+        "1h": {
+            "bias": "long",
+            "momentum_state": "unknown",
+            "volatility_state": "expanding",
+            "trigger_state": "unknown",
+        },
+        "4h": {
+            "bias": "short",
+            "momentum_state": "unknown",
+            "volatility_state": "contained",
+            "trigger_state": "unknown",
+        },
+    }
 
     assert first_response.caution_flags == [
         "execution_blocked",

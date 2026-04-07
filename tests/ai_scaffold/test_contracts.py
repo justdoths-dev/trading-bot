@@ -42,6 +42,15 @@ def test_contracts_expose_expected_request_and_response_fields() -> None:
         bias="long",
         confidence="high",
         regime_label="directional_trend",
+        reason="Directional inputs are aligned to the long side in shadow analysis.",
+        timeframe_summary={
+            "1h": {
+                "bias": "long",
+                "momentum_state": "supportive",
+                "volatility_state": "contained",
+                "trigger_state": "armed",
+            }
+        },
         reasoning=["strategy_bias=long"],
         caution_flags=["elevated_volatility"],
         recommended_action="observe_long_setup",
@@ -60,6 +69,17 @@ def test_contracts_expose_expected_request_and_response_fields() -> None:
 
     assert response_payload["bias"] == "long"
     assert response_payload["confidence"] == "high"
+    assert response_payload["reason"] == (
+        "Directional inputs are aligned to the long side in shadow analysis."
+    )
+    assert response_payload["timeframe_summary"] == {
+        "1h": {
+            "bias": "long",
+            "momentum_state": "supportive",
+            "volatility_state": "contained",
+            "trigger_state": "armed",
+        }
+    }
     assert response_payload["reasoning"] == ["strategy_bias=long"]
     assert response_payload["caution_flags"] == ["elevated_volatility"]
     assert response_payload["model_version"] == "static_mock_v1"

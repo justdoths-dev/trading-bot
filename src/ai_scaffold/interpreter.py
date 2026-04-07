@@ -7,6 +7,20 @@ from src.ai_scaffold.contracts import (
     AIInterpretationResponse,
 )
 
+_SUPPORTED_TIMEFRAMES = {
+    "1m",
+    "3m",
+    "5m",
+    "15m",
+    "30m",
+    "1h",
+    "2h",
+    "4h",
+    "6h",
+    "12h",
+    "1d",
+}
+
 
 class AIInterpreter(Protocol):
     """Interface for read-only AI interpretation providers."""
@@ -27,6 +41,13 @@ class StaticMockInterpreter:
         bias = self._resolve_bias(request, conflict)
         regime_label = self._resolve_regime_label(request, conflict)
         confidence = self._resolve_confidence(request, bias, conflict)
+        reason = self._resolve_reason(
+            request=request,
+            bias=bias,
+            conflict=conflict,
+            regime_label=regime_label,
+        )
+        timeframe_summary = self._build_timeframe_summary(request)
         reasoning = self._build_reasoning(
             request=request,
             timeframe_biases=timeframe_biases,
@@ -44,6 +65,8 @@ class StaticMockInterpreter:
             bias=bias,
             confidence=confidence,
             regime_label=regime_label,
+            reason=reason,
+            timeframe_summary=timeframe_summary,
             reasoning=reasoning,
             caution_flags=caution_flags,
             recommended_action=recommended_action,
@@ -110,6 +133,50 @@ class StaticMockInterpreter:
             return "medium"
 
         return "high"
+
+    def _resolve_reason(
+        self,
+        *,
+        request: AIInterpretationRequest,
+        bias: str,
+        conflict: bool,
+        regime_label: str,
+    ) -> str:
+        if conflict:
+            return "Timeframe signals conflict, so the shadow view remains neutral."
+
+        if bias == "long":
+            return "Directional inputs are aligned to the long side in shadow analysis."
+
+        if bias == "short":
+            return "Directional inputs are aligned to the short side in shadow analysis."
+
+        if not request.timeframes:
+            return "Shadow inputs are incomplete, so the directional view remains neutral."
+
+        return (
+            f"Shadow inputs indicate {regime_label}, but directional confirmation remains "
+            "insufficient."
+        )
+
+    def _build_timeframe_summary(
+        self,
+        request: AIInterpretationRequest,
+    ) -> dict[str, dict[str, str]]:
+        summary: dict[str, dict[str, str]] = {}
+
+        for timeframe in request.timeframes:
+            if timeframe.timeframe not in _SUPPORTED_TIMEFRAMES:
+                continue
+
+            summary[timeframe.timeframe] = {
+                "bias": timeframe.market_bias,
+                "momentum_state": timeframe.momentum_state,
+                "volatility_state": timeframe.volatility_state,
+                "trigger_state": timeframe.trigger_state,
+            }
+
+        return summary
 
     def _build_reasoning(
         self,
