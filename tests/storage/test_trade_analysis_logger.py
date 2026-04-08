@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from src.storage.trade_analysis_logger import (
     TradeAnalysisLogger,
     TradeAnalysisLoggerConfig,
@@ -59,10 +61,10 @@ def _build_risk_result() -> dict[str, object]:
     }
 
 
-def _build_execution_result() -> dict[str, object]:
+def _build_execution_result(symbol: str = "BTCUSDT") -> dict[str, object]:
     return {
         "action": "buy",
-        "symbol": "BTCUSDT",
+        "symbol": symbol,
         "execution_mode": "paper",
         "signal": "long",
         "bias": "bullish",
@@ -93,11 +95,12 @@ def _build_ai_result() -> dict[str, object]:
     }
 
 
-def _build_logger(tmp_path: Path) -> TradeAnalysisLogger:
+def _build_logger(tmp_path: Path, symbol: str = "BTCUSDT") -> TradeAnalysisLogger:
     return TradeAnalysisLogger(
         config=TradeAnalysisLoggerConfig(
             log_dir=str(tmp_path),
             filename="trade_analysis.jsonl",
+            symbol=symbol,
         )
     )
 
@@ -105,6 +108,42 @@ def _build_logger(tmp_path: Path) -> TradeAnalysisLogger:
 def _read_jsonl(path: Path) -> list[dict[str, object]]:
     with path.open("r", encoding="utf-8") as handle:
         return [json.loads(line) for line in handle if line.strip()]
+
+
+def test_constructor_requires_symbol_when_none_is_provided(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="requires symbol"):
+        TradeAnalysisLogger(
+            config=TradeAnalysisLoggerConfig(
+                log_dir=str(tmp_path),
+                filename="trade_analysis.jsonl",
+                symbol=None,
+            )
+        )
+
+
+def test_constructor_requires_symbol_with_default_empty_config() -> None:
+    with pytest.raises(ValueError, match="requires symbol"):
+        TradeAnalysisLogger()
+
+
+def test_per_symbol_filename_resolution_is_enforced(tmp_path: Path) -> None:
+    btc_logger = _build_logger(tmp_path, symbol="BTCUSDT")
+    eth_logger = _build_logger(tmp_path, symbol="ETHUSDT")
+
+    assert btc_logger.log_path == tmp_path / "trade_analysis_btcusdt.jsonl"
+    assert eth_logger.log_path == tmp_path / "trade_analysis_ethusdt.jsonl"
+    assert btc_logger.log_path != eth_logger.log_path
+
+
+def test_custom_filename_override_is_rejected_even_with_symbol(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="custom filename override is disabled"):
+        TradeAnalysisLogger(
+            config=TradeAnalysisLoggerConfig(
+                log_dir=str(tmp_path),
+                filename="custom.jsonl",
+                symbol="BTCUSDT",
+            )
+        )
 
 
 def test_log_initializes_replay_ready_fields_to_null(tmp_path: Path) -> None:
@@ -118,12 +157,67 @@ def test_log_initializes_replay_ready_fields_to_null(tmp_path: Path) -> None:
         ai_result=_build_ai_result(),
     )
 
+    assert logger.log_path.name == "trade_analysis_btcusdt.jsonl"
     assert record["edge_selection_mapper_payload"] is None
     assert record["edge_selection_output"] is None
     assert record["edge_selection_metadata"] is None
 
     persisted_records = _read_jsonl(logger.log_path)
     assert persisted_records == [record]
+
+
+def test_log_rejects_runtime_symbol_mismatch(tmp_path: Path) -> None:
+    logger = _build_logger(tmp_path, symbol="BTCUSDT")
+
+    with pytest.raises(ValueError, match="Runtime symbol does not match logger configuration"):
+        logger.log(
+            symbol="ETHUSDT",
+            strategy_result=_build_strategy_result(),
+            risk_result=_build_risk_result(),
+            execution_result=_build_execution_result(symbol="ETHUSDT"),
+            ai_result=_build_ai_result(),
+        )
+
+
+def test_enrich_latest_record_rejects_runtime_symbol_mismatch(tmp_path: Path) -> None:
+    logger = _build_logger(tmp_path, symbol="BTCUSDT")
+    base_record = logger.log(
+        symbol="BTCUSDT",
+        strategy_result=_build_strategy_result(),
+        risk_result=_build_risk_result(),
+        execution_result=_build_execution_result(),
+        ai_result=_build_ai_result(),
+    )
+
+    with pytest.raises(ValueError, match="Runtime symbol does not match logger configuration"):
+        logger.enrich_latest_record(
+            symbol="ETHUSDT",
+            logged_at=base_record["logged_at"],
+            edge_selection_mapper_payload={"generated_at": "2026-03-26T00:00:00+00:00"},
+            edge_selection_output={"selection_status": "selected"},
+            edge_selection_metadata={"shadow_status": "success", "replay_ready": True},
+        )
+
+
+def test_build_record_preserves_expected_schema_sections(tmp_path: Path) -> None:
+    logger = _build_logger(tmp_path)
+
+    record = logger.log(
+        symbol="BTCUSDT",
+        strategy_result=_build_strategy_result(),
+        risk_result=_build_risk_result(),
+        execution_result=_build_execution_result(),
+        ai_result=_build_ai_result(),
+    )
+
+    assert "timeframe_summary" in record
+    assert "timeframe_summary_text" in record
+    assert "alignment" in record
+    assert "edge_selection_mapper_payload" in record
+    assert "edge_selection_output" in record
+    assert "edge_selection_metadata" in record
+    assert "ai" in record
+    assert "decision_policy" in record["ai"]
 
 
 def test_enrich_latest_record_writes_replay_ready_payloads_and_preserves_fields(
@@ -175,7 +269,10 @@ def test_enrich_latest_record_writes_replay_ready_payloads_and_preserves_fields(
     assert enriched["ai"] == base_record["ai"]
     assert enriched["alignment"] == base_record["alignment"]
 
-    assert enriched["edge_selection_mapper_payload"]["generated_at"] == "2026-03-26T00:00:00+00:00"
+    assert (
+        enriched["edge_selection_mapper_payload"]["generated_at"]
+        == "2026-03-26T00:00:00+00:00"
+    )
     assert enriched["edge_selection_mapper_payload"]["reports_dir"] == "/tmp/reports"
     assert enriched["edge_selection_mapper_payload"]["ranked_candidates"] == [
         {"symbol": "BTCUSDT", "score": 0.91},
@@ -512,3 +609,43 @@ def test_ai_scaffold_shadow_is_the_only_difference_between_disabled_and_enabled_
 
     assert enabled_without_shadow == disabled_enriched
     assert enabled_enriched["ai_scaffold_shadow"]["decision_impact"] is False
+
+
+def test_cross_symbol_path_isolation_keeps_files_separate(tmp_path: Path) -> None:
+    btc_logger = _build_logger(tmp_path, symbol="BTCUSDT")
+    eth_logger = _build_logger(tmp_path, symbol="ETHUSDT")
+
+    btc_record = btc_logger.log(
+        symbol="BTCUSDT",
+        strategy_result=_build_strategy_result(),
+        risk_result=_build_risk_result(),
+        execution_result=_build_execution_result(symbol="BTCUSDT"),
+        ai_result=_build_ai_result(),
+    )
+    eth_record = eth_logger.log(
+        symbol="ETHUSDT",
+        strategy_result=_build_strategy_result(),
+        risk_result=_build_risk_result(),
+        execution_result=_build_execution_result(symbol="ETHUSDT"),
+        ai_result=_build_ai_result(),
+    )
+
+    btc_enriched = btc_logger.enrich_latest_record(
+        symbol="BTCUSDT",
+        logged_at=btc_record["logged_at"],
+        edge_selection_mapper_payload={"generated_at": "2026-03-26T00:00:00+00:00"},
+        edge_selection_output={"selection_status": "selected"},
+        edge_selection_metadata={"shadow_status": "success", "replay_ready": True},
+    )
+
+    btc_records = _read_jsonl(btc_logger.log_path)
+    eth_records = _read_jsonl(eth_logger.log_path)
+
+    assert btc_logger.log_path.name == "trade_analysis_btcusdt.jsonl"
+    assert eth_logger.log_path.name == "trade_analysis_ethusdt.jsonl"
+
+    assert btc_records == [btc_enriched]
+    assert eth_records == [eth_record]
+    assert eth_records[0]["edge_selection_mapper_payload"] is None
+    assert eth_records[0]["edge_selection_output"] is None
+    assert eth_records[0]["edge_selection_metadata"] is None
