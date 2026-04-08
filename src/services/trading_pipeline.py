@@ -87,7 +87,7 @@ class TradingPipeline:
         )
 
         self.logger = TradeAnalysisLogger(
-            config=TradeAnalysisLoggerConfig()
+            config=TradeAnalysisLoggerConfig(symbol=self.config.symbol)
         )
 
         self.trading_notifier = trading_notifier or TradingNotifier()

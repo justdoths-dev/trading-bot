@@ -14,6 +14,7 @@ class TradeAnalysisLoggerConfig:
 
     log_dir: str = "logs"
     filename: str = "trade_analysis.jsonl"
+    symbol: str | None = None
     utc_timestamp: bool = True
 
 
@@ -21,15 +22,30 @@ class TradeAnalysisLogger:
     """
     Persist trading analysis results to a JSONL file.
 
+    Safety rules:
+    - Logger must be created with a symbol.
+    - Shared-file mode is forbidden.
+    - Custom filename override is forbidden.
+    - Runtime symbol passed to log/enrich must match the logger's configured symbol.
+
     One execution = one JSON object line.
     This keeps logging append-only, easy to inspect, and easy to migrate later.
     """
 
+    _DEFAULT_FILENAME = "trade_analysis.jsonl"
+
     def __init__(self, config: TradeAnalysisLoggerConfig | None = None) -> None:
         self.config = config or TradeAnalysisLoggerConfig()
+
+        self._configured_symbol = self._validate_and_normalize_config_symbol(
+            self.config.symbol
+        )
+        self._validate_filename_policy(self.config.filename)
+
         self.log_dir = Path(self.config.log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.log_path = self.log_dir / self.config.filename
+
+        self.log_path = self.log_dir / self._resolve_filename()
         self._lock = threading.Lock()
 
     def log(
@@ -54,6 +70,8 @@ class TradeAnalysisLogger:
 
         Returns the saved record for optional debug printing.
         """
+        self._validate_runtime_symbol(symbol)
+
         record = self._build_record(
             symbol=symbol,
             strategy_result=strategy_result,
@@ -61,8 +79,10 @@ class TradeAnalysisLogger:
             execution_result=execution_result,
             ai_result=ai_result,
         )
+
         with self._lock:
             self._append_record(record)
+
         return record
 
     def enrich_latest_record(
@@ -76,6 +96,8 @@ class TradeAnalysisLogger:
         ai_scaffold_shadow: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Add replay-ready edge-selection context to the latest matching log row."""
+        self._validate_runtime_symbol(symbol)
+
         with self._lock:
             if not self.log_path.exists() or not self.log_path.is_file():
                 raise FileNotFoundError(
@@ -267,7 +289,10 @@ class TradeAnalysisLogger:
             "hold": "neutral_bias",
         }
 
-        normalized_execution_bias = execution_to_bias.get(execution_action, "neutral_bias")
+        normalized_execution_bias = execution_to_bias.get(
+            execution_action,
+            "neutral_bias",
+        )
         aligned = normalized_execution_bias == interpretation_bias
 
         return {
@@ -298,7 +323,9 @@ class TradeAnalysisLogger:
         for timeframe in ("1d", "4h", "1h", "15m", "5m", "1m"):
             timeframe_value = safe_summary.get(timeframe)
             if isinstance(timeframe_value, dict):
-                timeframe_value["bollinger_20_2"] = self._build_bollinger_snapshot(timeframe_value)
+                timeframe_value["bollinger_20_2"] = self._build_bollinger_snapshot(
+                    timeframe_value
+                )
 
         return safe_summary
 
@@ -321,7 +348,7 @@ class TradeAnalysisLogger:
         except (TypeError, ValueError):
             return None
 
-        if value_float != value_float:  # NaN check
+        if value_float != value_float:
             return None
 
         return round(value_float, 6)
@@ -420,6 +447,50 @@ class TradeAnalysisLogger:
             handle.write(json.dumps(record, ensure_ascii=False))
             handle.write("\n")
 
+    def _resolve_filename(self) -> str:
+        return f"trade_analysis_{self._configured_symbol}.jsonl"
+
+    def _validate_and_normalize_config_symbol(self, symbol: str | None) -> str:
+        normalized = self._normalize_symbol(symbol)
+        if not normalized:
+            raise ValueError(
+                "TradeAnalysisLogger requires symbol for safe operation. "
+                "Shared log file mode is not allowed."
+            )
+        return normalized
+
+    def _validate_filename_policy(self, filename: str) -> None:
+        normalized_filename = str(filename).strip()
+        if not normalized_filename:
+            raise ValueError("filename must be a non-empty string")
+
+        if normalized_filename != self._DEFAULT_FILENAME:
+            raise ValueError(
+                "TradeAnalysisLogger custom filename override is disabled for safety. "
+                "Use the default filename and per-symbol logger instances only."
+            )
+
+    def _validate_runtime_symbol(self, symbol: str) -> None:
+        normalized_runtime_symbol = self._normalize_symbol(symbol)
+        if not normalized_runtime_symbol:
+            raise ValueError("symbol must be a non-empty string")
+
+        if normalized_runtime_symbol != self._configured_symbol:
+            raise ValueError(
+                "Runtime symbol does not match logger configuration. "
+                f"configured={self.config.symbol!r}, runtime={symbol!r}"
+            )
+
+    def _normalize_symbol(self, symbol: str | None) -> str:
+        if symbol is None:
+            return ""
+
+        normalized = "".join(
+            char.lower() if char.isalnum() else "_"
+            for char in str(symbol).strip()
+        )
+        return normalized.strip("_")
+
     def _build_edge_selection_mapper_payload_snapshot(
         self,
         payload: dict[str, Any] | None,
@@ -458,7 +529,10 @@ class TradeAnalysisLogger:
             return value.isoformat()
 
         if isinstance(value, dict):
-            return {str(key): self._json_safe_copy(item) for key, item in value.items()}
+            return {
+                str(key): self._json_safe_copy(item)
+                for key, item in value.items()
+            }
 
         if isinstance(value, (list, tuple, set)):
             return [self._json_safe_copy(item) for item in value]
