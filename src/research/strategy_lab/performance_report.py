@@ -36,13 +36,28 @@ def generate_performance_report(
     if normalized_strategy is not None:
         rows = filter_by_strategy(rows, normalized_strategy)
 
+    return _build_performance_from_rows(
+        rows=rows,
+        horizon=horizon_key,
+        symbol=normalized_symbol,
+        strategy=normalized_strategy,
+    )
+
+
+def _build_performance_from_rows(
+    *,
+    rows: list[dict[str, Any]],
+    horizon: str,
+    symbol: str | None,
+    strategy: str | None,
+) -> dict[str, Any]:
     sample_count = len(rows)
 
-    labeled_rows = filter_labeled_only(rows, horizon_key)
+    labeled_rows = filter_labeled_only(rows, horizon)
     labeled_count = len(labeled_rows)
 
-    return_key = f"future_return_{horizon_key}"
-    label_key = f"future_label_{horizon_key}"
+    label_key = f"future_label_{horizon}"
+    return_key = f"future_return_{horizon}"
 
     label_counts = {"up": 0, "down": 0, "flat": 0}
     returns: list[float] = []
@@ -77,9 +92,9 @@ def generate_performance_report(
                 signal_match += 1
 
     return {
-        "symbol": normalized_symbol,
-        "strategy": normalized_strategy,
-        "horizon": horizon_key,
+        "symbol": symbol,
+        "strategy": strategy,
+        "horizon": horizon,
         "sample_count": sample_count,
         "labeled_count": labeled_count,
         "coverage_pct": _pct(labeled_count, sample_count),

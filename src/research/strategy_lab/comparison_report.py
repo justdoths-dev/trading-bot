@@ -55,6 +55,7 @@ def compare_by_ai_execution_state(horizon: str = "15m", dataset_path: str | None
 
 
 def _compare_by_group(
+    *,
     rows: list[dict[str, Any]],
     horizon: str,
     comparison_type: str,
@@ -82,7 +83,10 @@ def _compare_by_group(
     }
 
 
-def _build_performance_from_rows(rows: list[dict[str, Any]], horizon: str) -> dict[str, Any]:
+def _build_performance_from_rows(
+    rows: list[dict[str, Any]],
+    horizon: str,
+) -> dict[str, Any]:
     sample_count = len(rows)
     labeled_rows = filter_labeled_only(rows, horizon)
     labeled_count = len(labeled_rows)

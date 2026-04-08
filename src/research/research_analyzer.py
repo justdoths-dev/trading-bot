@@ -138,19 +138,116 @@ def _normalize_horizon_strength_map(value: Any) -> dict[str, str]:
     return normalized
 
 
-def load_jsonl_records(input_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _to_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _should_materialize_windowed_input(
+    input_path: Path,
+    *,
+    latest_window_hours: int | None,
+    latest_max_rows: int | None,
+) -> bool:
+    """
+    Materialize an effective analyzer input whenever the source is the rotation-aware
+    live dataset or the caller supplied explicit latest-window overrides.
+
+    This makes downstream modules honor the analyzer CLI window settings even when
+    they only accept dataset_path and internally call build_dataset() with defaults.
+    """
+    if input_path.name == "trade_analysis.jsonl":
+        return True
+
+    return (
+        latest_window_hours != DEFAULT_LATEST_WINDOW_HOURS
+        or latest_max_rows != DEFAULT_LATEST_MAX_ROWS
+    )
+
+
+def _materialize_effective_input(
+    *,
+    input_path: Path,
+    output_dir: Path,
+    latest_window_hours: int | None,
+    latest_max_rows: int | None,
+) -> tuple[Path, list[dict[str, Any]], dict[str, Any]]:
+    """
+    Build an effective analyzer input file whose contents already reflect the desired
+    latest-window policy. Downstream modules can then consume this file via dataset_path
+    without silently falling back to dataset_builder defaults.
+    """
+    raw_records, source_metadata = load_jsonl_records_with_metadata(
+        input_path,
+        max_age_hours=latest_window_hours,
+        max_rows=latest_max_rows,
+    )
+
+    if not _should_materialize_windowed_input(
+        input_path,
+        latest_window_hours=latest_window_hours,
+        latest_max_rows=latest_max_rows,
+    ):
+        return input_path, raw_records, source_metadata
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    effective_input_path = output_dir / "_effective_analyzer_input.jsonl"
+
+    with effective_input_path.open("w", encoding="utf-8") as handle:
+        for record in raw_records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    effective_metadata = dict(source_metadata)
+    effective_metadata["effective_input_path"] = str(effective_input_path)
+    effective_metadata["materialized_effective_input"] = True
+    effective_metadata["requested_latest_window_hours"] = latest_window_hours
+    effective_metadata["requested_latest_max_rows"] = latest_max_rows
+
+    return effective_input_path, raw_records, effective_metadata
+
+
+def load_jsonl_records(
+    input_path: Path,
+    *,
+    latest_window_hours: int | None = DEFAULT_LATEST_WINDOW_HOURS,
+    latest_max_rows: int | None = DEFAULT_LATEST_MAX_ROWS,
+    preloaded_raw_records: list[dict[str, Any]] | None = None,
+    source_metadata_override: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Load JSONL records, keeping only schema-valid objects for analysis."""
-    raw_records, source_metadata = load_jsonl_records_with_metadata(input_path)
+    if preloaded_raw_records is None or source_metadata_override is None:
+        raw_records, source_metadata = load_jsonl_records_with_metadata(
+            input_path,
+            max_age_hours=latest_window_hours,
+            max_rows=latest_max_rows,
+        )
+    else:
+        raw_records = preloaded_raw_records
+        source_metadata = source_metadata_override
 
     records: list[dict[str, Any]] = []
     validation_summary = {
         "input_path": str(input_path),
+        "effective_input_path": source_metadata.get("effective_input_path", str(input_path)),
+        "materialized_effective_input": source_metadata.get("materialized_effective_input", False),
         "rotation_aware": source_metadata.get("rotation_aware", False),
         "source_files": source_metadata.get("source_files", []),
         "source_file_count": source_metadata.get("source_file_count", 0),
         "source_row_counts": source_metadata.get("source_row_counts", {}),
         "max_age_hours": source_metadata.get("max_age_hours"),
         "max_rows": source_metadata.get("max_rows"),
+        "requested_latest_window_hours": source_metadata.get(
+            "requested_latest_window_hours",
+            latest_window_hours,
+        ),
+        "requested_latest_max_rows": source_metadata.get(
+            "requested_latest_max_rows",
+            latest_max_rows,
+        ),
         "raw_record_count": source_metadata.get("raw_record_count", 0),
         "windowed_record_count": source_metadata.get("windowed_record_count", 0),
         "total_records": 0,
@@ -212,14 +309,33 @@ def write_summary_files(
     return summary_json_path, summary_md_path
 
 
-def run_research_analyzer(input_path: Path, output_dir: Path) -> dict[str, Any]:
+def run_research_analyzer(
+    input_path: Path,
+    output_dir: Path,
+    *,
+    latest_window_hours: int | None = DEFAULT_LATEST_WINDOW_HOURS,
+    latest_max_rows: int | None = DEFAULT_LATEST_MAX_ROWS,
+) -> dict[str, Any]:
     """Run full analyzer flow: load valid records, calculate metrics, and write reports."""
-    records, validation_summary = load_jsonl_records(input_path)
+    effective_input_path, preloaded_raw_records, source_metadata = _materialize_effective_input(
+        input_path=input_path,
+        output_dir=output_dir,
+        latest_window_hours=latest_window_hours,
+        latest_max_rows=latest_max_rows,
+    )
+
+    records, validation_summary = load_jsonl_records(
+        effective_input_path,
+        latest_window_hours=latest_window_hours,
+        latest_max_rows=latest_max_rows,
+        preloaded_raw_records=preloaded_raw_records,
+        source_metadata_override=source_metadata,
+    )
 
     base_metrics = calculate_research_metrics(records)
 
     if records and int(validation_summary.get("invalid_records", 0)) == 0:
-        strategy_lab_metrics = _build_strategy_lab_metrics(input_path)
+        strategy_lab_metrics = _build_strategy_lab_metrics(effective_input_path)
         edge_candidates_preview = _build_edge_candidates_preview(
             strategy_lab=strategy_lab_metrics,
         )
@@ -227,7 +343,7 @@ def run_research_analyzer(input_path: Path, output_dir: Path) -> dict[str, Any]:
             edge_candidates_preview=edge_candidates_preview,
         )
         edge_candidate_rows = _build_edge_candidate_rows(
-            input_path,
+            effective_input_path,
             edge_candidates_preview=edge_candidates_preview,
             edge_stability_preview=edge_stability_preview,
         )
@@ -1035,7 +1151,6 @@ def _horizon_visibility_reason(sample_gate: str, quality_gate: str) -> str:
     if quality_gate == "passed":
         return "passed_sample_and_quality_gate"
     return "passed_sample_gate_only"
-
 
 def _build_edge_candidate_rows(
     input_path: Path,
@@ -2254,6 +2369,7 @@ def _build_edge_candidate_empty_reason_summary(
         "note": note,
     }
 
+
 def _build_joined_group_metrics(
     rows: list[dict[str, Any]],
     horizon: str,
@@ -2517,8 +2633,20 @@ def _build_markdown(metrics: dict[str, Any]) -> str:
     lines.append("## Schema Validation")
     lines.append("")
     lines.append(f"- input_path: {schema_validation.get('input_path', 'unknown')}")
+    lines.append(
+        f"- effective_input_path: {schema_validation.get('effective_input_path', 'unknown')}"
+    )
+    lines.append(
+        f"- materialized_effective_input: {schema_validation.get('materialized_effective_input', False)}"
+    )
     lines.append(f"- rotation_aware: {schema_validation.get('rotation_aware', False)}")
     lines.append(f"- source_file_count: {schema_validation.get('source_file_count', 0)}")
+    lines.append(
+        f"- requested_latest_window_hours: {schema_validation.get('requested_latest_window_hours', 'n/a')}"
+    )
+    lines.append(
+        f"- requested_latest_max_rows: {schema_validation.get('requested_latest_max_rows', 'n/a')}"
+    )
     lines.append(f"- max_age_hours: {schema_validation.get('max_age_hours', 'n/a')}")
     lines.append(f"- max_rows: {schema_validation.get('max_rows', 'n/a')}")
     lines.append(f"- raw_record_count: {schema_validation.get('raw_record_count', 0)}")
@@ -3160,15 +3288,6 @@ def _fmt_metric(value: Any) -> str:
     return str(value)
 
 
-def _to_float(value: Any) -> float | None:
-    try:
-        if value is None:
-            return None
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def _markdown_distribution(title: str, values: dict[str, Any]) -> list[str]:
     lines: list[str] = []
 
@@ -3234,6 +3353,8 @@ def main() -> None:
         metrics = run_research_analyzer(
             input_path=args.input,
             output_dir=args.output_dir,
+            latest_window_hours=args.latest_window_hours,
+            latest_max_rows=args.latest_max_rows,
         )
 
         print(

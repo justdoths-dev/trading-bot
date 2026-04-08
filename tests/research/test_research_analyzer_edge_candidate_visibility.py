@@ -137,7 +137,7 @@ def test_edge_candidate_rows_preserve_existing_four_hour_joined_rows(monkeypatch
     monkeypatch.setattr(
         research_analyzer,
         "build_dataset",
-        lambda path: _joined_candidate_dataset(),
+        lambda *args, **kwargs: _joined_candidate_dataset(),
     )
 
     result = research_analyzer._build_edge_candidate_rows(Path("ignored.jsonl"))
@@ -191,7 +191,7 @@ def test_edge_candidate_rows_attach_preview_metadata_without_promoting_joined_st
     monkeypatch.setattr(
         research_analyzer,
         "build_dataset",
-        lambda path: _joined_candidate_dataset(),
+        lambda *args, **kwargs: _joined_candidate_dataset(),
     )
 
     result = research_analyzer._build_edge_candidate_rows(
@@ -246,7 +246,7 @@ def test_edge_candidate_rows_remain_mapper_compatible_after_preview_metadata_enr
     monkeypatch.setattr(
         research_analyzer,
         "build_dataset",
-        lambda path: _joined_candidate_dataset(),
+        lambda *args, **kwargs: _joined_candidate_dataset(),
     )
 
     result = research_analyzer._build_edge_candidate_rows(
@@ -275,7 +275,7 @@ def test_edge_candidate_rows_expose_weak_joined_candidates_only_in_diagnostics(
     monkeypatch.setattr(
         research_analyzer,
         "build_dataset",
-        lambda path: [_joined_research_row()],
+        lambda *args, **kwargs: [_joined_research_row()],
     )
 
     def fake_evaluate(
@@ -409,7 +409,7 @@ def test_edge_candidate_rows_make_scalping_incompatibility_explicit(monkeypatch)
     monkeypatch.setattr(
         research_analyzer,
         "build_dataset",
-        lambda path: scalping_rows,
+        lambda *args, **kwargs: scalping_rows,
     )
 
     result = research_analyzer._build_edge_candidate_rows(Path("ignored.jsonl"))
@@ -454,10 +454,59 @@ def test_run_research_analyzer_exposes_diagnostic_rows_in_final_metrics(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    effective_input_path = tmp_path / "_effective_analyzer_input.jsonl"
+
+    monkeypatch.setattr(
+        research_analyzer,
+        "_materialize_effective_input",
+        lambda **kwargs: (
+            effective_input_path,
+            [{"symbol": "BTCUSDT"}],
+            {
+                "input_path": "ignored.jsonl",
+                "effective_input_path": str(effective_input_path),
+                "materialized_effective_input": True,
+                "rotation_aware": False,
+                "source_files": ["ignored.jsonl"],
+                "source_file_count": 1,
+                "source_row_counts": {"ignored.jsonl": 1},
+                "max_age_hours": kwargs.get("latest_window_hours"),
+                "max_rows": kwargs.get("latest_max_rows"),
+                "requested_latest_window_hours": kwargs.get("latest_window_hours"),
+                "requested_latest_max_rows": kwargs.get("latest_max_rows"),
+                "raw_record_count": 1,
+                "windowed_record_count": 1,
+            },
+        ),
+    )
+
     monkeypatch.setattr(
         research_analyzer,
         "load_jsonl_records",
-        lambda input_path: ([{"symbol": "BTCUSDT"}], {"invalid_records": 0, "valid_records": 1}),
+        lambda input_path, **kwargs: (
+            [{"symbol": "BTCUSDT"}],
+            {
+                "input_path": str(input_path),
+                "effective_input_path": str(input_path),
+                "materialized_effective_input": True,
+                "rotation_aware": False,
+                "source_files": ["ignored.jsonl"],
+                "source_file_count": 1,
+                "source_row_counts": {"ignored.jsonl": 1},
+                "max_age_hours": kwargs.get("latest_window_hours"),
+                "max_rows": kwargs.get("latest_max_rows"),
+                "requested_latest_window_hours": kwargs.get("latest_window_hours"),
+                "requested_latest_max_rows": kwargs.get("latest_max_rows"),
+                "raw_record_count": 1,
+                "windowed_record_count": 1,
+                "total_records": 1,
+                "valid_records": 1,
+                "invalid_records": 0,
+                "error_count": 0,
+                "warning_count": 0,
+                "invalid_examples": [],
+            },
+        ),
     )
     monkeypatch.setattr(
         research_analyzer,
@@ -467,12 +516,23 @@ def test_run_research_analyzer_exposes_diagnostic_rows_in_final_metrics(
     monkeypatch.setattr(
         research_analyzer,
         "_build_strategy_lab_metrics",
-        lambda input_path: {"dataset_rows": 1, "ranking": {}, "performance": {}, "comparison": {}, "edge": {}, "segment": {}},
+        lambda input_path: {
+            "dataset_rows": 1,
+            "ranking": {},
+            "performance": {},
+            "comparison": {},
+            "edge": {},
+            "segment": {},
+        },
     )
     monkeypatch.setattr(
         research_analyzer,
         "_build_edge_candidates_preview",
-        lambda strategy_lab: {"by_horizon": {}, "minimum_sample_count": 30, "strength_thresholds": {}},
+        lambda strategy_lab: {
+            "by_horizon": {},
+            "minimum_sample_count": 30,
+            "strength_thresholds": {},
+        },
     )
     monkeypatch.setattr(
         research_analyzer,

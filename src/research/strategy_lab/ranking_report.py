@@ -44,7 +44,6 @@ def _rank_by_group(
     ranking_type: str,
     group_extractor: Callable[[dict[str, Any]], str | None],
 ) -> dict[str, Any]:
-
     horizon_key = _normalize_horizon(horizon)
 
     grouped_rows: dict[str, list[dict[str, Any]]] = {}
@@ -101,7 +100,6 @@ def _rank_by_group(
 
 
 def _build_performance_from_rows(rows: list[dict[str, Any]], horizon: str) -> dict[str, Any]:
-
     sample_count = len(rows)
     labeled_rows = filter_labeled_only(rows, horizon)
     labeled_count = len(labeled_rows)
@@ -119,9 +117,7 @@ def _build_performance_from_rows(rows: list[dict[str, Any]], horizon: str) -> di
     signal_match = 0
 
     for row in labeled_rows:
-
         label = _normalize_label(row.get(label_key))
-
         if label == "unknown":
             continue
 
@@ -132,14 +128,12 @@ def _build_performance_from_rows(rows: list[dict[str, Any]], horizon: str) -> di
             returns.append(future_return)
 
         bias_direction = _bias_to_direction(row.get("bias"))
-
         if bias_direction in _VALID_LABELS:
             bias_known += 1
             if bias_direction == label:
                 bias_match += 1
 
         signal_direction = _signal_to_direction(_extract_signal(row))
-
         if signal_direction in _VALID_LABELS:
             signal_known += 1
             if signal_direction == label:
@@ -164,7 +158,6 @@ def _build_performance_from_rows(rows: list[dict[str, Any]], horizon: str) -> di
 
 
 def _normalize_future_returns(values: list[Any]) -> list[float]:
-
     numeric_values = [_to_float(value) for value in values]
     valid_values = [value for value in numeric_values if value is not None]
 
@@ -192,7 +185,6 @@ def _normalize_future_returns(values: list[Any]) -> list[float]:
 
 
 def _compute_score(metrics: dict[str, Any], normalized_future_return: float) -> float:
-
     signal_match_rate = _metric_value(metrics.get("signal_match_rate_pct"))
     bias_match_rate = _metric_value(metrics.get("bias_match_rate_pct"))
     coverage = _metric_value(metrics.get("coverage_pct"))
@@ -205,7 +197,6 @@ def _compute_score(metrics: dict[str, Any], normalized_future_return: float) -> 
     )
 
     labeled_count = _metric_value(metrics.get("labeled_count"))
-
     reliability = min(1.0, labeled_count / 50.0)
 
     return round(base_score * reliability, 2)
@@ -227,7 +218,6 @@ def _extract_strategy(row: dict[str, Any]) -> str | None:
 
 
 def _extract_alignment_state(row: dict[str, Any]) -> str | None:
-
     text = _clean_text(row.get("alignment_state"))
 
     if text in ("aligned", "misaligned", "unknown"):
@@ -237,7 +227,6 @@ def _extract_alignment_state(row: dict[str, Any]) -> str | None:
 
 
 def _extract_ai_execution_state(row: dict[str, Any]) -> str | None:
-
     candidates = (
         row.get("ai_execution_state"),
         row.get("execution_source"),
@@ -245,7 +234,6 @@ def _extract_ai_execution_state(row: dict[str, Any]) -> str | None:
     )
 
     for value in candidates:
-
         text = _clean_text(value)
 
         if text in ("executed", "reused", "unknown"):
@@ -255,9 +243,7 @@ def _extract_ai_execution_state(row: dict[str, Any]) -> str | None:
 
 
 def _extract_signal(row: dict[str, Any]) -> Any:
-
     for key in ("rule_signal", "execution_signal", "execution_action"):
-
         value = row.get(key)
 
         if value is not None and str(value).strip():
@@ -267,7 +253,6 @@ def _extract_signal(row: dict[str, Any]) -> Any:
 
 
 def _normalize_horizon(horizon: str) -> str:
-
     value = str(horizon or "").strip().lower()
 
     if value not in _VALID_HORIZONS:
@@ -277,7 +262,6 @@ def _normalize_horizon(horizon: str) -> str:
 
 
 def _normalize_label(value: Any) -> str:
-
     text = str(value or "").strip().lower()
 
     if text in _VALID_LABELS:
@@ -287,7 +271,6 @@ def _normalize_label(value: Any) -> str:
 
 
 def _bias_to_direction(value: Any) -> str:
-
     text = str(value or "").strip().lower()
 
     if text in ("bullish", "long", "buy", "up"):
@@ -303,7 +286,6 @@ def _bias_to_direction(value: Any) -> str:
 
 
 def _signal_to_direction(value: Any) -> str:
-
     text = str(value or "").strip().lower()
 
     if text in ("long", "buy", "up"):
@@ -319,29 +301,24 @@ def _signal_to_direction(value: Any) -> str:
 
 
 def _clean_text(value: Any) -> str | None:
-
     if value is None:
         return None
 
     text = str(value).strip().lower()
-
     return text or None
 
 
 def _to_float(value: Any) -> float | None:
-
     if value is None:
         return None
 
     try:
         return float(value)
-
     except (TypeError, ValueError):
         return None
 
 
 def _pct(numerator: int, denominator: int) -> float | None:
-
     if denominator <= 0:
         return None
 
@@ -349,7 +326,6 @@ def _pct(numerator: int, denominator: int) -> float | None:
 
 
 def _sort_number(value: Any) -> float:
-
     numeric_value = _to_float(value)
 
     if numeric_value is None:
