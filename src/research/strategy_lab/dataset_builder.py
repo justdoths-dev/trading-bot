@@ -53,20 +53,22 @@ def load_jsonl_records_with_metadata(
         raw_records.extend(rows)
         per_file_row_counts[str(source_file)] = len(rows)
 
+    rotation_enabled = _should_use_rotation_aware(input_path, rotation_aware)
+
     windowed_records = _apply_recent_window(
         raw_records,
-        max_age_hours=max_age_hours if _should_use_rotation_aware(input_path, rotation_aware) else None,
-        max_rows=max_rows if _should_use_rotation_aware(input_path, rotation_aware) else None,
+        max_age_hours=max_age_hours if rotation_enabled else None,
+        max_rows=max_rows if rotation_enabled else None,
     )
 
     metadata = {
         "input_path": str(input_path),
-        "rotation_aware": _should_use_rotation_aware(input_path, rotation_aware),
+        "rotation_aware": rotation_enabled,
         "source_files": [str(path) for path in source_files],
         "source_file_count": len(source_files),
         "source_row_counts": per_file_row_counts,
-        "max_age_hours": max_age_hours if _should_use_rotation_aware(input_path, rotation_aware) else None,
-        "max_rows": max_rows if _should_use_rotation_aware(input_path, rotation_aware) else None,
+        "max_age_hours": max_age_hours if rotation_enabled else None,
+        "max_rows": max_rows if rotation_enabled else None,
         "raw_record_count": len(raw_records),
         "windowed_record_count": len(windowed_records),
     }
@@ -117,7 +119,14 @@ def build_dataset(
         max_age_hours=max_age_hours,
         max_rows=max_rows,
     )
-    return [normalize_record(record) for record in raw_records]
+
+    dataset: list[dict[str, Any]] = []
+    for record in raw_records:
+        normalized = normalize_record(record)
+        if _is_research_labelable_record(normalized):
+            dataset.append(normalized)
+
+    return dataset
 
 
 def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -164,6 +173,40 @@ def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
         "future_label_1h": _to_str(record.get("future_label_1h")),
         "future_label_4h": _to_str(record.get("future_label_4h")),
     }
+
+
+def _is_research_labelable_record(record: dict[str, Any]) -> bool:
+    """
+    Decide whether a normalized row is eligible for the strategy-lab dataset.
+
+    Current conservative rule:
+    - must have logged_at
+    - must have symbol
+    - must have selected_strategy
+    - must have a positive entry_price
+
+    Rationale:
+    The raw trade_analysis stream contains many hold/blocked observation rows with
+    no executable entry context. Including those rows inflates the research dataset
+    denominator and makes future-return label coverage appear much worse than it is.
+    """
+    if record.get("logged_at") is None:
+        return False
+
+    if not record.get("symbol"):
+        return False
+
+    if not record.get("selected_strategy"):
+        return False
+
+    entry_price = record.get("entry_price")
+    if entry_price is None:
+        return False
+
+    try:
+        return float(entry_price) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _should_use_rotation_aware(
