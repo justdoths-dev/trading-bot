@@ -231,7 +231,7 @@ def load_jsonl_records(
 
     records: list[dict[str, Any]] = []
     validation_summary = {
-        "input_path": str(input_path),
+        "input_path": source_metadata.get("input_path", str(input_path)),
         "effective_input_path": source_metadata.get("effective_input_path", str(input_path)),
         "materialized_effective_input": source_metadata.get("materialized_effective_input", False),
         "rotation_aware": source_metadata.get("rotation_aware", False),

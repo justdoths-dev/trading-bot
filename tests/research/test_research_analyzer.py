@@ -109,6 +109,22 @@ def _edge_candidates_preview(by_horizon: dict[str, dict[str, Any]]) -> dict[str,
     }
 
 
+def _windowable_record(
+    base_record: dict[str, Any],
+    *,
+    logged_at: str,
+    symbol: str,
+) -> dict[str, Any]:
+    record = deepcopy(base_record)
+    record["logged_at"] = logged_at
+    record["symbol"] = symbol
+    execution = deepcopy(record.get("execution", {}))
+    execution["action"] = execution.get("action", "long")
+    execution["entry_price"] = 100.0
+    record["execution"] = execution
+    return record
+
+
 def _ranked_group_entry(
     group: str,
     *,
@@ -221,6 +237,146 @@ def test_run_research_analyzer_skips_invalid_records_without_crashing(
     assert result["schema_validation"]["invalid_records"] == 1
     assert len(result["schema_validation"]["invalid_examples"]) == 1
     assert result["strategy_lab"]["dataset_rows"] == 0
+
+
+def test_run_research_analyzer_materializes_effective_input_and_preserves_original_input_path(
+    monkeypatch,
+    tmp_path: Path,
+    valid_research_record: dict[str, Any],
+    write_jsonl,
+) -> None:
+    records = [
+        _windowable_record(
+            valid_research_record,
+            logged_at="2026-03-08T11:00:00+00:00",
+            symbol="BTCUSDT",
+        ),
+        _windowable_record(
+            valid_research_record,
+            logged_at="2026-03-10T11:00:00+00:00",
+            symbol="ETHUSDT",
+        ),
+        _windowable_record(
+            valid_research_record,
+            logged_at="2026-03-10T12:00:00+00:00",
+            symbol="SOLUSDT",
+        ),
+    ]
+    input_path = write_jsonl(records, filename="trade_analysis.jsonl")
+    output_dir = tmp_path / "reports"
+    captured: dict[str, Path] = {}
+
+    def _stub_strategy_lab(input_path: Path) -> dict[str, Any]:
+        captured["strategy_lab_input_path"] = input_path
+        return _stub_strategy_lab_metrics(
+            dataset_rows=len(research_analyzer.build_dataset(path=input_path))
+        )
+
+    def _stub_edge_candidates(
+        input_path: Path,
+        *,
+        edge_candidates_preview: dict[str, Any] | None = None,
+        edge_stability_preview: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        captured["edge_candidate_input_path"] = input_path
+        return research_analyzer._empty_edge_candidate_rows()
+
+    monkeypatch.setattr(
+        research_analyzer,
+        "_build_strategy_lab_metrics",
+        _stub_strategy_lab,
+    )
+    monkeypatch.setattr(
+        research_analyzer,
+        "_build_edge_candidate_rows",
+        _stub_edge_candidates,
+    )
+
+    result = research_analyzer.run_research_analyzer(
+        input_path,
+        output_dir,
+        latest_window_hours=36,
+    )
+
+    effective_input_path = output_dir / "_effective_analyzer_input.jsonl"
+
+    assert captured["strategy_lab_input_path"] == effective_input_path
+    assert captured["edge_candidate_input_path"] == effective_input_path
+    assert result["schema_validation"]["input_path"] == str(input_path)
+    assert result["schema_validation"]["effective_input_path"] == str(effective_input_path)
+    assert result["schema_validation"]["materialized_effective_input"] is True
+    assert result["schema_validation"]["windowed_record_count"] == 2
+    assert result["strategy_lab"]["dataset_rows"] == 2
+    assert effective_input_path.exists()
+    assert len(effective_input_path.read_text(encoding="utf-8").splitlines()) == 2
+
+
+def test_run_research_analyzer_latest_window_hours_changes_downstream_dataset_rows(
+    monkeypatch,
+    tmp_path: Path,
+    valid_research_record: dict[str, Any],
+    write_jsonl,
+) -> None:
+    records = [
+        _windowable_record(
+            valid_research_record,
+            logged_at="2026-03-05T12:00:00+00:00",
+            symbol="BTCUSDT",
+        ),
+        _windowable_record(
+            valid_research_record,
+            logged_at="2026-03-08T11:00:00+00:00",
+            symbol="ETHUSDT",
+        ),
+        _windowable_record(
+            valid_research_record,
+            logged_at="2026-03-09T13:00:00+00:00",
+            symbol="SOLUSDT",
+        ),
+        _windowable_record(
+            valid_research_record,
+            logged_at="2026-03-10T11:00:00+00:00",
+            symbol="XRPUSDT",
+        ),
+        _windowable_record(
+            valid_research_record,
+            logged_at="2026-03-10T12:00:00+00:00",
+            symbol="ADAUSDT",
+        ),
+    ]
+    input_path = write_jsonl(records, filename="trade_analysis.jsonl")
+    observed_dataset_rows: dict[int, int] = {}
+
+    def _stub_strategy_lab(input_path: Path) -> dict[str, Any]:
+        return _stub_strategy_lab_metrics(
+            dataset_rows=len(research_analyzer.build_dataset(path=input_path))
+        )
+
+    monkeypatch.setattr(
+        research_analyzer,
+        "_build_strategy_lab_metrics",
+        _stub_strategy_lab,
+    )
+    monkeypatch.setattr(
+        research_analyzer,
+        "_build_edge_candidate_rows",
+        lambda *_args, **_kwargs: research_analyzer._empty_edge_candidate_rows(),
+    )
+
+    for latest_window_hours in (36, 72, 144):
+        result = research_analyzer.run_research_analyzer(
+            input_path,
+            tmp_path / f"reports-{latest_window_hours}",
+            latest_window_hours=latest_window_hours,
+        )
+        observed_dataset_rows[latest_window_hours] = result["strategy_lab"]["dataset_rows"]
+        assert result["schema_validation"]["windowed_record_count"] == result["strategy_lab"]["dataset_rows"]
+
+    assert observed_dataset_rows == {
+        36: 3,
+        72: 4,
+        144: 5,
+    }
 
 
 def test_edge_stability_preview_returns_insufficient_data_without_visible_candidates() -> None:
