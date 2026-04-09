@@ -10,7 +10,7 @@ from typing import Any
 from src.research import sub_floor_candidate_validation as baseline
 
 REPORT_TYPE = "historical_sub_floor_candidate_validation"
-REPORT_VERSION = "v2"
+REPORT_VERSION = "v3"
 DEFAULT_JSON_OUTPUT_NAME = "historical_sub_floor_candidate_validation_summary.json"
 DEFAULT_MD_OUTPUT_NAME = "historical_sub_floor_candidate_validation_summary.md"
 ELIGIBLE_CLASSIFICATION = "eligible"
@@ -27,9 +27,6 @@ SAME_SNAPSHOT_DUPLICATE_RESOLUTION_RULE = (
     "prefer_edge_candidate_rows_rows_over_diagnostic_rows_for_same_snapshot_identity"
 )
 
-# Conservative conclusion heuristics.
-# These are intentionally explicit so the report exposes policy-like thresholds
-# rather than hiding them in control flow.
 MIN_FOLLOWUP_IDENTITIES_FOR_SIGNAL = 3
 MIN_MATURED_TO_ELIGIBLE_RATIO_FOR_SIGNAL = 0.5
 
@@ -209,6 +206,108 @@ def _normalize_selected_observation(
     }
 
 
+def _normalize_historical_horizon_evaluation_row(
+    raw_row: dict[str, Any],
+    *,
+    default_symbol: str | None = None,
+    default_strategy: str | None = None,
+    default_horizon: str | None = None,
+) -> dict[str, Any]:
+    metrics = baseline._safe_dict(raw_row.get("metrics"))
+
+    symbol = baseline._normalize_symbol(raw_row.get("symbol") or default_symbol)
+    strategy = baseline._normalize_strategy(raw_row.get("strategy") or default_strategy)
+    horizon = baseline._normalize_horizon(raw_row.get("horizon") or default_horizon)
+
+    return {
+        "symbol": symbol,
+        "strategy": strategy,
+        "horizon": horizon,
+        "status": baseline._safe_text(raw_row.get("status")) or "rejected",
+        "diagnostic_category": baseline._safe_text(raw_row.get("diagnostic_category")),
+        "strategy_horizon_compatible": bool(
+            raw_row.get("strategy_horizon_compatible", False)
+        ),
+        "rejection_reason": baseline._safe_text(raw_row.get("rejection_reason")),
+        "rejection_reasons": baseline._safe_list(raw_row.get("rejection_reasons")),
+        "sample_gate": baseline._safe_text(raw_row.get("sample_gate")),
+        "quality_gate": baseline._safe_text(raw_row.get("quality_gate")),
+        "candidate_strength": baseline._safe_text(raw_row.get("candidate_strength")),
+        "classification_reason": baseline._safe_text(
+            raw_row.get("classification_reason")
+        ),
+        "aggregate_score": baseline._safe_float(raw_row.get("aggregate_score")),
+        "chosen_metric_summary": baseline._safe_text(
+            raw_row.get("chosen_metric_summary")
+        ),
+        "visibility_reason": baseline._safe_text(raw_row.get("visibility_reason")),
+        "sample_count": baseline._safe_int(metrics.get("sample_count")),
+        "labeled_count": baseline._safe_int(metrics.get("labeled_count")),
+        "coverage_pct": baseline._safe_float(metrics.get("coverage_pct")),
+        "median_future_return_pct": baseline._safe_float(
+            metrics.get("median_future_return_pct")
+        ),
+        "positive_rate_pct": baseline._safe_float(metrics.get("positive_rate_pct")),
+        "robustness_signal": "signal_match_rate_pct",
+        "robustness_signal_pct": baseline._safe_float(
+            metrics.get("signal_match_rate_pct")
+        ),
+    }
+
+
+def _extract_historical_diagnostic_rows_from_identity_horizon_evaluations(
+    payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    block = baseline._safe_dict(payload.get("edge_candidate_rows"))
+    identity_evaluations = baseline._safe_list(block.get("identity_horizon_evaluations"))
+
+    diagnostic_rows: list[dict[str, Any]] = []
+    for identity_eval in identity_evaluations:
+        identity_eval = baseline._safe_dict(identity_eval)
+        symbol = baseline._safe_text(identity_eval.get("symbol"))
+        strategy = baseline._safe_text(identity_eval.get("strategy"))
+        horizon_evaluations = baseline._safe_dict(identity_eval.get("horizon_evaluations"))
+
+        for horizon_name, raw_row in horizon_evaluations.items():
+            if not isinstance(raw_row, dict):
+                continue
+            diagnostic_rows.append(
+                _normalize_historical_horizon_evaluation_row(
+                    raw_row,
+                    default_symbol=symbol,
+                    default_strategy=strategy,
+                    default_horizon=str(horizon_name),
+                )
+            )
+
+    return diagnostic_rows
+
+
+def _prepare_payload_for_source_summary(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    block = baseline._safe_dict(payload.get("edge_candidate_rows"))
+    existing_diagnostic_rows = baseline._safe_list(block.get("diagnostic_rows"))
+    if existing_diagnostic_rows:
+        return payload, []
+
+    synthesized_diagnostic_rows = (
+        _extract_historical_diagnostic_rows_from_identity_horizon_evaluations(payload)
+    )
+    if not synthesized_diagnostic_rows:
+        return payload, []
+
+    cloned_payload = dict(payload)
+    cloned_block = dict(block)
+    cloned_block["diagnostic_rows"] = synthesized_diagnostic_rows
+    cloned_block["diagnostic_row_count"] = len(synthesized_diagnostic_rows)
+    cloned_payload["edge_candidate_rows"] = cloned_block
+
+    return cloned_payload, [
+        "diagnostic_rows_synthesized_from_identity_horizon_evaluations"
+    ]
+
+
 def _same_snapshot_duplicate_precedence(value: dict[str, Any]) -> tuple[Any, ...]:
     classification = _classification(value)
     snapshot_kind = str(value.get("snapshot_kind") or "")
@@ -238,10 +337,6 @@ def _deduplicate_same_snapshot_observations(
     cross_kind_duplicate_identity_count = 0
     dropped_observation_count = 0
 
-    # Deterministic precedence:
-    # 1. rows present in edge_candidate_rows.rows
-    # 2. diagnostic near-miss classifications
-    # 3. remaining diagnostic rows
     for rows in grouped.values():
         if len(rows) == 1:
             unique_rows.append(rows[0])
@@ -271,12 +366,14 @@ def _build_source_snapshot(
     *,
     snapshot_index: int,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    prepared_payload, preparation_warnings = _prepare_payload_for_source_summary(payload)
+
     diagnostic_summary, diagnostic_observations = baseline._build_source_summary(
         path,
-        payload,
+        prepared_payload,
         payload_warnings,
     )
-    block, _ = baseline._extract_edge_candidate_rows_block(payload)
+    block, _ = baseline._extract_edge_candidate_rows_block(prepared_payload)
     selected_rows = [
         item for item in baseline._safe_list(baseline._safe_dict(block).get("rows"))
         if isinstance(item, dict)
@@ -318,6 +415,7 @@ def _build_source_snapshot(
     source_warnings = list(
         baseline._normalize_string_list(diagnostic_summary.get("warnings"))
     )
+    source_warnings.extend(preparation_warnings)
     if dedupe_details["same_snapshot_duplicate_identity_count"] > 0:
         source_warnings.append(
             "same_snapshot_duplicate_identities_resolved_with_precedence="
@@ -543,9 +641,6 @@ def _build_sample_band_summary(
                 "sample_count_band": band,
                 "observation_count": observation_count,
                 "distinct_identity_count": len(identities),
-                # Intentionally uses observation_count as denominator, not the count of
-                # non-null median values. This keeps the metric conservative when some
-                # rows lack median values.
                 "positive_median_ratio": _ratio_or_none(
                     positive_median_count,
                     observation_count,

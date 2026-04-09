@@ -91,6 +91,88 @@ def _eligible_row(
     }
 
 
+def _historical_identity_horizon_payload(
+    *,
+    identity_symbol: str,
+    identity_strategy: str,
+    horizon_rows: dict[str, dict[str, object]],
+    selected_rows: list[dict[str, object]] | None = None,
+    max_age_hours: int = 36,
+) -> dict[str, object]:
+    return {
+        "schema_validation": {
+            "max_age_hours": max_age_hours,
+            "max_rows": 2500,
+            "valid_records": 40,
+        },
+        "edge_candidate_rows": {
+            "row_count": len(selected_rows or []),
+            "rows": selected_rows or [],
+            "dropped_row_count": 0,
+            "dropped_rows": [],
+            "identity_horizon_evaluations": [
+                {
+                    "identity_key": f"{identity_symbol}:{identity_strategy}",
+                    "symbol": identity_symbol,
+                    "strategy": identity_strategy,
+                    "strategy_compatible_horizons": list(horizon_rows.keys()),
+                    "actual_joined_eligible_horizons": [],
+                    "actual_joined_stability_label": "single_horizon_only",
+                    "raw_preview_visibility": {},
+                    "compatibility_filtered_preview_visibility": {},
+                    "horizon_evaluations": horizon_rows,
+                }
+            ],
+        },
+    }
+
+
+def _historical_horizon_eval(
+    *,
+    symbol: str,
+    strategy: str,
+    horizon: str,
+    strategy_horizon_compatible: bool = True,
+    rejection_reason: str = "failed_absolute_minimum_gate",
+    rejection_reasons: list[str] | None = None,
+    sample_gate: str = "failed",
+    quality_gate: str = "failed",
+    candidate_strength: str = "insufficient_data",
+    visibility_reason: str = "failed_absolute_minimum_gate",
+    sample_count: int = 18,
+    labeled_count: int = 18,
+    coverage_pct: float = 100.0,
+    median_future_return_pct: float | None = 0.21,
+    positive_rate_pct: float | None = 56.0,
+    signal_match_rate_pct: float | None = 54.0,
+) -> dict[str, object]:
+    return {
+        "symbol": symbol,
+        "strategy": strategy,
+        "horizon": horizon,
+        "strategy_horizon_compatible": strategy_horizon_compatible,
+        "status": "rejected",
+        "rejection_reason": rejection_reason,
+        "rejection_reasons": rejection_reasons
+        or ["failed_absolute_minimum_gate", "sample_count_below_absolute_floor"],
+        "sample_gate": sample_gate,
+        "quality_gate": quality_gate,
+        "candidate_strength": candidate_strength,
+        "candidate_strength_diagnostics": None,
+        "metrics": {
+            "sample_count": sample_count,
+            "labeled_count": labeled_count,
+            "coverage_pct": coverage_pct,
+            "positive_rate_pct": positive_rate_pct,
+            "signal_match_rate_pct": signal_match_rate_pct,
+            "median_future_return_pct": median_future_return_pct,
+        },
+        "aggregate_score": None,
+        "visibility_reason": visibility_reason,
+        "chosen_metric_summary": rejection_reason,
+    }
+
+
 def _summary_payload(
     diagnostic_rows: list[dict[str, object]] | None,
     *,
@@ -239,6 +321,76 @@ def test_sample_band_aggregation_correctness(tmp_path: Path) -> None:
 
     assert summary["conservative_conclusion"]["threshold_change_support"] == (
         "insufficient_evidence"
+    )
+
+
+def test_historical_identity_horizon_evaluations_fallback_is_supported(
+    tmp_path: Path,
+) -> None:
+    first = _write_json(
+        tmp_path / "historical_01.json",
+        _historical_identity_horizon_payload(
+            identity_symbol="BTCUSDT",
+            identity_strategy="intraday",
+            horizon_rows={
+                "1h": _historical_horizon_eval(
+                    symbol="BTCUSDT",
+                    strategy="intraday",
+                    horizon="1h",
+                    sample_count=18,
+                    labeled_count=18,
+                    median_future_return_pct=0.11,
+                    positive_rate_pct=56.0,
+                    signal_match_rate_pct=54.0,
+                ),
+                "4h": _historical_horizon_eval(
+                    symbol="BTCUSDT",
+                    strategy="intraday",
+                    horizon="4h",
+                    strategy_horizon_compatible=False,
+                    rejection_reason="strategy_horizon_incompatible",
+                    rejection_reasons=["strategy_horizon_incompatible"],
+                    sample_gate="not_applicable",
+                    quality_gate="not_applicable",
+                    candidate_strength="incompatible",
+                    visibility_reason="strategy_horizon_incompatible",
+                    sample_count=0,
+                    labeled_count=0,
+                    coverage_pct=0.0,
+                    median_future_return_pct=None,
+                    positive_rate_pct=None,
+                    signal_match_rate_pct=None,
+                ),
+            },
+            max_age_hours=24,
+        ),
+    )
+    second = _write_json(
+        tmp_path / "historical_02.json",
+        _summary_payload(
+            [],
+            selected_rows=[
+                _eligible_row(
+                    symbol="BTCUSDT",
+                    strategy="intraday",
+                    horizon="1h",
+                    sample_count=32,
+                    labeled_count=32,
+                )
+            ],
+            max_age_hours=48,
+        ),
+    )
+
+    summary = build_historical_sub_floor_candidate_validation_report([first, second])
+
+    assert summary["overall_summary"]["all_observation_count"] == 3
+    assert summary["overall_summary"]["cohort_identity_count"] == 1
+    identity = _identity_entry(summary, "BTCUSDT:intraday:1h")
+    assert identity["maturation_outcome"] == "matured_to_eligible"
+    assert any(
+        "diagnostic_rows_synthesized_from_identity_horizon_evaluations" in warning
+        for warning in summary["warnings"]
     )
 
 
@@ -730,7 +882,7 @@ def test_report_writes_stable_outputs(tmp_path: Path) -> None:
         "historical_sub_floor_candidate_validation"
     )
     assert written_json["metadata"]["classification_version"] == "conservative_v2"
-    assert written_json["metadata"]["report_version"] == "v2"
+    assert written_json["metadata"]["report_version"] == "v3"
     assert set(written_json.keys()) == {
         "metadata",
         "source_summaries",
