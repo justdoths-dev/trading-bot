@@ -6,6 +6,7 @@ from pathlib import Path
 from src.research.candidate_quality_gate import (
     apply_candidate_quality_gate,
     compute_candidate_metrics,
+    determine_drop_reason,
     is_selected_record,
 )
 
@@ -180,15 +181,33 @@ def test_compute_candidate_metrics_ignores_malformed_or_non_selected_rows() -> N
     }
 
 
-# -----------------------------
-# 핵심: strict / fallback / final 검증
-# -----------------------------
+def test_determine_drop_reason_reports_near_floor_median_failure() -> None:
+    reason = determine_drop_reason(
+        {
+            "sample_count": 20,
+            "median_return_pct": 0.0,
+            "positive_rate_pct": 55.0,
+        }
+    )
+    assert reason == "near_floor_rescue_median_not_positive"
+
+
+def test_determine_drop_reason_reports_near_floor_positive_rate_failure() -> None:
+    reason = determine_drop_reason(
+        {
+            "sample_count": 20,
+            "median_return_pct": 0.1,
+            "positive_rate_pct": 49.999,
+        }
+    )
+    assert reason == "near_floor_rescue_positive_rate_below_minimum"
+
 
 def test_apply_candidate_quality_gate_drops_for_insufficient_sample(tmp_path: Path) -> None:
     candidate = _candidate()
     path = _write_jsonl(
         tmp_path / "trade_analysis.jsonl",
-        [_record(return_value=1.0) for _ in range(29)],
+        [_record(return_value=1.0) for _ in range(19)],
     )
 
     result = apply_candidate_quality_gate([candidate], trade_analysis_path=path)
@@ -206,6 +225,69 @@ def test_apply_candidate_quality_gate_drops_for_insufficient_sample(tmp_path: Pa
 
     # compatibility
     assert result["kept_candidates"] == [candidate]
+
+
+def test_apply_candidate_quality_gate_rescues_near_floor_positive_candidates(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate()
+    returns = [1.0] * 10 + [0.0] * 10
+    path = _write_jsonl(
+        tmp_path / "trade_analysis.jsonl",
+        [_record(return_value=value) for value in returns],
+    )
+
+    result = apply_candidate_quality_gate([candidate], trade_analysis_path=path)
+
+    assert result["strict_kept_count"] == 1
+    assert result["strict_dropped_count"] == 0
+    assert result["fallback_applied"] is False
+    assert result["fallback_restored_count"] == 0
+    assert result["final_kept_count"] == 1
+    assert result["strict_kept_candidates"] == [candidate]
+    assert result["final_kept_candidates"] == [candidate]
+
+
+def test_apply_candidate_quality_gate_does_not_rescue_near_floor_non_positive_median(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate()
+    returns = [1.0] * 10 + [-1.0] * 10
+    path = _write_jsonl(
+        tmp_path / "trade_analysis.jsonl",
+        [_record(return_value=value) for value in returns],
+    )
+
+    result = apply_candidate_quality_gate([candidate], trade_analysis_path=path)
+
+    assert result["strict_kept_count"] == 0
+    assert result["strict_dropped_count"] == 1
+    assert result["fallback_applied"] is True
+    assert result["fallback_restored_count"] == 1
+    assert result["final_kept_count"] == 1
+    assert (
+        result["strict_dropped_candidates"][0]["reason"]
+        == "near_floor_rescue_median_not_positive"
+    )
+
+
+def test_apply_candidate_quality_gate_does_not_rescue_below_near_floor_band(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate()
+    path = _write_jsonl(
+        tmp_path / "trade_analysis.jsonl",
+        [_record(return_value=1.0) for _ in range(19)],
+    )
+
+    result = apply_candidate_quality_gate([candidate], trade_analysis_path=path)
+
+    assert result["strict_kept_count"] == 0
+    assert result["strict_dropped_count"] == 1
+    assert result["fallback_applied"] is True
+    assert result["fallback_restored_count"] == 1
+    assert result["final_kept_count"] == 1
+    assert result["strict_dropped_candidates"][0]["reason"] == "sample_count_below_minimum"
 
 
 def test_apply_candidate_quality_gate_drops_for_negative_median(tmp_path: Path) -> None:
@@ -247,7 +329,29 @@ def test_apply_candidate_quality_gate_drops_for_low_positive_rate(tmp_path: Path
     assert result["strict_dropped_candidates"][0]["reason"] == "positive_rate_pct_below_minimum"
 
 
-def test_apply_candidate_quality_gate_keeps_and_drops_mixed_candidates(tmp_path: Path) -> None:
+def test_apply_candidate_quality_gate_preserves_normal_thresholds_outside_rescue_path(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate()
+    returns = [1.0] * 14 + [0.0] * 16
+    path = _write_jsonl(
+        tmp_path / "trade_analysis.jsonl",
+        [_record(return_value=value) for value in returns],
+    )
+
+    result = apply_candidate_quality_gate([candidate], trade_analysis_path=path)
+
+    assert result["strict_kept_count"] == 1
+    assert result["strict_dropped_count"] == 0
+    assert result["fallback_applied"] is False
+    assert result["fallback_restored_count"] == 0
+    assert result["final_kept_count"] == 1
+    assert result["strict_kept_candidates"] == [candidate]
+
+
+def test_apply_candidate_quality_gate_keeps_and_drops_mixed_candidates(
+    tmp_path: Path,
+) -> None:
     btc_candidate = _candidate(symbol="BTCUSDT")
     eth_candidate = _candidate(symbol="ETHUSDT")
 
@@ -275,7 +379,9 @@ def test_apply_candidate_quality_gate_keeps_and_drops_mixed_candidates(tmp_path:
     assert result["strict_dropped_candidates"][0]["candidate"]["symbol"] == "ETHUSDT"
 
 
-def test_apply_candidate_quality_gate_restores_original_candidates_when_all_drop(tmp_path: Path) -> None:
+def test_apply_candidate_quality_gate_restores_original_candidates_when_all_drop(
+    tmp_path: Path,
+) -> None:
     first_candidate = _candidate(symbol="BTCUSDT")
     second_candidate = _candidate(symbol="ETHUSDT")
 

@@ -17,6 +17,17 @@ HORIZON_RETURN_FIELDS = {
 MIN_POSITIVE_RATE_PCT = 45.0
 MIN_SAMPLE_COUNT = 30
 
+NEAR_FLOOR_SAMPLE_RESCUE_MIN_SAMPLE_COUNT = 20
+NEAR_FLOOR_SAMPLE_RESCUE_MIN_POSITIVE_RATE_PCT = 50.0
+
+DROP_REASON_SAMPLE_COUNT_BELOW_MINIMUM = "sample_count_below_minimum"
+DROP_REASON_MEDIAN_RETURN_NEGATIVE = "median_return_pct_negative"
+DROP_REASON_POSITIVE_RATE_BELOW_MINIMUM = "positive_rate_pct_below_minimum"
+DROP_REASON_NEAR_FLOOR_MEDIAN_NOT_POSITIVE = "near_floor_rescue_median_not_positive"
+DROP_REASON_NEAR_FLOOR_POSITIVE_RATE_BELOW_MINIMUM = (
+    "near_floor_rescue_positive_rate_below_minimum"
+)
+
 
 def apply_candidate_quality_gate(
     candidates: list[dict[str, Any]],
@@ -46,7 +57,9 @@ def apply_candidate_quality_gate(
     - kept_count == final_kept_count
     - dropped_count == strict_dropped_count
     """
-    normalized_candidates = [candidate for candidate in candidates if isinstance(candidate, dict)]
+    normalized_candidates = [
+        candidate for candidate in candidates if isinstance(candidate, dict)
+    ]
     resolved_path = resolve_trade_analysis_path(trade_analysis_path)
     records = load_trade_analysis_records(resolved_path)
 
@@ -105,16 +118,22 @@ def resolve_trade_analysis_path(explicit_path: Path | None) -> Path:
             final_path = Path.cwd() / final_path
         final_path = final_path.resolve()
         if not final_path.exists():
-            raise FileNotFoundError(f"Trade-analysis input path does not exist: {final_path}")
+            raise FileNotFoundError(
+                f"Trade-analysis input path does not exist: {final_path}"
+            )
         return final_path
 
-    for candidate in (DEFAULT_PRIMARY_TRADE_ANALYSIS_PATH, DEFAULT_FALLBACK_TRADE_ANALYSIS_PATH):
+    for candidate in (
+        DEFAULT_PRIMARY_TRADE_ANALYSIS_PATH,
+        DEFAULT_FALLBACK_TRADE_ANALYSIS_PATH,
+    ):
         if candidate.exists():
             return candidate.resolve()
 
     raise FileNotFoundError(
         "Could not find trade-analysis JSONL input. Checked: "
-        f"{DEFAULT_PRIMARY_TRADE_ANALYSIS_PATH} and {DEFAULT_FALLBACK_TRADE_ANALYSIS_PATH}"
+        f"{DEFAULT_PRIMARY_TRADE_ANALYSIS_PATH} and "
+        f"{DEFAULT_FALLBACK_TRADE_ANALYSIS_PATH}"
     )
 
 
@@ -200,13 +219,61 @@ def determine_drop_reason(metrics: dict[str, float | int | None]) -> str | None:
     positive_rate_pct = coerce_float(metrics.get("positive_rate_pct"))
     sample_count = coerce_int(metrics.get("sample_count"))
 
-    if sample_count is None or sample_count < MIN_SAMPLE_COUNT:
-        return "sample_count_below_minimum"
+    if qualifies_for_near_floor_sample_rescue(
+        sample_count=sample_count,
+        median_return_pct=median_return_pct,
+        positive_rate_pct=positive_rate_pct,
+    ):
+        return None
+
+    if sample_count is None or sample_count < NEAR_FLOOR_SAMPLE_RESCUE_MIN_SAMPLE_COUNT:
+        return DROP_REASON_SAMPLE_COUNT_BELOW_MINIMUM
+
+    if is_in_near_floor_sample_band(sample_count):
+        if median_return_pct is None or median_return_pct <= 0:
+            return DROP_REASON_NEAR_FLOOR_MEDIAN_NOT_POSITIVE
+        if (
+            positive_rate_pct is None
+            or positive_rate_pct < NEAR_FLOOR_SAMPLE_RESCUE_MIN_POSITIVE_RATE_PCT
+        ):
+            return DROP_REASON_NEAR_FLOOR_POSITIVE_RATE_BELOW_MINIMUM
+        return DROP_REASON_SAMPLE_COUNT_BELOW_MINIMUM
+
+    if sample_count < MIN_SAMPLE_COUNT:
+        return DROP_REASON_SAMPLE_COUNT_BELOW_MINIMUM
     if median_return_pct is None or median_return_pct < 0:
-        return "median_return_pct_negative"
+        return DROP_REASON_MEDIAN_RETURN_NEGATIVE
     if positive_rate_pct is None or positive_rate_pct < MIN_POSITIVE_RATE_PCT:
-        return "positive_rate_pct_below_minimum"
+        return DROP_REASON_POSITIVE_RATE_BELOW_MINIMUM
     return None
+
+
+def qualifies_for_near_floor_sample_rescue(
+    *,
+    sample_count: int | None,
+    median_return_pct: float | None,
+    positive_rate_pct: float | None,
+) -> bool:
+    if not is_in_near_floor_sample_band(sample_count):
+        return False
+    if median_return_pct is None or median_return_pct <= 0:
+        return False
+    if (
+        positive_rate_pct is None
+        or positive_rate_pct < NEAR_FLOOR_SAMPLE_RESCUE_MIN_POSITIVE_RATE_PCT
+    ):
+        return False
+    return True
+
+
+def is_in_near_floor_sample_band(sample_count: int | None) -> bool:
+    if sample_count is None:
+        return False
+    return (
+        NEAR_FLOOR_SAMPLE_RESCUE_MIN_SAMPLE_COUNT
+        <= sample_count
+        < MIN_SAMPLE_COUNT
+    )
 
 
 def extract_candidate_identity(candidate: dict[str, Any]) -> tuple[str, str, str] | None:
@@ -247,7 +314,9 @@ def is_selected_record(record: dict[str, Any]) -> bool:
     )
 
 
-def extract_selected_candidate_identity(record: dict[str, Any]) -> tuple[str, str, str] | None:
+def extract_selected_candidate_identity(
+    record: dict[str, Any],
+) -> tuple[str, str, str] | None:
     edge_selection_output = record.get("edge_selection_output")
     selected_payload = edge_selection_output if isinstance(edge_selection_output, dict) else {}
 
