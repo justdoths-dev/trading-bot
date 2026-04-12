@@ -85,9 +85,10 @@ MODERATE_WITH_TWO_SUPPORTING_DEFICITS_MIN_SCORE = 54.0
 MODERATE_WITH_THREE_SUPPORTING_DEFICITS_MIN_SCORE = 59.5
 STRONG_MIN_AGGREGATE_SCORE = 85.0
 
-CRITICAL_MAJOR_DEFICITS = set()
-SUPPORTING_MAJOR_DEFICITS = {
+CRITICAL_MAJOR_DEFICITS = {
     "sample_count_below_emerging_moderate",
+}
+SUPPORTING_MAJOR_DEFICITS = {
     "median_return_below_emerging_moderate",
     "positive_rate_below_emerging_moderate",
     "robustness_below_emerging_moderate",
