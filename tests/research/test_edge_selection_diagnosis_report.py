@@ -157,3 +157,19 @@ def test_diagnosis_report_explains_filtered_selection_state() -> None:
     assert "candidate:CANDIDATE_STABILITY_SINGLE_HORIZON_ONLY" in report["stability_issues"]
     assert "CANDIDATE_DRIFT_DECREASING" in report["drift_issues"]
     assert "status=abstain" in report["diagnosis_summary"]
+
+
+def test_diagnosis_report_uses_conservative_preview_unavailable_label() -> None:
+    report = build_edge_selection_diagnosis_report(
+        research_summary_data={},
+        edge_candidates_preview=None,
+        edge_stability_preview=None,
+        shadow_selection={
+            "selection_status": "abstain",
+            "candidates_considered": 0,
+            "ranking": [],
+        },
+    )
+
+    assert report["failed_layers"] == ["candidate_preview_unavailable"]
+    assert report["candidate_generation_state"] == "no_ranked_candidates_visible"

@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -183,14 +184,14 @@ def build_research_summary_message(
     cumulative_log_meta: dict[str, Any] | None,
     dataset_growth: dict[str, Any],
 ) -> str:
-    generated_at = resolve_display_timestamp(
+    freshness_line = resolve_display_timestamp_line(
         latest_summary=latest_summary,
         edge_scores_summary=edge_scores_summary,
         score_drift_summary=score_drift_summary,
     )
 
     lines = ["*Research Summary*"]
-    lines.append(f"Generated: {escape_markdown(generated_at)}")
+    lines.append(freshness_line)
     lines.append(_dataset_growth_line(dataset_growth, latest_summary, cumulative_log_meta))
     lines.append(_strategy_snapshot_line(latest_summary))
     lines.append(_edge_stability_snapshot_line(edge_scores_summary))
@@ -337,18 +338,80 @@ def resolve_source_stamp(
     return hashlib.sha256(raw_stamp.encode("utf-8")).hexdigest()
 
 
+def resolve_display_timestamp_line(
+    *,
+    latest_summary: dict[str, Any] | None,
+    edge_scores_summary: dict[str, Any] | None,
+    score_drift_summary: dict[str, Any] | None,
+) -> str:
+    timestamps = _collect_source_timestamps(
+        latest_summary=latest_summary,
+        edge_scores_summary=edge_scores_summary,
+        score_drift_summary=score_drift_summary,
+    )
+    distinct_timestamps = {
+        value for value in timestamps.values() if value and value != "n/a"
+    }
+
+    if len(distinct_timestamps) <= 1:
+        generated_at = resolve_display_timestamp(
+            latest_summary=latest_summary,
+            edge_scores_summary=edge_scores_summary,
+            score_drift_summary=score_drift_summary,
+        )
+        return f"Generated: {escape_markdown(generated_at)}"
+
+    freshness_parts = [
+        f"{label}: {escape_markdown(value)}" for label, value in timestamps.items()
+    ]
+    return "Freshness: " + "; ".join(freshness_parts)
+
+
+def _collect_source_timestamps(
+    *,
+    latest_summary: dict[str, Any] | None,
+    edge_scores_summary: dict[str, Any] | None,
+    score_drift_summary: dict[str, Any] | None,
+) -> dict[str, str]:
+    return {
+        "latest summary": _normalize_timestamp_for_display(
+            _extract_generated_at(latest_summary)
+        ),
+        "edge scores": _normalize_timestamp_for_display(
+            _extract_generated_at(edge_scores_summary)
+        ),
+        "drift": _normalize_timestamp_for_display(
+            _extract_generated_at(score_drift_summary)
+        ),
+    }
+
+
+def _normalize_timestamp_for_display(value: str) -> str:
+    raw_value = str(value).strip()
+    if not raw_value:
+        return "n/a"
+
+    normalized = raw_value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return raw_value
+
+    return parsed.isoformat(timespec="seconds")
+
+
 def resolve_display_timestamp(
     *,
     latest_summary: dict[str, Any] | None,
     edge_scores_summary: dict[str, Any] | None,
     score_drift_summary: dict[str, Any] | None,
 ) -> str:
-    for candidate in (
-        _extract_generated_at(latest_summary),
-        _extract_generated_at(edge_scores_summary),
-        _extract_generated_at(score_drift_summary),
-    ):
-        if candidate:
+    for candidate in _collect_source_timestamps(
+        latest_summary=latest_summary,
+        edge_scores_summary=edge_scores_summary,
+        score_drift_summary=score_drift_summary,
+    ).values():
+        if candidate != "n/a":
             return candidate
     return "n/a"
 
@@ -358,16 +421,24 @@ def _dataset_growth_line(
     latest_summary: dict[str, Any] | None,
     cumulative_log_meta: dict[str, Any] | None,
 ) -> str:
-    current_total = dataset_growth.get("current_total_records")
+    current_total = _coerce_optional_int(dataset_growth.get("current_total_records"))
     delta = dataset_growth.get("delta")
-    recent_window_records = dataset_growth.get("recent_window_records")
-    recent_coverage = _safe_dict((latest_summary or {}).get("dataset_overview")).get(
-        "label_coverage_any_horizon_pct"
+    recent_window_records = _coerce_optional_int(dataset_growth.get("recent_window_records"))
+    recent_label_coverage = _coerce_optional_float(
+        _safe_dict((latest_summary or {}).get("dataset_overview")).get(
+            "label_coverage_any_horizon_pct"
+        )
+    )
+    recent_window_share = _compute_recent_window_share_pct(
+        current_total_records=current_total,
+        recent_window_records=recent_window_records,
     )
     files_count = (cumulative_log_meta or {}).get("files_count")
 
     total_text = "n/a" if current_total is None else str(current_total)
     recent_window_text = "n/a" if recent_window_records is None else str(recent_window_records)
+    recent_window_share_text = _format_percent(recent_window_share)
+    recent_label_coverage_text = _format_percent(recent_label_coverage)
     files_text = "n/a" if files_count is None else str(files_count)
     malformed_rows = _safe_int((cumulative_log_meta or {}).get("malformed_rows"))
 
@@ -378,14 +449,13 @@ def _dataset_growth_line(
     else:
         growth_text = str(delta)
 
-    coverage_text = "n/a" if recent_coverage is None else f"{float(recent_coverage):.2f}%"
-
     return (
         "- Dataset: "
         f"total records: {escape_markdown(total_text)}; "
         f"growth: {escape_markdown(growth_text)}; "
         f"recent window: {escape_markdown(recent_window_text)}; "
-        f"recent coverage: {escape_markdown(coverage_text)}; "
+        f"recent window share: {escape_markdown(recent_window_share_text)}; "
+        f"recent label coverage: {escape_markdown(recent_label_coverage_text)}; "
         f"log files: {escape_markdown(files_text)}; "
         f"malformed rows: {escape_markdown(str(malformed_rows))}"
     )
@@ -585,6 +655,42 @@ def _safe_int(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _compute_recent_window_share_pct(
+    *,
+    current_total_records: int | None,
+    recent_window_records: int | None,
+) -> float | None:
+    if current_total_records is None or current_total_records <= 0:
+        return None
+    if recent_window_records is None or recent_window_records < 0:
+        return None
+    return (recent_window_records / current_total_records) * 100.0
+
+
+def _format_percent(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.2f}%"
 
 
 def _format_number(value: float) -> str:

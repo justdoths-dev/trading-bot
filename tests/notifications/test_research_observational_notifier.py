@@ -134,3 +134,33 @@ def test_build_observational_message_omits_empty_sections_and_formats_blocks() -
     assert "increase 0 | decrease 0 | flat 3" in message
     assert "Current Snapshot" not in message
     assert "Changed Groups" not in message
+
+
+def test_build_observational_message_avoids_preview_missing_wording_for_reduced_payloads() -> None:
+    message = build_observational_message(
+        score_drift_summary={
+            "generated_at": "2026-03-18T00:00:00+00:00",
+            "drift_summary": {
+                "increase": 0,
+                "decrease": 0,
+                "flat": 1,
+            },
+            "score_drift": [],
+        },
+        edge_scores_summary=None,
+        comparison_summary={
+            "generated_at": "2026-03-18T00:00:00+00:00",
+        },
+        shadow_selection={
+            "generated_at": "2026-03-18T00:00:00+00:00",
+            "selection_status": "abstain",
+            "reason_codes": ["NO_ELIGIBLE_CANDIDATES"],
+            "candidates_considered": 0,
+            "ranking": [],
+        },
+    )
+
+    assert "Why blocked" in message
+    assert "candidate_preview_missing" not in message
+    assert "candidate_preview_unavailable" not in message
+    assert "no ranked candidates survived the current snapshot" in message

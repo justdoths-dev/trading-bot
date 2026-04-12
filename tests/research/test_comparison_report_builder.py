@@ -180,6 +180,14 @@ def test_build_comparison_report_happy_path(tmp_path: Path) -> None:
         report["edge_stability_comparison"]["strategy"]["cumulative_stability_label"]
         == "single_horizon_only"
     )
+    assert (
+        report["edge_candidates_preview"]["by_horizon"]["15m"]["top_strategy"]["group"]
+        == "swing"
+    )
+    assert (
+        report["edge_stability_preview"]["strategy"]["stability_label"]
+        == "multi_horizon_confirmed"
+    )
     assert "comparison_summary" in report
     assert (output_dir / "summary.json").exists()
     assert (output_dir / "summary.md").exists()

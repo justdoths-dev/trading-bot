@@ -106,7 +106,7 @@ def _build_failed_layers(
     failed: list[str] = []
 
     if not by_horizon:
-        return ["candidate_preview_missing"]
+        return ["candidate_preview_unavailable"]
 
     layer_map = {
         "strategy": "top_strategy",

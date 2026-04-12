@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from src.notifications.research_notifier import ResearchNotifier
+
+
+class _DummySender:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def send_message(self, message: str) -> dict[str, Any]:
+        self.messages.append(message)
+        return {"ok": True}
 
 
 def _base_payload() -> dict[str, Any]:
@@ -172,3 +182,54 @@ def test_notifier_keeps_quiet_when_stability_preview_is_insufficient() -> None:
 
     assert "Stability Notes" not in message
     assert "insufficient_data" not in message
+
+
+def test_send_latest_summary_suppresses_legacy_delivery_by_default(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    report_dir = tmp_path / "latest"
+    report_dir.mkdir()
+    (report_dir / "summary.json").write_text(
+        json.dumps(_base_payload()),
+        encoding="utf-8",
+    )
+    (report_dir / "summary.md").write_text("summary", encoding="utf-8")
+
+    sender = _DummySender()
+    monkeypatch.delenv(
+        "TELEGRAM_RESEARCH_ENABLE_LEGACY_CONCISE_SUMMARY",
+        raising=False,
+    )
+    notifier = ResearchNotifier(
+        bot_token="token",
+        chat_id="chat",
+        sender=sender,
+        report_dir=report_dir,
+    )
+
+    assert notifier.send_latest_summary() is True
+    assert sender.messages == []
+
+
+def test_send_latest_summary_can_be_explicitly_reenabled(tmp_path) -> None:
+    report_dir = tmp_path / "latest"
+    report_dir.mkdir()
+    (report_dir / "summary.json").write_text(
+        json.dumps(_base_payload()),
+        encoding="utf-8",
+    )
+    (report_dir / "summary.md").write_text("summary", encoding="utf-8")
+
+    sender = _DummySender()
+    notifier = ResearchNotifier(
+        bot_token="token",
+        chat_id="chat",
+        sender=sender,
+        report_dir=report_dir,
+        enabled=True,
+    )
+
+    assert notifier.send_latest_summary() is True
+    assert len(sender.messages) == 1
+    assert "*Research Summary*" in sender.messages[0]

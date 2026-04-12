@@ -195,10 +195,12 @@ def build_observational_message(
     changed_groups = extract_changed_groups(score_drift_summary)
     drift_summary = _safe_dict((score_drift_summary or {}).get("drift_summary"))
     comparison_payload = comparison_summary if isinstance(comparison_summary, dict) else {}
+    edge_candidates_preview = _safe_dict(comparison_payload.get("edge_candidates_preview"))
+    edge_stability_preview = _safe_dict(comparison_payload.get("edge_stability_preview"))
     diagnosis_report = build_edge_selection_diagnosis_report(
         research_summary_data=comparison_payload,
-        edge_candidates_preview=comparison_payload.get("edge_candidates_preview"),
-        edge_stability_preview=comparison_payload.get("edge_stability_preview"),
+        edge_candidates_preview=edge_candidates_preview,
+        edge_stability_preview=edge_stability_preview,
         shadow_selection=shadow_selection,
     )
     generated_at = _first_non_empty(
@@ -218,11 +220,11 @@ def build_observational_message(
         lines.append(shadow_selection_message)
 
     blocked_horizons = _extract_blocked_horizons(
-        comparison_payload.get("edge_candidates_preview")
+        edge_candidates_preview
     )
     why_blocked_lines = _build_why_blocked_lines(
         blocked_horizons=blocked_horizons,
-        edge_candidates_preview=comparison_payload.get("edge_candidates_preview"),
+        edge_candidates_preview=edge_candidates_preview,
         diagnosis_report=diagnosis_report,
     )
     if why_blocked_lines:
@@ -375,9 +377,16 @@ def _build_why_blocked_lines(
         lines.append(f"{horizon}: {reason}")
 
     if not lines:
+        candidate_generation_line = _format_candidate_generation_state_for_message(
+            diagnosis_report
+        )
+        if candidate_generation_line:
+            lines.append(candidate_generation_line)
+            return lines
+
         failed_layers = diagnosis_report.get("failed_layers")
         if isinstance(failed_layers, list) and failed_layers:
-            lines.append(", ".join(str(item) for item in failed_layers[:3]))
+            lines.append(_format_failed_layers_for_message(failed_layers[:3]))
 
     return lines
 
@@ -401,6 +410,38 @@ def _detect_horizon_block_reason(horizon_payload: dict[str, Any]) -> str:
     ):
         return "quality_borderline"
     return "visibility_lost"
+
+
+def _format_candidate_generation_state_for_message(
+    diagnosis_report: dict[str, Any],
+) -> str:
+    state = _first_non_empty(diagnosis_report.get("candidate_generation_state"))
+    state_map = {
+        "selection_blocked_upstream": "selection blocked upstream",
+        "candidates_generated_but_filtered_before_final_selection": (
+            "candidates generated but filtered before final selection"
+        ),
+        "no_visible_candidates_after_preview_filters": (
+            "no visible candidates remained after preview filters"
+        ),
+        "no_ranked_candidates_visible": (
+            "no ranked candidates survived the current snapshot"
+        ),
+    }
+    return state_map.get(state, "")
+
+
+def _format_failed_layers_for_message(failed_layers: list[Any]) -> str:
+    formatted: list[str] = []
+    for item in failed_layers:
+        label = str(item).strip()
+        if not label:
+            continue
+        if label == "candidate_preview_unavailable":
+            formatted.append("candidate preview unavailable in reporting payload")
+            continue
+        formatted.append(label)
+    return ", ".join(formatted)
 
 
 def _format_compact_gate_failures(value: Any) -> str:

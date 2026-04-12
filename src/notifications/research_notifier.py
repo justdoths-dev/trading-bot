@@ -14,6 +14,8 @@ from src.telegram.telegram_sender import TelegramSender
 logger = logging.getLogger(__name__)
 
 HORIZON_ORDER = ("15m", "1h", "4h")
+LEGACY_CONCISE_SUMMARY_ENV_VAR = "TELEGRAM_RESEARCH_ENABLE_LEGACY_CONCISE_SUMMARY"
+TRUTHY_VALUES = {"1", "true", "yes", "on"}
 
 
 class ResearchNotifier:
@@ -25,14 +27,24 @@ class ResearchNotifier:
         chat_id: str | None = None,
         sender: TelegramSender | None = None,
         report_dir: Path | None = None,
+        enabled: bool | None = None,
     ) -> None:
         self._bot_token = (bot_token or os.getenv("TELEGRAM_OPS_BOT_TOKEN", "")).strip()
         self._chat_id = (chat_id or os.getenv("TELEGRAM_RESEARCH_CHAT_ID", "")).strip()
         self._sender = sender
         self._report_dir = report_dir or self._default_report_dir()
+        self._enabled = enabled
 
     def send_latest_summary(self) -> bool:
         """Send the latest research summary to the configured Telegram chat."""
+        if not self._delivery_enabled():
+            logger.info(
+                "Legacy concise research summary delivery suppressed to avoid overlap. "
+                "Set %s=1 to re-enable it.",
+                LEGACY_CONCISE_SUMMARY_ENV_VAR,
+            )
+            return True
+
         summary_payload = self._read_json_file(self._report_dir / "summary.json")
         summary_markdown = self._read_text_file(self._report_dir / "summary.md")
 
@@ -45,6 +57,13 @@ class ResearchNotifier:
 
         message = self._format_message(summary_payload, summary_markdown)
         return self._deliver(message)
+
+    def _delivery_enabled(self) -> bool:
+        if self._enabled is not None:
+            return self._enabled
+
+        raw_value = os.getenv(LEGACY_CONCISE_SUMMARY_ENV_VAR, "")
+        return raw_value.strip().lower() in TRUTHY_VALUES
 
     def _deliver(self, message: str) -> bool:
         sender = self._get_sender()

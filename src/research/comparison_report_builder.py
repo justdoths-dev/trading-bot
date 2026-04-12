@@ -34,6 +34,12 @@ def build_comparison_report(
         "generated_at": datetime.now(UTC).isoformat(),
         "latest_input": str(latest_summary_path),
         "cumulative_input": str(cumulative_summary_path),
+        "edge_candidates_preview": _safe_dict(
+            latest_summary.get("edge_candidates_preview")
+        ),
+        "edge_stability_preview": _safe_dict(
+            latest_summary.get("edge_stability_preview")
+        ),
         "dataset_overview_comparison": _build_dataset_overview_comparison(
             latest_summary,
             cumulative_summary,
@@ -76,6 +82,10 @@ def _read_summary_file(path: Path) -> dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {}
+
+
+def _safe_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
 def _build_dataset_overview_comparison(
