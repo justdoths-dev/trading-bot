@@ -24,7 +24,8 @@ def _build_analyzer_summary(
         "edge_candidates_preview": {
             "by_horizon": preview_by_horizon or {},
         },
-        "edge_candidate_rows": edge_candidate_rows or {
+        "edge_candidate_rows": edge_candidate_rows
+        or {
             "row_count": 0,
             "rows": [],
             "diagnostic_row_count": 0,
@@ -232,6 +233,8 @@ def test_joined_row_empty_and_fallback_blocked_case_is_surfaced(tmp_path: Path) 
     joined = report["joined_row_formation"]
     mapper = report["mapper_seed_handoff"]
     verdict = report["final_verdict"]
+    assert joined["rows_with_analyzer_embedded_joined_row_block"] == 1
+    assert joined["rows_missing_analyzer_embedded_joined_row_block"] == 0
     assert joined["empty_state_category_counts"]["only_incompatibility_rejections"] == 1
     assert joined["has_only_incompatibility_rejections_count"] == 1
     assert mapper["fallback_blocked_count"] == 1
@@ -373,6 +376,285 @@ def test_mapper_payload_detection_does_not_treat_engine_output_as_mapper_payload
     assert report["data_quality"]["rows_with_engine_output"] == 1
     assert report["data_quality"]["rows_with_mapper_payload"] == 0
     assert report["data_quality"]["rows_with_candidate_seed_diagnostics"] == 1
+
+
+def test_zero_analyzer_coverage_downgrades_final_verdict_and_surfaces_limitations(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "trade_analysis.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {
+                "edge_selection_mapper_payload": {
+                    "candidate_seed_count": 2,
+                    "candidate_seed_diagnostics": {
+                        "seed_source": "latest.edge_candidate_rows",
+                        "candidate_seed_count": 2,
+                        "joined_candidate_row_count": 2,
+                        "dropped_candidate_row_count": 0,
+                        "dropped_candidate_row_reasons": {},
+                        "fallback_blocked": False,
+                        "horizon_diagnostics": [
+                            {"horizon": "15m", "seed_generated_count": 1},
+                            {"horizon": "1h", "seed_generated_count": 1},
+                        ],
+                    },
+                },
+                "edge_selection_output": {
+                    "selection_status": "abstain",
+                    "candidate_seed_count": 2,
+                    "abstain_diagnosis": {
+                        "category": "no_eligible_candidates",
+                        "eligible_candidate_count": 0,
+                        "penalized_candidate_count": 1,
+                        "blocked_candidate_count": 1,
+                    },
+                },
+            },
+            {
+                "edge_selection_mapper_payload": {
+                    "candidate_seed_count": 1,
+                    "candidate_seed_diagnostics": {
+                        "seed_source": "comparison.edge_candidates_comparison",
+                        "candidate_seed_count": 1,
+                        "joined_candidate_row_count": 1,
+                        "dropped_candidate_row_count": 0,
+                        "dropped_candidate_row_reasons": {},
+                        "fallback_blocked": False,
+                        "horizon_diagnostics": [
+                            {"horizon": "4h", "seed_generated_count": 1}
+                        ],
+                    },
+                },
+                "edge_selection_output": {
+                    "selection_status": "blocked",
+                    "candidate_seed_count": 1,
+                    "abstain_diagnosis": {
+                        "category": "all_candidates_blocked",
+                        "eligible_candidate_count": 0,
+                        "penalized_candidate_count": 0,
+                        "blocked_candidate_count": 1,
+                    },
+                },
+            },
+        ],
+    )
+
+    report = report_module.build_report(
+        input_path=path.resolve(),
+        input_resolution="explicit",
+    )
+
+    coverage = report["final_verdict"]["coverage_assessment"]
+    verdict = report["final_verdict"]
+    markdown = report_module.render_markdown(report)
+
+    assert report["data_quality"]["rows_with_analyzer_output"] == 0
+    assert report["data_quality"]["analyzer_coverage_ratio"] == 0.0
+    assert report["data_quality"]["analyzer_layer_diagnosis_reliable"] is False
+    assert verdict["primary_bottleneck_layer"] == "inconclusive"
+    assert verdict["coverage_limited"] is True
+    assert verdict["coverage_limitation_reason"] == "ANALYZER_SNAPSHOTS_MISSING"
+    assert verdict["layer_signal_counts"]["engine"] == 0
+    assert verdict["layer_signal_counts"]["inconclusive"] == 2
+    assert coverage["analyzer_coverage_count"] == 0
+    assert coverage["analyzer_coverage_ratio"] == 0.0
+    assert coverage["analyzer_layer_diagnosis_reliable"] is False
+    assert coverage["analyzer_specific_conclusions_available"] is False
+    assert coverage["rows_with_downstream_diagnostics"] == 2
+    assert coverage["rows_with_downstream_diagnostics_without_analyzer_output"] == 2
+    assert coverage["rows_with_engine_output_without_analyzer_output"] == 2
+    assert "Coverage limitation warning" in markdown
+    assert "Analyzer-layer diagnosis is not reliable for this input" in markdown
+    assert "Analyzer-specific conclusions are unavailable for this input" in markdown
+    assert "- analyzer_embedded_joined_rows:" in markdown
+    assert "- mapper_diagnostic_joined_rows:" in markdown
+
+
+def test_precoverage_engine_verdict_is_downgraded_when_analyzer_coverage_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "trade_analysis.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {
+                "edge_selection_mapper_payload": {
+                    "candidate_seed_count": 2,
+                    "candidate_seed_diagnostics": {
+                        "seed_source": "latest.edge_candidate_rows",
+                        "candidate_seed_count": 2,
+                        "joined_candidate_row_count": 2,
+                        "dropped_candidate_row_count": 0,
+                        "dropped_candidate_row_reasons": {},
+                        "fallback_blocked": False,
+                    },
+                },
+                "edge_selection_output": {
+                    "selection_status": "abstain",
+                    "candidate_seed_count": 2,
+                    "abstain_diagnosis": {
+                        "category": "tied_top_candidates",
+                        "eligible_candidate_count": 2,
+                        "penalized_candidate_count": 0,
+                        "blocked_candidate_count": 0,
+                    },
+                },
+            }
+        ],
+    )
+
+    report = report_module.build_report(
+        input_path=path.resolve(),
+        input_resolution="explicit",
+    )
+
+    verdict = report["final_verdict"]
+    assert verdict["pre_coverage_primary_bottleneck_layer"] == "engine"
+    assert verdict["primary_bottleneck_layer"] == "inconclusive"
+    assert verdict["coverage_limited"] is True
+
+
+def test_precoverage_mapper_verdict_is_downgraded_when_analyzer_coverage_is_unreliable(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "trade_analysis.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {
+                "latest_summary": _build_analyzer_summary(
+                    edge_candidate_rows={
+                        "row_count": 1,
+                        "rows": [
+                            {
+                                "symbol": "BTCUSDT",
+                                "strategy": "swing",
+                                "horizon": "4h",
+                            }
+                        ],
+                        "diagnostic_row_count": 1,
+                        "diagnostic_rows": [],
+                        "empty_reason_summary": {
+                            "empty_state_category": "has_eligible_rows",
+                            "diagnostic_rejection_reason_counts": {},
+                            "diagnostic_category_counts": {},
+                            "identities_blocked_only_by_incompatibility": [],
+                            "strategies_without_analyzer_compatible_horizons": [],
+                            "has_only_incompatibility_rejections": False,
+                            "has_only_weak_or_insufficient_candidates": False,
+                        },
+                        "dropped_row_count": 0,
+                        "dropped_rows": [],
+                    }
+                ),
+                "edge_selection_mapper_payload": {
+                    "candidate_seed_diagnostics": {
+                        "seed_source": "latest.edge_candidate_rows",
+                        "candidate_seed_count": 0,
+                        "joined_candidate_row_count": 1,
+                        "dropped_candidate_row_count": 0,
+                        "dropped_candidate_row_reasons": {},
+                        "fallback_blocked": False,
+                    }
+                },
+            },
+            {
+                "edge_selection_mapper_payload": {
+                    "candidate_seed_count": 1,
+                    "candidate_seed_diagnostics": {
+                        "seed_source": "comparison.edge_candidates_comparison",
+                        "candidate_seed_count": 1,
+                        "joined_candidate_row_count": 1,
+                        "dropped_candidate_row_count": 0,
+                        "dropped_candidate_row_reasons": {},
+                        "fallback_blocked": False,
+                    },
+                },
+                "edge_selection_output": {
+                    "selection_status": "selected",
+                    "candidate_seed_count": 1,
+                    "reason_codes": ["CLEAR_TOP_CANDIDATE"],
+                },
+            },
+        ],
+    )
+
+    report = report_module.build_report(
+        input_path=path.resolve(),
+        input_resolution="explicit",
+    )
+
+    verdict = report["final_verdict"]
+    assert report["data_quality"]["rows_with_analyzer_output"] == 1
+    assert report["data_quality"]["rows_with_engine_output_without_analyzer_output"] == 1
+    assert report["data_quality"]["analyzer_layer_diagnosis_reliable"] is False
+    assert verdict["pre_coverage_primary_bottleneck_layer"] == "mapper"
+    assert verdict["primary_bottleneck_layer"] == "inconclusive"
+    assert verdict["coverage_limited"] is True
+
+
+def test_row_classification_stays_inconclusive_when_engine_data_exists_without_analyzer() -> None:
+    row = report_module.ParsedRow(
+        line_number=1,
+        analyzer_summary=None,
+        analyzer_source=None,
+        analyzer_available_sources=(),
+        mapper_payload={
+            "candidate_seed_count": 2,
+            "candidate_seed_diagnostics": {"candidate_seed_count": 2},
+        },
+        mapper_path="edge_selection_mapper_payload",
+        candidate_seed_diagnostics={
+            "seed_source": "latest.edge_candidate_rows",
+            "candidate_seed_count": 2,
+        },
+        engine_output={
+            "selection_status": "abstain",
+            "candidate_seed_count": 2,
+            "abstain_diagnosis": {
+                "category": "no_eligible_candidates",
+                "eligible_candidate_count": 0,
+                "penalized_candidate_count": 1,
+                "blocked_candidate_count": 1,
+            },
+        },
+        engine_path="edge_selection_output",
+    )
+
+    assert report_module._classify_row_bottleneck(row) == "inconclusive"
+
+
+def test_row_classification_keeps_explicit_engine_only_evidence_without_analyzer() -> None:
+    row = report_module.ParsedRow(
+        line_number=1,
+        analyzer_summary=None,
+        analyzer_source=None,
+        analyzer_available_sources=(),
+        mapper_payload={
+            "candidate_seed_count": 2,
+            "candidate_seed_diagnostics": {"candidate_seed_count": 2},
+        },
+        mapper_path="edge_selection_mapper_payload",
+        candidate_seed_diagnostics={
+            "seed_source": "latest.edge_candidate_rows",
+            "candidate_seed_count": 2,
+        },
+        engine_output={
+            "selection_status": "abstain",
+            "candidate_seed_count": 2,
+            "abstain_diagnosis": {
+                "category": "tied_top_candidates",
+                "eligible_candidate_count": 2,
+                "penalized_candidate_count": 0,
+                "blocked_candidate_count": 0,
+            },
+        },
+        engine_path="edge_selection_output",
+    )
+
+    assert report_module._classify_row_bottleneck(row) == "engine"
 
 
 def test_wrapper_module_imports_and_runs_correctly() -> None:

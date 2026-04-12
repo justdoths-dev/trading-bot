@@ -161,7 +161,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         "rows_with_analyzer_output": report["data_quality"]["rows_with_analyzer_output"],
         "rows_with_mapper_payload": report["data_quality"]["rows_with_mapper_payload"],
         "rows_with_engine_output": report["data_quality"]["rows_with_engine_output"],
+        "analyzer_coverage_ratio": report["data_quality"]["analyzer_coverage_ratio"],
+        "analyzer_layer_diagnosis_reliable": report["data_quality"][
+            "analyzer_layer_diagnosis_reliable"
+        ],
         "primary_bottleneck_layer": report["final_verdict"]["primary_bottleneck_layer"],
+        "final_verdict_coverage_limited": report["final_verdict"]["coverage_limited"],
         "written_paths": written_paths,
     }
     print(json.dumps(summary, indent=2, ensure_ascii=False))
@@ -255,6 +260,41 @@ def build_report(
         "preferred_analyzer_source_counts": analyzer_section[
             "preferred_analyzer_source_counts"
         ],
+        "analyzer_coverage_ratio": _safe_float(
+            _safe_dict(final_verdict.get("coverage_assessment")).get(
+                "analyzer_coverage_ratio"
+            )
+        )
+        or 0.0,
+        "rows_with_downstream_diagnostics": _safe_int(
+            _safe_dict(final_verdict.get("coverage_assessment")).get(
+                "rows_with_downstream_diagnostics"
+            )
+        )
+        or 0,
+        "rows_with_downstream_diagnostics_without_analyzer_output": _safe_int(
+            _safe_dict(final_verdict.get("coverage_assessment")).get(
+                "rows_with_downstream_diagnostics_without_analyzer_output"
+            )
+        )
+        or 0,
+        "rows_with_mapper_payload_without_analyzer_output": _safe_int(
+            _safe_dict(final_verdict.get("coverage_assessment")).get(
+                "rows_with_mapper_payload_without_analyzer_output"
+            )
+        )
+        or 0,
+        "rows_with_engine_output_without_analyzer_output": _safe_int(
+            _safe_dict(final_verdict.get("coverage_assessment")).get(
+                "rows_with_engine_output_without_analyzer_output"
+            )
+        )
+        or 0,
+        "analyzer_layer_diagnosis_reliable": bool(
+            _safe_dict(final_verdict.get("coverage_assessment")).get(
+                "analyzer_layer_diagnosis_reliable"
+            )
+        ),
     }
 
     return {
@@ -287,79 +327,150 @@ def render_markdown(report: dict[str, Any]) -> str:
     mapper = _safe_dict(report.get("mapper_seed_handoff"))
     engine = _safe_dict(report.get("engine_outcome"))
     verdict = _safe_dict(report.get("final_verdict"))
+    coverage = _safe_dict(verdict.get("coverage_assessment"))
 
-    lines = [
-        f"# {REPORT_TITLE}",
-        "",
-        "## Executive Summary",
-        "",
-        f"- input_path: {inputs.get('trade_analysis_path')}",
-        f"- parsed_rows: {data_quality.get('parsed_row_count', 0)}",
-        (
-            "- coverage: "
-            f"analyzer={data_quality.get('rows_with_analyzer_output', 0)}, "
-            f"mapper={data_quality.get('rows_with_mapper_payload', 0)}, "
-            f"engine={data_quality.get('rows_with_engine_output', 0)}"
-        ),
-        f"- primary_bottleneck_layer: {verdict.get('primary_bottleneck_layer', 'inconclusive')}",
-        "",
-        "## Analyzer Findings",
-        "",
-        (
-            "- preview_state_counts: "
-            f"failed_absolute_minimum={analyzer.get('failed_absolute_minimum_visibility_count', 0)}, "
-            f"weak_or_borderline={analyzer.get('survived_sample_gate_but_weak_or_borderline_count', 0)}, "
-            f"passed_quality_gate={analyzer.get('passed_quality_gate_count', 0)}"
-        ),
-        (
-            "- visible_group_slots: "
-            f"top_strategy={_safe_dict(analyzer.get('visible_group_slot_counts')).get('top_strategy', 0)}, "
-            f"top_symbol={_safe_dict(analyzer.get('visible_group_slot_counts')).get('top_symbol', 0)}, "
-            f"top_alignment_state={_safe_dict(analyzer.get('visible_group_slot_counts')).get('top_alignment_state', 0)}"
-        ),
-        "",
-        "## Joined-Row / Mapper Findings",
-        "",
-        (
-            "- joined_rows: "
-            f"total={joined.get('total_joined_row_count', 0)}, "
-            f"diagnostic={joined.get('diagnostic_row_count', 0)}, "
-            f"dropped={joined.get('dropped_row_count', 0)}"
-        ),
-        (
-            "- empty_state_categories: "
-            f"{_format_count_dict(joined.get('empty_state_category_counts'))}"
-        ),
-        (
-            "- mapper_seeds: "
-            f"total={mapper.get('candidate_seed_count_total', 0)}, "
-            f"fallback_blocked={mapper.get('fallback_blocked_count', 0)}, "
-            f"joined_rows_present_but_empty={mapper.get('joined_rows_present_but_empty_count', 0)}"
-        ),
-        (
-            "- dropped_candidate_row_reasons: "
-            f"{_format_count_dict(mapper.get('dropped_candidate_row_reasons'))}"
-        ),
-        "",
-        "## Engine Findings",
-        "",
-        (
-            "- selection_status_counts: "
-            f"{_format_count_dict(engine.get('selection_status_counts'))}"
-        ),
-        (
-            "- abstain_category_counts: "
-            f"{_format_count_dict(engine.get('abstain_category_counts'))}"
-        ),
-        (
-            "- aggregate_candidate_status_counts: "
-            f"{_format_count_dict(engine.get('aggregate_candidate_status_counts'))}"
-        ),
-        "",
-        "## Final Bottleneck Judgment",
-        "",
-        f"- primary_bottleneck_layer: {verdict.get('primary_bottleneck_layer', 'inconclusive')}",
-    ]
+    lines = [f"# {REPORT_TITLE}", ""]
+
+    if coverage.get("analyzer_layer_diagnosis_reliable") is False:
+        analyzer_coverage_count = _safe_int(coverage.get("analyzer_coverage_count")) or 0
+        parsed_row_count = data_quality.get("parsed_row_count", 0)
+        analyzer_coverage_ratio = _safe_float(coverage.get("analyzer_coverage_ratio")) or 0.0
+        limitation_note = _text(coverage.get("coverage_limitation_note"))
+
+        lines.extend(
+            [
+                "> **Coverage limitation warning**",
+                (
+                    "> Embedded analyzer snapshots were available on "
+                    f"{analyzer_coverage_count}/{parsed_row_count} parsed rows "
+                    f"({_format_ratio(analyzer_coverage_ratio)})."
+                ),
+                (
+                    "> Analyzer-layer diagnosis is not reliable for this input, "
+                    "so analyzer-to-mapper-to-engine conclusions are coverage-limited."
+                ),
+                (
+                    "> Final verdict coverage-limited: "
+                    f"{_format_bool(verdict.get('coverage_limited'))}."
+                ),
+            ]
+        )
+        if limitation_note is not None:
+            lines.append(f"> {limitation_note}")
+        lines.append("")
+
+    lines.extend(
+        [
+            "## Executive Summary",
+            "",
+            f"- input_path: {inputs.get('trade_analysis_path')}",
+            f"- parsed_rows: {data_quality.get('parsed_row_count', 0)}",
+            (
+                "- coverage: "
+                f"analyzer={data_quality.get('rows_with_analyzer_output', 0)}, "
+                f"mapper={data_quality.get('rows_with_mapper_payload', 0)}, "
+                f"engine={data_quality.get('rows_with_engine_output', 0)}"
+            ),
+            (
+                "- analyzer_coverage: "
+                f"{coverage.get('analyzer_coverage_count', 0)}/"
+                f"{data_quality.get('parsed_row_count', 0)} "
+                f"({_format_ratio(_safe_float(coverage.get('analyzer_coverage_ratio')) or 0.0)})"
+            ),
+            (
+                "- analyzer_layer_diagnosis_reliable: "
+                f"{_format_bool(coverage.get('analyzer_layer_diagnosis_reliable'))}"
+            ),
+            (
+                "- final_verdict_coverage_limited: "
+                f"{_format_bool(verdict.get('coverage_limited'))}"
+            ),
+            (
+                "- pre_coverage_primary_bottleneck_layer: "
+                f"{verdict.get('pre_coverage_primary_bottleneck_layer', 'inconclusive')}"
+            ),
+            f"- primary_bottleneck_layer: {verdict.get('primary_bottleneck_layer', 'inconclusive')}",
+            "",
+            "## Analyzer Findings",
+            "",
+            (
+                "- analyzer_specific_conclusions_available: "
+                f"{_format_bool(coverage.get('analyzer_specific_conclusions_available'))}"
+            ),
+            (
+                "- analyzer_embedded_joined_row_block_rows: "
+                f"available={joined.get('rows_with_analyzer_embedded_joined_row_block', 0)}, "
+                f"missing={joined.get('rows_missing_analyzer_embedded_joined_row_block', 0)}"
+            ),
+            (
+                "- preview_state_counts: "
+                f"failed_absolute_minimum={analyzer.get('failed_absolute_minimum_visibility_count', 0)}, "
+                f"weak_or_borderline={analyzer.get('survived_sample_gate_but_weak_or_borderline_count', 0)}, "
+                f"passed_quality_gate={analyzer.get('passed_quality_gate_count', 0)}"
+            ),
+            (
+                "- visible_group_slots: "
+                f"top_strategy={_safe_dict(analyzer.get('visible_group_slot_counts')).get('top_strategy', 0)}, "
+                f"top_symbol={_safe_dict(analyzer.get('visible_group_slot_counts')).get('top_symbol', 0)}, "
+                f"top_alignment_state={_safe_dict(analyzer.get('visible_group_slot_counts')).get('top_alignment_state', 0)}"
+            ),
+            "",
+            "## Joined-Row / Mapper Findings",
+            "",
+            (
+                "- analyzer_embedded_joined_rows: "
+                f"total={joined.get('analyzer_embedded_total_joined_row_count', 0)}, "
+                f"diagnostic={joined.get('analyzer_embedded_diagnostic_row_count', 0)}, "
+                f"dropped={joined.get('analyzer_embedded_dropped_row_count', 0)}"
+            ),
+            (
+                "- analyzer_embedded_empty_state_categories: "
+                f"{_format_count_dict(joined.get('empty_state_category_counts'))}"
+            ),
+            (
+                "- mapper_diagnostic_joined_rows: "
+                f"joined_candidate_rows_total={mapper.get('mapper_diagnostic_joined_candidate_row_count_total', 0)}, "
+                f"dropped_candidate_rows_total={mapper.get('mapper_diagnostic_dropped_candidate_row_count_total', 0)}"
+            ),
+            (
+                "- mapper_seed_handoff: "
+                f"total={mapper.get('candidate_seed_count_total', 0)}, "
+                f"fallback_blocked={mapper.get('fallback_blocked_count', 0)}, "
+                f"joined_rows_present_but_empty={mapper.get('joined_rows_present_but_empty_count', 0)}"
+            ),
+            (
+                "- dropped_candidate_row_reasons: "
+                f"{_format_count_dict(mapper.get('dropped_candidate_row_reasons'))}"
+            ),
+            (
+                "- note: analyzer_embedded_* metrics come from embedded analyzer snapshots; "
+                "mapper_diagnostic_* metrics come from mapper candidate_seed_diagnostics and may still be present when analyzer snapshots are missing."
+            ),
+            "",
+            "## Engine Findings",
+            "",
+            (
+                "- selection_status_counts: "
+                f"{_format_count_dict(engine.get('selection_status_counts'))}"
+            ),
+            (
+                "- abstain_category_counts: "
+                f"{_format_count_dict(engine.get('abstain_category_counts'))}"
+            ),
+            (
+                "- aggregate_candidate_status_counts: "
+                f"{_format_count_dict(engine.get('aggregate_candidate_status_counts'))}"
+            ),
+            "",
+            "## Final Bottleneck Judgment",
+            "",
+            (
+                "- pre_coverage_primary_bottleneck_layer: "
+                f"{verdict.get('pre_coverage_primary_bottleneck_layer', 'inconclusive')}"
+            ),
+            f"- primary_bottleneck_layer: {verdict.get('primary_bottleneck_layer', 'inconclusive')}",
+        ]
+    )
 
     for bullet in _safe_list(verdict.get("evidence_bullets")):
         lines.append(f"- {bullet}")
@@ -453,9 +564,7 @@ def _parse_row(loaded: LoadedRow) -> ParsedRow:
 def _build_analyzer_section(rows: list[ParsedRow]) -> dict[str, Any]:
     preferred_source_counts: Counter[str] = Counter()
     visible_group_slot_counts: Counter[str] = Counter()
-    visible_group_value_counts = {
-        key: Counter() for key in PREVIEW_SLOT_KEYS
-    }
+    visible_group_value_counts = {key: Counter() for key in PREVIEW_SLOT_KEYS}
     horizon_sections: dict[str, dict[str, Counter[str]]] = {
         horizon: {
             "sample_gate_counts": Counter(),
@@ -507,9 +616,7 @@ def _build_analyzer_section(rows: list[ParsedRow]) -> dict[str, Any]:
             sample_gate = _text(horizon_payload.get("sample_gate")) or "missing"
             quality_gate = _text(horizon_payload.get("quality_gate")) or "missing"
             candidate_strength = _text(horizon_payload.get("candidate_strength")) or "missing"
-            visibility_reason = (
-                _text(horizon_payload.get("visibility_reason")) or "missing"
-            )
+            visibility_reason = _text(horizon_payload.get("visibility_reason")) or "missing"
 
             horizon_sections[horizon]["sample_gate_counts"][sample_gate] += 1
             horizon_sections[horizon]["quality_gate_counts"][quality_gate] += 1
@@ -581,18 +688,23 @@ def _build_joined_row_section(rows: list[ParsedRow]) -> dict[str, Any]:
     strategies_without_analyzer_compatible_horizons_count = 0
     has_only_incompatibility_rejections_count = 0
     has_only_weak_or_insufficient_candidates_count = 0
+    rows_with_analyzer_embedded_joined_row_block = 0
+    rows_missing_analyzer_embedded_joined_row_block = 0
     rows_missing_empty_reason_summary = 0
 
     for row in rows:
         summary = row.analyzer_summary
         if summary is None:
+            rows_missing_analyzer_embedded_joined_row_block += 1
             rows_missing_empty_reason_summary += 1
             continue
 
         block = _extract_edge_candidate_rows_block(summary)
         if block is None:
+            rows_missing_analyzer_embedded_joined_row_block += 1
             rows_missing_empty_reason_summary += 1
             continue
+        rows_with_analyzer_embedded_joined_row_block += 1
 
         total_joined_row_count += _safe_int(block.get("row_count")) or len(
             _safe_list(block.get("rows"))
@@ -633,6 +745,16 @@ def _build_joined_row_section(rows: list[ParsedRow]) -> dict[str, Any]:
             has_only_weak_or_insufficient_candidates_count += 1
 
     return {
+        "evidence_source": "analyzer_embedded_edge_candidate_rows",
+        "rows_with_analyzer_embedded_joined_row_block": (
+            rows_with_analyzer_embedded_joined_row_block
+        ),
+        "rows_missing_analyzer_embedded_joined_row_block": (
+            rows_missing_analyzer_embedded_joined_row_block
+        ),
+        "analyzer_embedded_total_joined_row_count": total_joined_row_count,
+        "analyzer_embedded_diagnostic_row_count": diagnostic_row_count,
+        "analyzer_embedded_dropped_row_count": dropped_row_count,
         "total_joined_row_count": total_joined_row_count,
         "diagnostic_row_count": diagnostic_row_count,
         "dropped_row_count": dropped_row_count,
@@ -706,12 +828,17 @@ def _build_mapper_section(rows: list[ParsedRow]) -> dict[str, Any]:
             candidate_seed_count_by_horizon[horizon] += count
 
     return {
+        "evidence_source": "mapper_candidate_seed_diagnostics",
         "seed_source_counts": _sorted_counter_dict(seed_source_counts),
         "candidate_seed_count_total": candidate_seed_count_total,
         "candidate_seed_count_distribution": _sorted_counter_dict(
             candidate_seed_count_distribution
         ),
         "candidate_seed_count_by_horizon": candidate_seed_count_by_horizon,
+        "mapper_diagnostic_joined_candidate_row_count_total": joined_candidate_row_count_total,
+        "mapper_diagnostic_dropped_candidate_row_count_total": (
+            dropped_candidate_row_count_total
+        ),
         "joined_candidate_row_count_total": joined_candidate_row_count_total,
         "dropped_candidate_row_count_total": dropped_candidate_row_count_total,
         "dropped_candidate_row_reasons": _sorted_counter_dict(dropped_candidate_row_reasons),
@@ -782,7 +909,15 @@ def _build_final_verdict(
     )
 
     rows_with_analyzer_output = _safe_int(analyzer_section.get("rows_with_analyzer_output")) or 0
-    rows_missing_analyzer_output = _safe_int(analyzer_section.get("rows_missing_analyzer_output")) or 0
+    rows_missing_analyzer_output = _safe_int(
+        analyzer_section.get("rows_missing_analyzer_output")
+    ) or 0
+    coverage_assessment = _build_analyzer_coverage_assessment(
+        rows=rows,
+        row_count=row_count,
+        rows_with_analyzer_output=rows_with_analyzer_output,
+        rows_missing_analyzer_output=rows_missing_analyzer_output,
+    )
     rows_with_engine_output = sum(
         int(value)
         for value in _safe_dict(engine_section.get("selection_status_counts")).values()
@@ -823,29 +958,60 @@ def _build_final_verdict(
         "none": row_bottleneck_counts.get("none", 0),
     }
 
-    primary_bottleneck_layer = _select_primary_bottleneck(
+    pre_coverage_primary_bottleneck_layer = _select_primary_bottleneck(
         {
             "analyzer": layer_signal_counts["analyzer"],
             "mapper": layer_signal_counts["mapper"],
             "engine": layer_signal_counts["engine"],
         }
     )
+    primary_bottleneck_layer = pre_coverage_primary_bottleneck_layer
+    coverage_limited = False
+
+    analyzer_reliable = coverage_assessment["analyzer_layer_diagnosis_reliable"] is True
+    has_downstream_diagnostics = coverage_assessment["rows_with_downstream_diagnostics"] > 0
+
+    if (
+        analyzer_reliable is False
+        and has_downstream_diagnostics
+        and primary_bottleneck_layer in {"mapper", "engine"}
+    ):
+        primary_bottleneck_layer = "inconclusive"
+        coverage_limited = True
+    elif analyzer_reliable is False and row_count > 0:
+        coverage_limited = True
 
     evidence_bullets: list[str] = []
     evidence_bullets.append(
-        f"Analyzer output was embedded on {rows_with_analyzer_output}/{row_count} parsed rows; {rows_missing_analyzer_output} rows had no embedded analyzer snapshot."
+        "Analyzer output was embedded on "
+        f"{rows_with_analyzer_output}/{row_count} parsed rows "
+        f"({_format_ratio(coverage_assessment['analyzer_coverage_ratio'])}); "
+        f"{rows_missing_analyzer_output} rows had no embedded analyzer snapshot."
     )
+    evidence_bullets.append(
+        "Analyzer-layer diagnosis reliability was "
+        f"{_format_bool(coverage_assessment['analyzer_layer_diagnosis_reliable'])}; "
+        f"pre-coverage primary_bottleneck_layer={pre_coverage_primary_bottleneck_layer}; "
+        f"final primary_bottleneck_layer={primary_bottleneck_layer}; "
+        f"final verdict coverage-limited={_format_bool(coverage_limited)}."
+    )
+    if coverage_assessment["coverage_limitation_note"] is not None:
+        evidence_bullets.append(coverage_assessment["coverage_limitation_note"])
     evidence_bullets.append(
         "Analyzer preview states across all horizon snapshots were "
         f"failed_absolute_minimum={preview_failed}, weak_or_borderline={preview_weak}, passed_quality_gate={preview_passed}."
     )
     evidence_bullets.append(
-        "Joined-row formation produced "
-        f"{joined_total} engine-facing joined rows, {joined_section.get('diagnostic_row_count', 0)} diagnostic rows, and {joined_section.get('dropped_row_count', 0)} dropped rows."
+        "Analyzer-embedded joined-row formation produced "
+        f"{joined_total} engine-facing joined rows, "
+        f"{joined_section.get('analyzer_embedded_diagnostic_row_count', 0)} diagnostic rows, "
+        f"and {joined_section.get('analyzer_embedded_dropped_row_count', 0)} dropped rows."
     )
     evidence_bullets.append(
-        "Mapper handoff produced "
-        f"{seed_total} total seeds with fallback_blocked={fallback_blocked}; "
+        "Mapper diagnostics recorded "
+        f"joined_candidate_rows_total={mapper_section.get('mapper_diagnostic_joined_candidate_row_count_total', 0)}, "
+        f"dropped_candidate_rows_total={mapper_section.get('mapper_diagnostic_dropped_candidate_row_count_total', 0)}, "
+        f"and {seed_total} total seeds with fallback_blocked={fallback_blocked}; "
         f"{JOINED_ROWS_PRESENT_BUT_EMPTY} appeared {joined_present_but_empty} times."
     )
     if dropped_reason_total > 0:
@@ -872,9 +1038,13 @@ def _build_final_verdict(
     )
 
     return {
+        "pre_coverage_primary_bottleneck_layer": pre_coverage_primary_bottleneck_layer,
         "primary_bottleneck_layer": primary_bottleneck_layer,
+        "coverage_limited": coverage_limited,
+        "coverage_limitation_reason": coverage_assessment["coverage_limitation_reason"],
+        "coverage_assessment": coverage_assessment,
         "layer_signal_counts": layer_signal_counts,
-        "evidence_bullets": evidence_bullets[:8],
+        "evidence_bullets": evidence_bullets,
     }
 
 
@@ -901,7 +1071,11 @@ def _classify_row_bottleneck(row: ParsedRow) -> str:
     selection_status = _text(_safe_dict(row.engine_output).get("selection_status"))
 
     if seed_count > 0:
-        if selection_status in {"abstain", "blocked"}:
+        if selection_status in {"abstain", "blocked"} and row.analyzer_summary is not None:
+            return "engine"
+        if selection_status in {"abstain", "blocked"} and _has_explicit_engine_only_evidence(
+            row
+        ):
             return "engine"
         if selection_status == "selected":
             return "none"
@@ -954,6 +1128,99 @@ def _classify_row_bottleneck(row: ParsedRow) -> str:
         return "analyzer"
 
     return "inconclusive"
+
+
+def _build_analyzer_coverage_assessment(
+    *,
+    rows: list[ParsedRow],
+    row_count: int,
+    rows_with_analyzer_output: int,
+    rows_missing_analyzer_output: int,
+) -> dict[str, Any]:
+    rows_with_downstream_diagnostics = 0
+    rows_with_downstream_diagnostics_without_analyzer_output = 0
+    rows_with_mapper_payload_without_analyzer_output = 0
+    rows_with_engine_output_without_analyzer_output = 0
+
+    for row in rows:
+        has_downstream_diagnostics = any(
+            (
+                row.mapper_payload is not None,
+                row.candidate_seed_diagnostics is not None,
+                row.engine_output is not None,
+            )
+        )
+        if has_downstream_diagnostics:
+            rows_with_downstream_diagnostics += 1
+            if row.analyzer_summary is None:
+                rows_with_downstream_diagnostics_without_analyzer_output += 1
+
+        if row.mapper_payload is not None and row.analyzer_summary is None:
+            rows_with_mapper_payload_without_analyzer_output += 1
+
+        if row.engine_output is not None and row.analyzer_summary is None:
+            rows_with_engine_output_without_analyzer_output += 1
+
+    analyzer_coverage_ratio = _compute_ratio(rows_with_analyzer_output, row_count)
+    analyzer_specific_conclusions_available = rows_with_analyzer_output > 0
+    analyzer_layer_diagnosis_reliable = (
+        analyzer_specific_conclusions_available
+        and rows_with_downstream_diagnostics_without_analyzer_output == 0
+    )
+
+    coverage_limitation_reason: str | None = None
+    coverage_limitation_note: str | None = None
+
+    if rows_with_analyzer_output <= 0:
+        coverage_limitation_reason = "ANALYZER_SNAPSHOTS_MISSING"
+        coverage_limitation_note = (
+            "Analyzer-specific conclusions are unavailable for this input because "
+            "embedded analyzer snapshots were missing on every parsed row."
+        )
+    elif rows_with_downstream_diagnostics_without_analyzer_output > 0:
+        coverage_limitation_reason = "DOWNSTREAM_ROWS_MISSING_ANALYZER_SNAPSHOTS"
+        coverage_limitation_note = (
+            "Some rows reached mapper or engine diagnostics without an embedded analyzer "
+            "snapshot, so downstream bottleneck claims must be treated as inconclusive."
+        )
+
+    return {
+        "analyzer_coverage_count": rows_with_analyzer_output,
+        "analyzer_missing_count": rows_missing_analyzer_output,
+        "analyzer_coverage_ratio": analyzer_coverage_ratio,
+        "rows_with_downstream_diagnostics": rows_with_downstream_diagnostics,
+        "rows_with_downstream_diagnostics_without_analyzer_output": (
+            rows_with_downstream_diagnostics_without_analyzer_output
+        ),
+        "rows_with_mapper_payload_without_analyzer_output": (
+            rows_with_mapper_payload_without_analyzer_output
+        ),
+        "rows_with_engine_output_without_analyzer_output": (
+            rows_with_engine_output_without_analyzer_output
+        ),
+        "analyzer_specific_conclusions_available": analyzer_specific_conclusions_available,
+        "analyzer_layer_diagnosis_reliable": analyzer_layer_diagnosis_reliable,
+        "coverage_limitation_reason": coverage_limitation_reason,
+        "coverage_limitation_note": coverage_limitation_note,
+    }
+
+
+def _has_explicit_engine_only_evidence(row: ParsedRow) -> bool:
+    output = _safe_dict(row.engine_output)
+    if not output:
+        return False
+
+    selection_status = _text(output.get("selection_status"))
+    if selection_status not in {"abstain", "blocked"}:
+        return False
+
+    abstain = _safe_dict(output.get("abstain_diagnosis"))
+    abstain_category = _text(abstain.get("category"))
+    if abstain_category == "tied_top_candidates":
+        return True
+
+    candidate_status_counts = _extract_engine_candidate_status_counts(output)
+    return candidate_status_counts.get("eligible", 0) > 0
 
 
 def _row_preview_state_counts(analyzer_summary: dict[str, Any]) -> dict[str, int]:
@@ -1381,6 +1648,22 @@ def _safe_int(value: Any) -> int | None:
     return None
 
 
+def _safe_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return float(stripped)
+        except ValueError:
+            return None
+    return None
+
+
 def _text(value: Any) -> str | None:
     if value is None:
         return None
@@ -1403,6 +1686,19 @@ def _format_count_dict(value: Any) -> str:
     return ", ".join(items)
 
 
+def _compute_ratio(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return numerator / denominator
+
+
+def _format_ratio(value: float) -> str:
+    return f"{value:.1%}"
+
+
+def _format_bool(value: Any) -> str:
+    return "yes" if value else "no"
+
+
 if __name__ == "__main__":
     main()
-
