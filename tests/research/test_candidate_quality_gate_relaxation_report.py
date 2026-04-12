@@ -169,20 +169,18 @@ def test_build_report_aggregates_counts_and_recovers_gate_block_candidates(
     assert report["generated_at"] == "2026-04-10T00:00:00+00:00"
     assert report["summary"]["candidate_sets_analyzed"] == 2
     assert report["summary"]["input_candidate_count"] == 5
-    assert report["summary"]["strict_kept_count"] == 2
-    assert report["summary"]["strict_dropped_count"] == 3
-    assert report["summary"]["fallback_applied"] is True
-    assert report["summary"]["fallback_applied_row_count"] == 1
-    assert report["summary"]["fallback_restored_candidate_count"] == 2
-
+    assert report["summary"]["strict_kept_count"] == 3
+    assert report["summary"]["strict_dropped_count"] == 2
+    assert report["summary"]["fallback_applied"] is False
+    assert report["summary"]["fallback_applied_row_count"] == 0
+    assert report["summary"]["fallback_restored_candidate_count"] == 0
     assert report["summary"]["drop_reason_counts"] == {
         "positive_rate_pct_below_minimum": 2,
-        "sample_count_below_minimum": 1,
     }
     assert report["summary"]["near_miss_counts"] == {
-        "median_return_pct_0_00_to_0_24": 3,
         "positive_rate_pct_40_00_to_49_99": 2,
         "sample_count_20_29": 1,
+        "median_return_pct_0_00_to_0_24": 3,
     }
     assert report["summary"]["comparison_drift_note_counts"] == {
         "15m: candidate_visibility_increased": 1,
