@@ -178,6 +178,36 @@ def _ranked_group(
     }
 
 
+def _joined_horizon_rows(
+    *,
+    horizon: str,
+    up_count: int,
+    down_count: int,
+    flat_count: int = 0,
+    up_return: float = 0.35,
+    down_return: float = -0.05,
+    flat_return: float = 0.0,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+
+    for label, count, future_return in (
+        ("up", up_count, up_return),
+        ("down", down_count, down_return),
+        ("flat", flat_count, flat_return),
+    ):
+        for _ in range(count):
+            rows.append(
+                {
+                    "symbol": "BTCUSDT",
+                    "selected_strategy": "intraday",
+                    f"future_label_{horizon}": label,
+                    f"future_return_{horizon}": future_return,
+                }
+            )
+
+    return rows
+
+
 def test_run_research_analyzer_handles_valid_records(
     monkeypatch,
     tmp_path: Path,
@@ -691,7 +721,7 @@ def test_score_candidate_strength_allows_one_supporting_major_deficit_when_score
     )
 
 
-def test_score_candidate_strength_keeps_sample_count_critical_even_with_good_supporting_metrics() -> None:
+def test_score_candidate_strength_allows_near_floor_sample_deficit_to_recover_when_other_metrics_are_healthy() -> None:
     diagnostics = research_analyzer._score_candidate_strength_diagnostics(
         sample_count=35,
         median_future_return_pct=0.35,
@@ -700,11 +730,101 @@ def test_score_candidate_strength_keeps_sample_count_critical_even_with_good_sup
     )
 
     assert "sample_count_below_emerging_moderate" in diagnostics["major_deficits"]
-    assert diagnostics["major_deficit_breakdown"]["critical"] == [
+    assert diagnostics["major_deficit_breakdown"]["critical"] == []
+    assert diagnostics["major_deficit_breakdown"]["supporting"] == [
         "sample_count_below_emerging_moderate"
     ]
+    assert (
+        diagnostics["aggregate_score"]
+        >= research_analyzer.MODERATE_WITH_ONE_SUPPORTING_DEFICIT_MIN_SCORE
+    )
+    assert diagnostics["final_classification"] == "moderate"
+    assert (
+        diagnostics["classification_reason"]
+        == "cleared_weighted_moderate_profile_with_one_supporting_deficit"
+    )
+
+
+def test_score_candidate_strength_keeps_near_floor_multi_deficit_profiles_weak() -> None:
+    diagnostics = research_analyzer._score_candidate_strength_diagnostics(
+        sample_count=35,
+        median_future_return_pct=0.35,
+        positive_rate_pct=57.0,
+        robustness_value=45.0,
+    )
+
+    assert diagnostics["major_deficit_breakdown"]["critical"] == []
+    assert diagnostics["major_deficit_breakdown"]["supporting"] == [
+        "sample_count_below_emerging_moderate",
+        "robustness_below_emerging_moderate",
+    ]
+    assert (
+        diagnostics["aggregate_score"]
+        >= research_analyzer.MODERATE_WITH_TWO_SUPPORTING_DEFICITS_MIN_SCORE
+    )
     assert diagnostics["final_classification"] == "weak"
-    assert diagnostics["classification_reason"] == "critical_or_unknown_major_deficit_present"
+    assert diagnostics["classification_reason"] == "two_supporting_deficits_but_sample_not_moderate"
+
+
+def test_evaluate_joined_edge_candidate_horizon_selects_near_floor_healthy_candidate() -> None:
+    evaluation = research_analyzer._evaluate_joined_edge_candidate_horizon(
+        symbol="BTCUSDT",
+        strategy="intraday",
+        horizon="15m",
+        rows=_joined_horizon_rows(horizon="15m", up_count=20, down_count=15),
+    )
+
+    diagnostics = evaluation["candidate_strength_diagnostics"]
+
+    assert evaluation["status"] == "selected"
+    assert evaluation["sample_gate"] == "passed"
+    assert evaluation["quality_gate"] == "passed"
+    assert evaluation["candidate_strength"] == "moderate"
+    assert evaluation["rejection_reason"] is None
+    assert evaluation["rejection_reasons"] == []
+    assert diagnostics["major_deficit_breakdown"]["supporting"] == [
+        "sample_count_below_emerging_moderate"
+    ]
+
+
+def test_evaluate_joined_edge_candidate_horizon_keeps_below_floor_candidates_blocked() -> None:
+    evaluation = research_analyzer._evaluate_joined_edge_candidate_horizon(
+        symbol="BTCUSDT",
+        strategy="intraday",
+        horizon="15m",
+        rows=_joined_horizon_rows(horizon="15m", up_count=20, down_count=9),
+    )
+
+    assert evaluation["status"] == "rejected"
+    assert evaluation["rejection_reason"] == "failed_absolute_minimum_gate"
+    assert "sample_count_below_absolute_floor" in evaluation["rejection_reasons"]
+    assert evaluation["sample_gate"] == "failed"
+    assert evaluation["quality_gate"] == "failed"
+    assert evaluation["candidate_strength"] == "insufficient_data"
+    assert evaluation["candidate_strength_diagnostics"] is None
+
+
+def test_evaluate_joined_edge_candidate_horizon_keeps_non_positive_median_blocked() -> None:
+    evaluation = research_analyzer._evaluate_joined_edge_candidate_horizon(
+        symbol="BTCUSDT",
+        strategy="intraday",
+        horizon="15m",
+        rows=_joined_horizon_rows(
+            horizon="15m",
+            up_count=20,
+            down_count=15,
+            up_return=-0.01,
+            down_return=-0.05,
+        ),
+    )
+
+    assert evaluation["status"] == "rejected"
+    assert evaluation["rejection_reason"] == "failed_absolute_minimum_gate"
+    assert "median_future_return_non_positive" in evaluation["rejection_reasons"]
+    assert evaluation["sample_gate"] == "failed"
+    assert evaluation["quality_gate"] == "failed"
+    assert evaluation["candidate_strength"] == "insufficient_data"
+    assert evaluation["candidate_strength_diagnostics"] is None
 
 
 def test_score_candidate_strength_treats_sub_emerging_positive_median_as_supporting_not_critical() -> None:
@@ -956,3 +1076,64 @@ def test_candidate_metric_summary_includes_classification_reason() -> None:
     )
 
     assert "classification_reason=" in summary
+
+
+def test_extract_edge_candidate_promotes_near_floor_healthy_candidate_to_moderate() -> None:
+    result = research_analyzer._extract_edge_candidate(
+        _ranked_group(
+            "near_floor_viable",
+            sample_count=35,
+            labeled_count=35,
+            coverage_pct=100.0,
+            median_future_return_pct=0.35,
+            positive_rate_pct=57.0,
+            robustness_pct=53.0,
+        )
+    )
+
+    diagnostics = result["candidate_strength_diagnostics"]
+
+    assert result["group"] == "near_floor_viable"
+    assert result["sample_gate"] == "passed"
+    assert result["quality_gate"] == "passed"
+    assert result["candidate_strength"] == "moderate"
+    assert result["visibility_reason"] == "passed_sample_and_quality_gate"
+    assert diagnostics["major_deficit_breakdown"]["critical"] == []
+    assert diagnostics["major_deficit_breakdown"]["supporting"] == [
+        "sample_count_below_emerging_moderate"
+    ]
+    assert (
+        diagnostics["classification_reason"]
+        == "cleared_weighted_moderate_profile_with_one_supporting_deficit"
+    )
+
+
+def test_build_edge_candidates_preview_marks_near_floor_healthy_candidate_as_quality_passed() -> None:
+    strategy_lab = {
+        "ranking": {
+            "15m": {
+                "by_strategy": _ranked_group(
+                    "near_floor_viable",
+                    sample_count=35,
+                    labeled_count=35,
+                    coverage_pct=100.0,
+                    median_future_return_pct=0.35,
+                    positive_rate_pct=57.0,
+                    robustness_pct=53.0,
+                ),
+            },
+            "1h": {},
+            "4h": {},
+        }
+    }
+
+    preview = research_analyzer._build_edge_candidates_preview(strategy_lab)
+    fifteen = preview["by_horizon"]["15m"]
+
+    assert fifteen["top_strategy"]["group"] == "near_floor_viable"
+    assert fifteen["top_strategy"]["candidate_strength"] == "moderate"
+    assert fifteen["top_strategy"]["quality_gate"] == "passed"
+    assert fifteen["sample_gate"] == "passed"
+    assert fifteen["quality_gate"] == "passed"
+    assert fifteen["candidate_strength"] == "moderate"
+    assert fifteen["visibility_reason"] == "passed_sample_and_quality_gate"
