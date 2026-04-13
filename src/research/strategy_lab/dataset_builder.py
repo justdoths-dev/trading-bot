@@ -2,17 +2,18 @@ from __future__ import annotations
 
 import gzip
 import json
-import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+from src.research.inputs.current_trade_analysis_resolver import (
+    discover_current_trade_analysis_files,
+)
 
 DEFAULT_DATASET_PATH = Path(__file__).resolve().parents[3] / "logs" / "trade_analysis.jsonl"
 
 DEFAULT_LATEST_WINDOW_HOURS = 36
 DEFAULT_LATEST_MAX_ROWS = 2500
-
-_ROTATION_PATTERN = re.compile(r"^trade_analysis\.jsonl(?:\.(\d+)(?:\.gz)?)?$")
 
 
 def load_jsonl_records(
@@ -90,20 +91,15 @@ def resolve_source_files(
     if not log_dir.exists():
         raise FileNotFoundError(f"Dataset directory not found: {log_dir}")
 
-    candidates: list[tuple[int, Path]] = []
-
-    for path in log_dir.glob("trade_analysis.jsonl*"):
-        rotation_index = _rotation_index(path)
-        if rotation_index is None:
-            continue
-        candidates.append((rotation_index, path))
+    candidates = discover_current_trade_analysis_files(
+        log_dir,
+        include_rotated_base=True,
+    )
 
     if not candidates:
         raise FileNotFoundError(f"No dataset files found for rotation-aware input: {input_path}")
 
-    # oldest -> newest
-    candidates.sort(key=lambda item: (-item[0], item[1].name))
-    return [path for _, path in candidates]
+    return candidates
 
 
 def build_dataset(
@@ -217,21 +213,6 @@ def _should_use_rotation_aware(
         return rotation_aware
 
     return input_path.name == "trade_analysis.jsonl"
-
-
-def _rotation_index(path: Path) -> int | None:
-    match = _ROTATION_PATTERN.match(path.name)
-    if not match:
-        return None
-
-    raw_index = match.group(1)
-    if raw_index is None:
-        return 0
-
-    try:
-        return int(raw_index)
-    except ValueError:
-        return None
 
 
 def _read_jsonl_file(path: Path) -> list[dict[str, Any]]:

@@ -191,3 +191,84 @@ def test_label_dataset_does_not_treat_placeholder_keys_as_fully_labeled(
     assert result["updated_records"] == 1
     assert relabeled["future_label_15m"] == "up"
     assert relabeled["future_return_1h"] == 10.0
+
+
+def test_label_dataset_targets_current_symbol_shards_for_legacy_base_path(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    base_path = tmp_path / "trade_analysis.jsonl"
+    btc_path = tmp_path / "trade_analysis_btcusdt.jsonl"
+    eth_path = tmp_path / "trade_analysis_ethusdt.jsonl"
+    cumulative_path = tmp_path / "trade_analysis_cumulative.jsonl"
+
+    base_path.write_text("", encoding="utf-8")
+    btc_path.write_text(
+        json.dumps(
+            {
+                "logged_at": "2026-04-08T00:00:00Z",
+                "symbol": "BTCUSDT",
+                "risk": {"entry_price": 100.0},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    eth_path.write_text(
+        json.dumps(
+            {
+                "logged_at": "2026-04-08T01:00:00Z",
+                "symbol": "ETHUSDT",
+                "risk": {"entry_price": 200.0},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    cumulative_path.write_text(
+        json.dumps(
+            {
+                "logged_at": "2026-04-08T02:00:00Z",
+                "symbol": "DOGEUSDT",
+                "risk": {"entry_price": 300.0},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        future_return_labeler.ccxt,
+        "binance",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    def _fake_fetch_horizon_prices(**kwargs):
+        calls.append(kwargs["symbol"])
+        if kwargs["symbol"] == "BTC/USDT":
+            return {"15m": 105.0, "1h": 110.0, "4h": 115.0}
+        return {"15m": 190.0, "1h": 180.0, "4h": 170.0}
+
+    monkeypatch.setattr(
+        future_return_labeler,
+        "_fetch_horizon_prices",
+        _fake_fetch_horizon_prices,
+    )
+
+    result = future_return_labeler.label_dataset(log_path=base_path)
+
+    btc_record = json.loads(btc_path.read_text(encoding="utf-8").splitlines()[0])
+    eth_record = json.loads(eth_path.read_text(encoding="utf-8").splitlines()[0])
+    cumulative_record = json.loads(
+        cumulative_path.read_text(encoding="utf-8").splitlines()[0]
+    )
+
+    assert calls == ["BTC/USDT", "ETH/USDT"]
+    assert result["total_records"] == 2
+    assert result["updated_records"] == 2
+    assert result["skipped_records"] == 0
+    assert btc_record["future_label_15m"] == "up"
+    assert eth_record["future_label_15m"] == "down"
+    assert "future_label_15m" not in cumulative_record

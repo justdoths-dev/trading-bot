@@ -210,6 +210,14 @@ def _joined_horizon_rows(
     return rows
 
 
+def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(json.dumps(record) for record in records) + ("\n" if records else ""),
+        encoding="utf-8",
+    )
+
+
 def test_run_research_analyzer_handles_valid_records(
     monkeypatch,
     tmp_path: Path,
@@ -434,6 +442,84 @@ def test_run_research_analyzer_latest_window_hours_changes_downstream_dataset_ro
         72: 4,
         144: 5,
     }
+
+
+def test_run_research_analyzer_includes_current_symbol_shards_in_latest_input(
+    monkeypatch,
+    tmp_path: Path,
+    valid_research_record: dict[str, Any],
+) -> None:
+    logs_dir = tmp_path / "logs"
+    input_path = logs_dir / "trade_analysis.jsonl"
+    output_dir = tmp_path / "reports"
+
+    _write_jsonl(
+        logs_dir / "trade_analysis.jsonl.1",
+        [
+            _windowable_record(
+                valid_research_record,
+                logged_at="2026-04-10T01:00:00+00:00",
+                symbol="BNBUSDT",
+            )
+        ],
+    )
+    _write_jsonl(input_path, [])
+    _write_jsonl(
+        logs_dir / "trade_analysis_btcusdt.jsonl",
+        [
+            _windowable_record(
+                valid_research_record,
+                logged_at="2026-04-10T03:00:00+00:00",
+                symbol="BTCUSDT",
+            )
+        ],
+    )
+    _write_jsonl(
+        logs_dir / "trade_analysis_ethusdt.jsonl",
+        [
+            _windowable_record(
+                valid_research_record,
+                logged_at="2026-04-10T04:00:00+00:00",
+                symbol="ETHUSDT",
+            )
+        ],
+    )
+    _write_jsonl(
+        logs_dir / "trade_analysis_cumulative.jsonl",
+        [
+            _windowable_record(
+                valid_research_record,
+                logged_at="2026-04-10T05:00:00+00:00",
+                symbol="DOGEUSDT",
+            )
+        ],
+    )
+
+    monkeypatch.setattr(
+        research_analyzer,
+        "_build_strategy_lab_metrics",
+        lambda _input_path: _stub_strategy_lab_metrics(dataset_rows=0),
+    )
+    monkeypatch.setattr(
+        research_analyzer,
+        "_build_edge_candidate_rows",
+        lambda *_args, **_kwargs: research_analyzer._empty_edge_candidate_rows(),
+    )
+
+    result = research_analyzer.run_research_analyzer(
+        input_path,
+        output_dir,
+        latest_window_hours=36,
+    )
+
+    assert result["schema_validation"]["source_files"] == [
+        str(logs_dir / "trade_analysis.jsonl.1"),
+        str(logs_dir / "trade_analysis.jsonl"),
+        str(logs_dir / "trade_analysis_btcusdt.jsonl"),
+        str(logs_dir / "trade_analysis_ethusdt.jsonl"),
+    ]
+    assert str(logs_dir / "trade_analysis_cumulative.jsonl") not in result["schema_validation"]["source_files"]
+    assert result["dataset_overview"]["date_range"]["end"] == "2026-04-10T04:00:00+00:00"
 
 
 def test_edge_stability_preview_returns_insufficient_data_without_visible_candidates() -> None:

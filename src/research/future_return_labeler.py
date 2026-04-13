@@ -19,6 +19,10 @@ from src.research.future_return_labeling_common import (
     normalize_symbol,
     parse_logged_at_to_utc,
 )
+from src.research.inputs.current_trade_analysis_resolver import (
+    BASE_TRADE_ANALYSIS_FILENAME,
+    discover_current_trade_analysis_files,
+)
 from src.research.future_return_market_data import fetch_horizon_prices
 from src.services.cron_health import CronHealthReporter
 
@@ -35,10 +39,11 @@ def label_dataset(
     resolved_log_path = (
         log_path
         if log_path is not None
-        else Path(__file__).resolve().parents[2] / "logs" / "trade_analysis.jsonl"
+        else Path(__file__).resolve().parents[2] / "logs" / BASE_TRADE_ANALYSIS_FILENAME
     )
+    target_paths = _resolve_target_paths(resolved_log_path)
 
-    if not resolved_log_path.exists():
+    if not target_paths:
         LOGGER.info("Log file not found: %s", resolved_log_path)
         return {
             "total_records": 0,
@@ -52,9 +57,65 @@ def label_dataset(
 
     exchange = ccxt.binance({"enableRateLimit": True})
 
-    lines = resolved_log_path.read_text(encoding="utf-8").splitlines()
-    updated_lines: list[str] = []
+    total_records = 0
+    updated_records = 0
 
+    for target_path in target_paths:
+        file_counts = _label_single_file(
+            log_path=target_path,
+            exchange=exchange,
+            force_relabel=force_relabel,
+            label_thresholds_pct=resolved_thresholds,
+        )
+        total_records += file_counts["total_records"]
+        updated_records += file_counts["updated_records"]
+
+    skipped_records = total_records - updated_records
+
+    LOGGER.info(
+        "Labeling complete: files=%s total=%s updated=%s skipped=%s force_relabel=%s thresholds=%s",
+        len(target_paths),
+        total_records,
+        updated_records,
+        skipped_records,
+        force_relabel,
+        resolved_thresholds,
+    )
+
+    return {
+        "total_records": total_records,
+        "updated_records": updated_records,
+        "skipped_records": skipped_records,
+        "force_relabel": force_relabel,
+        "thresholds_pct": resolved_thresholds,
+    }
+
+
+def _resolve_target_paths(log_path: Path) -> list[Path]:
+    if log_path.name != BASE_TRADE_ANALYSIS_FILENAME:
+        return [log_path] if log_path.exists() else []
+
+    return discover_current_trade_analysis_files(
+        log_path.parent,
+        include_rotated_base=False,
+    )
+
+
+def _label_single_file(
+    *,
+    log_path: Path,
+    exchange: Any,
+    force_relabel: bool,
+    label_thresholds_pct: dict[str, float],
+) -> dict[str, int]:
+    lines = log_path.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        return {
+            "total_records": 0,
+            "updated_records": 0,
+        }
+
+    updated_lines: list[str] = []
     total_records = 0
     updated_records = 0
 
@@ -92,7 +153,7 @@ def label_dataset(
                 entry_price=entry_price,
                 future_price=future_price,
                 horizon=horizon,
-                label_thresholds_pct=resolved_thresholds,
+                label_thresholds_pct=label_thresholds_pct,
             )
             if update is None:
                 continue
@@ -101,30 +162,16 @@ def label_dataset(
         updated_records += 1
         updated_lines.append(json.dumps(record, ensure_ascii=False))
 
-    tmp_path = resolved_log_path.with_suffix(".jsonl.tmp")
+    tmp_path = log_path.with_suffix(".jsonl.tmp")
     tmp_path.write_text(
         "\n".join(updated_lines) + ("\n" if updated_lines else ""),
         encoding="utf-8",
     )
-    tmp_path.replace(resolved_log_path)
-
-    skipped_records = total_records - updated_records
-
-    LOGGER.info(
-        "Labeling complete: total=%s updated=%s skipped=%s force_relabel=%s thresholds=%s",
-        total_records,
-        updated_records,
-        skipped_records,
-        force_relabel,
-        resolved_thresholds,
-    )
+    tmp_path.replace(log_path)
 
     return {
         "total_records": total_records,
         "updated_records": updated_records,
-        "skipped_records": skipped_records,
-        "force_relabel": force_relabel,
-        "thresholds_pct": resolved_thresholds,
     }
 
 
@@ -196,7 +243,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input-path",
         type=Path,
-        default=Path(__file__).resolve().parents[2] / "logs" / "trade_analysis.jsonl",
+        default=Path(__file__).resolve().parents[2] / "logs" / BASE_TRADE_ANALYSIS_FILENAME,
         help="Path to the trade analysis JSONL file.",
     )
     parser.add_argument(
