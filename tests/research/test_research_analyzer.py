@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -237,6 +239,31 @@ def test_run_research_analyzer_handles_valid_records(
     assert result["strategy_lab"]["dataset_rows"] == 2
     assert (output_dir / "summary.json").exists()
     assert (output_dir / "summary.md").exists()
+
+
+def test_write_summary_files_adds_top_level_generated_at_without_mutating_metrics(
+    tmp_path: Path,
+) -> None:
+    metrics = {
+        "dataset_overview": {
+            "total_records": 2,
+            "date_range": {
+                "start": "2026-04-12T00:00:00+00:00",
+                "end": "2026-04-12T01:00:00+00:00",
+            },
+        },
+        "top_highlights": {},
+    }
+
+    research_analyzer.write_summary_files(metrics, tmp_path)
+
+    written = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+
+    assert "generated_at" not in metrics
+    assert written["dataset_overview"] == metrics["dataset_overview"]
+    assert written["top_highlights"] == metrics["top_highlights"]
+    assert isinstance(written["generated_at"], str)
+    assert datetime.fromisoformat(written["generated_at"])
 
 
 def test_run_research_analyzer_skips_invalid_records_without_crashing(

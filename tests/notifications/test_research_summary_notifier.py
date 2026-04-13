@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from src.notifications.research_summary_notifier import (
+    _extract_generated_at,
     build_research_summary_message,
 )
 from src.telegram.markdown_utils import escape_markdown
@@ -82,6 +83,31 @@ def test_build_research_summary_message_keeps_generated_line_when_sources_match(
     assert "Generated:" in message
     assert "Freshness:" not in message
     assert escape_markdown("2026-04-12T10:06:44+00:00") in message
+
+
+def test_extract_generated_at_prefers_top_level_generated_at_over_dataset_range_end() -> None:
+    payload = {
+        "generated_at": "2026-04-12T10:06:44+00:00",
+        "dataset_overview": {
+            "date_range": {
+                "end": "2026-04-09T00:25:02+00:00",
+            }
+        },
+    }
+
+    assert _extract_generated_at(payload) == "2026-04-12T10:06:44+00:00"
+
+
+def test_extract_generated_at_falls_back_to_dataset_range_end_for_legacy_payload() -> None:
+    payload = {
+        "dataset_overview": {
+            "date_range": {
+                "end": "2026-04-09T00:25:02+00:00",
+            }
+        }
+    }
+
+    assert _extract_generated_at(payload) == "2026-04-09T00:25:02+00:00"
 
 
 def test_build_research_summary_message_uses_clear_recent_window_labels() -> None:

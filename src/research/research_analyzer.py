@@ -299,12 +299,14 @@ def write_summary_files(
 
     summary_json_path = output_dir / "summary.json"
     summary_md_path = output_dir / "summary.md"
+    summary_payload = dict(metrics)
+    summary_payload["generated_at"] = _resolve_summary_generated_at(metrics)
 
     summary_json_path.write_text(
-        json.dumps(metrics, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(summary_payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    summary_md_path.write_text(_build_markdown(metrics), encoding="utf-8")
+    summary_md_path.write_text(_build_markdown(summary_payload), encoding="utf-8")
 
     return summary_json_path, summary_md_path
 
@@ -2606,6 +2608,13 @@ def _max_candidate_strength(strengths: list[str]) -> str:
     return "insufficient_data"
 
 
+def _resolve_summary_generated_at(metrics: dict[str, Any]) -> str:
+    generated_at = str(metrics.get("generated_at", "")).strip()
+    if generated_at:
+        return generated_at
+    return datetime.now(UTC).isoformat()
+
+
 def _build_markdown(metrics: dict[str, Any]) -> str:
     overview = metrics.get("dataset_overview", {}) or {}
     top_highlights = metrics.get("top_highlights", {}) or {}
@@ -2621,7 +2630,7 @@ def _build_markdown(metrics: dict[str, Any]) -> str:
     lines: list[str] = []
     lines.append("# Research Summary")
     lines.append("")
-    lines.append(f"Generated at: {datetime.now(UTC).isoformat()}")
+    lines.append(f"Generated at: {_resolve_summary_generated_at(metrics)}")
     lines.append("")
 
     lines.extend(_markdown_top_highlights(top_highlights))
