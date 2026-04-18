@@ -129,7 +129,6 @@ _REASON_CONFIRMATION_MARKERS = (
     "only trend-following",
     "only a fully aligned",
     "fully aligned",
-    "allow anything except",
 )
 _REASON_DIRECTIONAL_OPPOSITION_MARKERS = (
     "opposed",
@@ -174,8 +173,6 @@ _WEAK_CONFIRMATION_MARKERS = (
     "candidate",
     "pending",
     "await",
-    "watch",
-    "setup",
     "not_ready",
     "not-ready",
     "not ready",
@@ -187,6 +184,16 @@ _PRIMARY_FACTOR_THRESHOLD = 0.60
 _MIN_PRIMARY_TARGET_SUPPORT_ROWS = 30
 _MIN_BREAKDOWN_TARGET_SUPPORT_ROWS = 10
 _MIN_BIAS_SIGN_BREAKDOWN_TARGET_SUPPORT_ROWS = 10
+
+_ALLOWED_INVENTORY_PREFIXES = (
+    "selected_strategy_payload",
+    "rule_engine",
+    "timeframe_summary.context_layer",
+    "timeframe_summary.bias_layer",
+    "timeframe_summary.setup_layer",
+    "timeframe_summary.trigger_layer",
+    "reason",
+)
 
 
 @dataclass(frozen=True)
@@ -395,9 +402,9 @@ def build_report(
             "This report is diagnosis-only and reuses one materialized effective input snapshot per configuration so every targeting, inventory, and bucket count comes from the same observed rows.",
             "selected_strategy_result.signal is sourced only from the legacy payload addressed by selected_strategy (for example swing_result / intraday_result / scalping_result). A literal selected_strategy_result object is used only when it looks like the same legacy payload rather than a composed post-decision object.",
             "rule_signal is sourced only from the raw persisted rule_engine.signal field. Final execution action, execution.signal, and normalized fallback fields are never used as proxies for the upstream rule-signal hold transition.",
-            "Observable decision-layer evidence is limited to persisted rule_engine fields, persisted timeframe_summary fields, and explicit persisted reason text when present.",
-            "Condition buckets remain evidence-backed and conservative: if multiple observable categories co-occur materially the row is treated as mixed_or_inconclusive, and rows without enough persisted evidence remain insufficient_persisted_explanation.",
-            "Unclassified reason text remains observable evidence but does not become an explicit hold-resolution bucket by itself.",
+            "Observable decision-layer inventory is intentionally narrowed to selected_strategy payload fields, rule_engine fields, and timeframe_summary decision-adjacent layers (context_layer, bias_layer, setup_layer, trigger_layer). Raw per-timeframe indicator fan-out is not treated as hold-resolution inventory.",
+            "Explicit observable condition buckets are structured-state-backed only. Classified reason text is tracked separately as auxiliary evidence and does not by itself promote a row out of insufficient_persisted_explanation.",
+            "Condition buckets remain evidence-backed and conservative: if multiple structured categories co-occur materially the row is treated as mixed_or_inconclusive, and rows without enough structured evidence remain insufficient_persisted_explanation.",
             "Support thresholds gate primary-bucket claims so small slices stay descriptive instead of over-interpreted.",
         ],
     }
@@ -516,6 +523,9 @@ def build_configuration_summary(
             "explicit_observable_condition_rows": hold_resolution_reason_summary[
                 "explicit_observable_condition_rows"
             ],
+            "reason_text_only_classified_rows": hold_resolution_reason_summary[
+                "reason_text_only_classified_rows"
+            ],
             "insufficient_persisted_explanation_rows": (
                 hold_resolution_reason_summary[
                     "insufficient_persisted_explanation_rows"
@@ -621,6 +631,7 @@ def build_observable_decision_layer_inventory(
     field_counter: Counter[str] = Counter()
     selected_strategy_payload_source_counter: Counter[str] = Counter()
     reason_text_source_counter: Counter[str] = Counter()
+    evidence_source_counter: Counter[str] = Counter()
     bias_sign_source_counter: Counter[str] = Counter()
     context_state_counter: Counter[str] = Counter()
     setup_state_counter: Counter[str] = Counter()
@@ -649,6 +660,10 @@ def build_observable_decision_layer_inventory(
             reason_text_sources.append("root_reason_text")
         if reason_text_sources:
             reason_text_source_counter[" + ".join(reason_text_sources)] += 1
+
+        evidence_source = row.get("hold_resolution_evidence_source")
+        if isinstance(evidence_source, str) and evidence_source.strip():
+            evidence_source_counter[evidence_source] += 1
 
         if row.get("context_state") is not None:
             rows_with_context_state += 1
@@ -680,8 +695,26 @@ def build_observable_decision_layer_inventory(
             field_counter=field_counter,
         )
         _collect_field_presence(
-            row.get("timeframe_summary_payload"),
-            prefix="timeframe_summary",
+            row.get("context_layer_payload"),
+            prefix="timeframe_summary.context_layer",
+            object_counter=object_counter,
+            field_counter=field_counter,
+        )
+        _collect_field_presence(
+            row.get("bias_layer_payload"),
+            prefix="timeframe_summary.bias_layer",
+            object_counter=object_counter,
+            field_counter=field_counter,
+        )
+        _collect_field_presence(
+            row.get("setup_layer_payload"),
+            prefix="timeframe_summary.setup_layer",
+            object_counter=object_counter,
+            field_counter=field_counter,
+        )
+        _collect_field_presence(
+            row.get("trigger_layer_payload"),
+            prefix="timeframe_summary.trigger_layer",
             object_counter=object_counter,
             field_counter=field_counter,
         )
@@ -691,6 +724,15 @@ def build_observable_decision_layer_inventory(
             object_counter=object_counter,
             field_counter=field_counter,
         )
+
+    object_counter = _filter_inventory_counter(
+        object_counter,
+        allowed_prefixes=_ALLOWED_INVENTORY_PREFIXES,
+    )
+    field_counter = _filter_inventory_counter(
+        field_counter,
+        allowed_prefixes=_ALLOWED_INVENTORY_PREFIXES,
+    )
 
     target_row_count = len(target_rows)
     return {
@@ -702,6 +744,12 @@ def build_observable_decision_layer_inventory(
         "reason_text_source_count_rows": _counter_rows(
             reason_text_source_counter,
             key_name="reason_text_source",
+            total=target_row_count,
+            include_share=True,
+        ),
+        "evidence_source_count_rows": _counter_rows(
+            evidence_source_counter,
+            key_name="evidence_source",
             total=target_row_count,
             include_share=True,
         ),
@@ -765,8 +813,13 @@ def build_hold_resolution_reason_summary(
     bucket_counter: Counter[str] = Counter()
     flag_counter: Counter[str] = Counter()
     reason_category_counter: Counter[str] = Counter()
+    evidence_source_counter: Counter[str] = Counter()
 
     explicit_observable_condition_rows = 0
+    structured_state_only_rows = 0
+    structured_state_and_reason_text_rows = 0
+    reason_text_only_classified_rows = 0
+    no_classified_observable_evidence_rows = 0
     insufficient_persisted_explanation_rows = 0
 
     for row in target_rows:
@@ -776,9 +829,25 @@ def build_hold_resolution_reason_summary(
         )
         bucket_counter[bucket] += 1
 
-        if row.get("hold_resolution_explicit_observable_condition") is True:
+        has_structured = bool(row.get("hold_resolution_structured_observable_condition"))
+        has_reason = bool(row.get("hold_resolution_reason_text_observable_condition"))
+        evidence_source = str(
+            row.get("hold_resolution_evidence_source")
+            or "no_classified_observable_evidence"
+        )
+        evidence_source_counter[evidence_source] += 1
+
+        if has_structured:
             explicit_observable_condition_rows += 1
+            if has_reason:
+                structured_state_and_reason_text_rows += 1
+            else:
+                structured_state_only_rows += 1
+        elif has_reason:
+            reason_text_only_classified_rows += 1
+            insufficient_persisted_explanation_rows += 1
         else:
+            no_classified_observable_evidence_rows += 1
             insufficient_persisted_explanation_rows += 1
 
         for flag in _safe_list(row.get("hold_resolution_observable_flags")):
@@ -792,11 +861,20 @@ def build_hold_resolution_reason_summary(
     return {
         "target_row_count": target_row_count,
         "explicit_observable_condition_rows": explicit_observable_condition_rows,
+        "structured_state_backed_rows": explicit_observable_condition_rows,
+        "structured_state_only_rows": structured_state_only_rows,
+        "structured_state_and_reason_text_rows": structured_state_and_reason_text_rows,
+        "reason_text_only_classified_rows": reason_text_only_classified_rows,
+        "no_classified_observable_evidence_rows": no_classified_observable_evidence_rows,
         "insufficient_persisted_explanation_rows": (
             insufficient_persisted_explanation_rows
         ),
         "explicit_observable_condition_rate": _safe_ratio(
             explicit_observable_condition_rows,
+            target_row_count,
+        ),
+        "reason_text_only_classified_rate": _safe_ratio(
+            reason_text_only_classified_rows,
             target_row_count,
         ),
         "insufficient_persisted_explanation_rate": _safe_ratio(
@@ -810,6 +888,12 @@ def build_hold_resolution_reason_summary(
             total=target_row_count,
             include_share=True,
             order_map=_BUCKET_ORDER,
+        ),
+        "evidence_source_count_rows": _counter_rows(
+            evidence_source_counter,
+            key_name="evidence_source",
+            total=target_row_count,
+            include_share=True,
         ),
         "observable_condition_flag_count_rows": _counter_rows(
             flag_counter,
@@ -866,6 +950,9 @@ def build_hold_resolution_breakdown(
                 "explicit_observable_condition_rows": summary[
                     "explicit_observable_condition_rows"
                 ],
+                "reason_text_only_classified_rows": summary[
+                    "reason_text_only_classified_rows"
+                ],
                 "insufficient_persisted_explanation_rows": summary[
                     "insufficient_persisted_explanation_rows"
                 ],
@@ -900,6 +987,8 @@ def build_final_assessment(
             "dominant_observed_condition_bucket": "none",
             "widest_configuration": None,
             "supported_strategy_primary_condition_buckets": {},
+            "supported_strategy_condition_buckets": {},
+            "strategy_level_consistency": "unknown",
             "confirmed_observations": [],
             "evidence_backed_inferences": [],
             "unresolved_uncertainties": [],
@@ -915,6 +1004,9 @@ def build_final_assessment(
     )
     reason_summary = _safe_dict(widest.get("hold_resolution_reason_summary"))
     inventory = _safe_dict(widest.get("observable_decision_layer_inventory"))
+    strategy_bucket_map = _supported_strategy_condition_buckets(
+        widest.get("hold_resolution_by_strategy")
+    )
 
     primary_bucket = str(
         reason_summary.get("primary_condition_bucket") or "no_target_rows"
@@ -937,13 +1029,17 @@ def build_final_assessment(
                 widest.get("hold_resolution_by_strategy")
             )
         ),
+        "supported_strategy_condition_buckets": strategy_bucket_map,
+        "strategy_level_consistency": _strategy_level_consistency(strategy_bucket_map),
         "confirmed_observations": _build_final_confirmed_observations(
             widest=widest,
             reason_summary=reason_summary,
             inventory=inventory,
+            strategy_bucket_map=strategy_bucket_map,
         ),
         "evidence_backed_inferences": _build_final_evidence_backed_inferences(
             reason_summary=reason_summary,
+            strategy_bucket_map=strategy_bucket_map,
         ),
         "unresolved_uncertainties": _build_final_unresolved_uncertainties(
             inventory=inventory,
@@ -952,6 +1048,7 @@ def build_final_assessment(
         "overall_conclusion": _build_overall_conclusion(
             widest=widest,
             reason_summary=reason_summary,
+            strategy_bucket_map=strategy_bucket_map,
         ),
     }
 
@@ -978,6 +1075,10 @@ def render_markdown(report: dict[str, Any]) -> str:
             (
                 "- Dominant observed condition bucket: "
                 f"{final_assessment.get('dominant_observed_condition_bucket', 'none')}"
+            ),
+            (
+                "- Strategy-level consistency: "
+                f"{final_assessment.get('strategy_level_consistency', 'unknown')}"
             ),
             "",
             "### Confirmed Observations",
@@ -1010,6 +1111,14 @@ def render_markdown(report: dict[str, Any]) -> str:
                 (
                     "- Primary condition bucket: "
                     f"{reason_summary.get('primary_condition_bucket', 'none')}"
+                ),
+                (
+                    "- Explicit observable rows: "
+                    f"{reason_summary.get('explicit_observable_condition_rows', 0)}"
+                ),
+                (
+                    "- Reason-text-only classified rows: "
+                    f"{reason_summary.get('reason_text_only_classified_rows', 0)}"
                 ),
                 (
                     "- Condition bucket rows: "
@@ -1093,6 +1202,10 @@ def _build_stage_row(raw_record: dict[str, Any]) -> dict[str, Any]:
         "root_reason_text": _clean_text(raw_record.get("reason")),
         "rule_reason_text": _clean_text(rule_engine_payload.get("reason")),
         "timeframe_summary_payload": timeframe_summary_payload,
+        "context_layer_payload": context_layer,
+        "bias_layer_payload": bias_layer,
+        "setup_layer_payload": setup_layer,
+        "trigger_layer_payload": trigger_layer,
         "context_state": _normalize_text(
             context_layer.get("context") or bias_layer.get("context")
         ),
@@ -1164,14 +1277,18 @@ def _build_hold_resolution_condition_details(
             "selected_strategy_hold_resolution_target_row": False,
             "hold_resolution_condition_bucket": None,
             "hold_resolution_explicit_observable_condition": False,
+            "hold_resolution_structured_observable_condition": False,
+            "hold_resolution_reason_text_observable_condition": False,
+            "hold_resolution_evidence_source": "not_target_row",
             "hold_resolution_observable_flags": [],
             "hold_resolution_reason_text_categories": [],
+            "hold_resolution_structured_condition_categories": [],
             "hold_resolution_condition_categories": [],
         }
 
     observable_flags: list[str] = []
     reason_text_categories: set[str] = set()
-    category_set: set[str] = set()
+    structured_category_set: set[str] = set()
 
     rule_reason_text = row.get("rule_reason_text")
     root_reason_text = row.get("root_reason_text")
@@ -1199,7 +1316,7 @@ def _build_hold_resolution_condition_details(
         observable_flags.append("rule_bias_present")
 
     if _text_contains_any(context_state, _STATE_CONFLICT_MARKERS) or rule_bias == "neutral_conflict":
-        category_set.add(_BUCKET_EXPLICIT_CONTEXT_CONFLICT)
+        structured_category_set.add(_BUCKET_EXPLICIT_CONTEXT_CONFLICT)
         if _text_contains_any(context_state, _STATE_CONFLICT_MARKERS):
             observable_flags.append("context_state_conflicted")
         if rule_bias == "neutral_conflict":
@@ -1213,34 +1330,52 @@ def _build_hold_resolution_condition_details(
         neutral_state_detected = True
         observable_flags.append("rule_bias_neutral")
     if neutral_state_detected:
-        category_set.add(_BUCKET_EXPLICIT_CONTEXT_NEUTRALITY)
+        structured_category_set.add(_BUCKET_EXPLICIT_CONTEXT_NEUTRALITY)
 
     context_direction = _direction_from_bias(context_bias)
     if context_direction is not None and context_direction != selected_state:
-        category_set.add(_BUCKET_EXPLICIT_DIRECTIONAL_OPPOSITION)
+        structured_category_set.add(_BUCKET_EXPLICIT_DIRECTIONAL_OPPOSITION)
         observable_flags.append("context_bias_opposes_selected_signal")
 
-    confirmation_gap_detected = False
+    alignment_rows: list[tuple[str, str]] = []
     for layer_name, layer_state in (("setup", setup_state), ("trigger", trigger_state)):
         alignment = _layer_alignment(layer_state, str(selected_state))
+        alignment_rows.append((layer_name, alignment))
         if alignment == "confirmed":
             observable_flags.append(f"{layer_name}_state_confirms_selected_signal")
         elif alignment == "same_direction_but_not_fully_confirmed":
-            confirmation_gap_detected = True
             observable_flags.append(
                 f"{layer_name}_state_same_direction_not_fully_confirmed"
             )
-        elif alignment == "neutral_or_missing_direction":
-            confirmation_gap_detected = True
+        elif alignment in {"neutral_or_missing_direction", "missing"}:
             observable_flags.append(f"{layer_name}_state_neutral_or_missing_direction")
         elif alignment == "opposed":
-            category_set.add(_BUCKET_EXPLICIT_DIRECTIONAL_OPPOSITION)
             observable_flags.append(f"{layer_name}_state_opposes_selected_signal")
 
-    if confirmation_gap_detected:
-        category_set.add(_BUCKET_EXPLICIT_CONFIRMATION_GAP)
+    same_direction_confirmed = sum(
+        1 for _, alignment in alignment_rows if alignment == "confirmed"
+    )
+    same_direction_weak = sum(
+        1
+        for _, alignment in alignment_rows
+        if alignment == "same_direction_but_not_fully_confirmed"
+    )
+    neutral_or_missing = sum(
+        1
+        for _, alignment in alignment_rows
+        if alignment in {"neutral_or_missing_direction", "missing"}
+    )
+    opposed = sum(1 for _, alignment in alignment_rows if alignment == "opposed")
 
-    reason_observed_category = False
+    if opposed > 0:
+        structured_category_set.add(_BUCKET_EXPLICIT_DIRECTIONAL_OPPOSITION)
+
+    if same_direction_weak > 0:
+        structured_category_set.add(_BUCKET_EXPLICIT_CONFIRMATION_GAP)
+    elif same_direction_confirmed > 0 and neutral_or_missing > 0:
+        structured_category_set.add(_BUCKET_EXPLICIT_CONFIRMATION_GAP)
+
+    reason_category_set: set[str] = set()
     for source_name, reason_text in (
         ("rule_reason_text", rule_reason_text),
         ("root_reason_text", root_reason_text),
@@ -1249,42 +1384,44 @@ def _build_hold_resolution_condition_details(
             continue
         reason_matches = _classify_reason_text(reason_text)
         if reason_matches:
-            reason_observed_category = True
             for category_name in sorted(reason_matches):
                 reason_text_categories.add(category_name)
-                observable_flags.append(
-                    f"{source_name}_mentions_{category_name}"
-                )
-            if "conflict" in reason_matches:
-                category_set.add(_BUCKET_EXPLICIT_CONTEXT_CONFLICT)
-            if "neutrality" in reason_matches:
-                category_set.add(_BUCKET_EXPLICIT_CONTEXT_NEUTRALITY)
-            if "confirmation_gap" in reason_matches:
-                category_set.add(_BUCKET_EXPLICIT_CONFIRMATION_GAP)
-            if "directional_opposition" in reason_matches:
-                category_set.add(_BUCKET_EXPLICIT_DIRECTIONAL_OPPOSITION)
+                observable_flags.append(f"{source_name}_mentions_{category_name}")
+            reason_category_set.update(reason_matches)
         else:
             reason_text_categories.add("unclassified")
             observable_flags.append(f"{source_name}_unclassified")
 
-    ordered_categories = sorted(category_set, key=lambda value: _BUCKET_ORDER[value])
-    if not ordered_categories:
+    has_structured = bool(structured_category_set)
+    has_reason = bool(reason_category_set)
+
+    ordered_structured_categories = sorted(
+        structured_category_set,
+        key=lambda value: _BUCKET_ORDER[value],
+    )
+    if not ordered_structured_categories:
         bucket = _BUCKET_INSUFFICIENT_PERSISTED_EXPLANATION
-    elif len(ordered_categories) > 1:
+    elif len(ordered_structured_categories) > 1:
         bucket = _BUCKET_MIXED_OR_INCONCLUSIVE
     else:
-        bucket = ordered_categories[0]
+        bucket = ordered_structured_categories[0]
+
+    evidence_source = _hold_resolution_evidence_source(
+        has_structured=has_structured,
+        has_reason=has_reason,
+    )
 
     return {
         "selected_strategy_hold_resolution_target_row": True,
         "hold_resolution_condition_bucket": bucket,
-        "hold_resolution_explicit_observable_condition": (
-            bucket != _BUCKET_INSUFFICIENT_PERSISTED_EXPLANATION
-        ),
+        "hold_resolution_explicit_observable_condition": has_structured,
+        "hold_resolution_structured_observable_condition": has_structured,
+        "hold_resolution_reason_text_observable_condition": has_reason,
+        "hold_resolution_evidence_source": evidence_source,
         "hold_resolution_observable_flags": sorted(set(observable_flags)),
         "hold_resolution_reason_text_categories": sorted(reason_text_categories),
-        "hold_resolution_condition_categories": ordered_categories,
-        "hold_resolution_has_classified_reason_text": reason_observed_category,
+        "hold_resolution_structured_condition_categories": ordered_structured_categories,
+        "hold_resolution_condition_categories": ordered_structured_categories,
     }
 
 
@@ -1301,6 +1438,9 @@ def _build_configuration_confirmed_observations(
         hold_resolution_reason_summary.get("explicit_observable_condition_rows", 0)
         or 0
     )
+    reason_text_only_rows = int(
+        hold_resolution_reason_summary.get("reason_text_only_classified_rows", 0) or 0
+    )
     insufficient_rows = int(
         hold_resolution_reason_summary.get("insufficient_persisted_explanation_rows", 0)
         or 0
@@ -1315,11 +1455,16 @@ def _build_configuration_confirmed_observations(
             "rule_engine.signal was hold."
         ),
         (
-            f"{explicit_rows} target rows carried at least one explicit observable "
-            f"decision-layer condition bucket, while {insufficient_rows} rows lacked "
-            "enough persisted explanation."
+            f"{explicit_rows} target rows carried structured-state-backed observable "
+            f"condition buckets, while {insufficient_rows} rows remained "
+            "insufficient_persisted_explanation."
         ),
     ]
+
+    if reason_text_only_rows > 0:
+        observations.append(
+            f"{reason_text_only_rows} target rows had classified reason text without enough structured-state support to promote them out of insufficient_persisted_explanation."
+        )
 
     top_fields = [
         _safe_dict(item).get("field_path")
@@ -1329,29 +1474,25 @@ def _build_configuration_confirmed_observations(
     visible_fields = [str(item) for item in top_fields if isinstance(item, str)]
     if visible_fields:
         observations.append(
-            "Observed decision-layer field inventory on target rows included "
+            "Observed decision-layer inventory on target rows emphasized "
             + ", ".join(visible_fields)
             + "."
         )
 
     if dominant_bucket != "none":
         observations.append(
-            "The dominant observed hold-resolution bucket on the target rows was "
+            "The dominant structured hold-resolution bucket on the target rows was "
             f"{dominant_bucket}."
         )
 
-    supported_strategy_map = _supported_strategy_primary_condition_buckets(
-        hold_resolution_by_strategy
-    )
-    if supported_strategy_map:
+    strategy_bucket_map = _supported_strategy_condition_buckets(hold_resolution_by_strategy)
+    if strategy_bucket_map:
         rendered = ", ".join(
             f"{strategy}={bucket}"
-            for strategy, bucket in sorted(supported_strategy_map.items())
+            for strategy, bucket in sorted(strategy_bucket_map.items())
         )
         observations.append(
-            "Supported strategy slices with a non-mixed primary bucket were: "
-            + rendered
-            + "."
+            "Supported strategy slices resolved to: " + rendered + "."
         )
 
     actionable_rows = int(
@@ -1384,25 +1525,30 @@ def _build_configuration_evidence_backed_inferences(
         hold_resolution_reason_summary.get("explicit_observable_condition_rate"),
         default=0.0,
     )
-    supported_strategy_map = _supported_strategy_primary_condition_buckets(
-        hold_resolution_by_strategy
+    reason_text_only_rows = int(
+        hold_resolution_reason_summary.get("reason_text_only_classified_rows", 0) or 0
     )
+    strategy_bucket_map = _supported_strategy_condition_buckets(hold_resolution_by_strategy)
 
     inferences = [
-        "Because the target rows are already restricted to actionable selected-strategy proposals that ended at rule_engine.signal=hold, the observed buckets are evidence about decision-layer hold resolution rather than proposal scarcity or execution-layer action mapping.",
+        "Because the target rows are already restricted to actionable selected-strategy proposals that ended at rule_engine.signal=hold, the observed buckets remain evidence about decision-layer hold resolution rather than proposal scarcity or execution-layer action mapping.",
     ]
 
     if primary_bucket not in _NON_PRIMARY_BUCKET_VALUES:
         inferences.append(
-            f"The persisted evidence is more consistent with {primary_bucket} dominating the observed hold collapses than with a single downstream execution explanation."
+            f"The structured persisted evidence is more consistent with {primary_bucket} dominating the observed hold collapses than with a single downstream execution explanation."
         )
     if explicit_rate >= _PRIMARY_FACTOR_THRESHOLD:
         inferences.append(
-            "Most observed hold collapses carried at least one explicit persisted decision-layer condition, which reduces reliance on purely speculative hidden-cause narratives for the majority of target rows."
+            "A majority of target rows retained structured-state-backed evidence, which means the report is not relying only on mirrored reason text for its dominant bucket."
         )
-    if supported_strategy_map:
+    if reason_text_only_rows > 0:
         inferences.append(
-            "At least one strategy-level slice retained enough support to surface a non-mixed primary observable bucket, which suggests the dominant pattern is not confined to a single isolated row."
+            "Some target rows still depended on reason-text-only evidence and therefore remained insufficient_persisted_explanation, which keeps the interpretation conservative."
+        )
+    if _strategy_level_consistency(strategy_bucket_map) == "split":
+        inferences.append(
+            "Strategy-level supported slices do not fully agree on one bucket, so the dominant overall pattern should not be overgeneralized as a universal single-mechanism explanation."
         )
 
     return inferences
@@ -1425,7 +1571,7 @@ def _build_configuration_unresolved_uncertainties(
 
     if insufficient_rows > 0:
         uncertainties.append(
-            f"{insufficient_rows} of {target_rows} target rows lacked enough persisted explanation to attribute the hold outcome to one explicit observable bucket."
+            f"{insufficient_rows} of {target_rows} target rows lacked enough structured-state evidence to attribute the hold outcome to one explicit observable bucket."
         )
 
     if int(observable_decision_layer_inventory.get("rows_with_rule_reason_text", 0) or 0) == 0:
@@ -1441,10 +1587,14 @@ def _build_final_confirmed_observations(
     widest: dict[str, Any],
     reason_summary: dict[str, Any],
     inventory: dict[str, Any],
+    strategy_bucket_map: dict[str, str],
 ) -> list[str]:
     configuration = _safe_dict(widest.get("configuration"))
     target_rows = int(reason_summary.get("target_row_count", 0) or 0)
     explicit_rows = int(reason_summary.get("explicit_observable_condition_rows", 0) or 0)
+    reason_text_only_rows = int(
+        reason_summary.get("reason_text_only_classified_rows", 0) or 0
+    )
     insufficient_rows = int(
         reason_summary.get("insufficient_persisted_explanation_rows", 0) or 0
     )
@@ -1460,19 +1610,30 @@ def _build_final_confirmed_observations(
             "collapsed to rule_engine.signal=hold."
         ),
         (
-            f"{explicit_rows} of those target rows exposed at least one explicit observable "
-            f"condition bucket, while {insufficient_rows} rows remained insufficient_persisted_explanation."
+            f"{explicit_rows} of those target rows exposed structured-state-backed observable "
+            f"condition buckets, while {insufficient_rows} rows remained insufficient_persisted_explanation."
         ),
     ]
+    if reason_text_only_rows > 0:
+        observations.append(
+            f"{reason_text_only_rows} target rows had classified reason text without enough structured-state support to count as explicit observable hold-resolution evidence."
+        )
     if dominant_bucket != "none":
         observations.append(
-            f"The dominant observed condition bucket at the widest configuration was {dominant_bucket}."
+            f"The dominant structured condition bucket at the widest configuration was {dominant_bucket}."
         )
     if visible_fields:
         observations.append(
-            "The most frequently observed persisted decision-layer field paths on target rows were "
+            "The most frequently observed decision-adjacent persisted field paths on target rows were "
             + ", ".join(visible_fields)
             + "."
+        )
+    if strategy_bucket_map:
+        rendered = ", ".join(
+            f"{strategy}={bucket}" for strategy, bucket in sorted(strategy_bucket_map.items())
+        )
+        observations.append(
+            "Supported strategy-level bucket outcomes were " + rendered + "."
         )
     return observations
 
@@ -1480,6 +1641,7 @@ def _build_final_confirmed_observations(
 def _build_final_evidence_backed_inferences(
     *,
     reason_summary: dict[str, Any],
+    strategy_bucket_map: dict[str, str],
 ) -> list[str]:
     target_rows = int(reason_summary.get("target_row_count", 0) or 0)
     if target_rows <= 0:
@@ -1492,17 +1654,28 @@ def _build_final_evidence_backed_inferences(
         reason_summary.get("explicit_observable_condition_rate"),
         default=0.0,
     )
+    reason_text_only_rows = int(
+        reason_summary.get("reason_text_only_classified_rows", 0) or 0
+    )
 
     inferences = [
         "The observed hold collapses remain an upstream decision-layer phenomenon because this report never substitutes final execution action for rule_engine.signal.",
     ]
     if primary_bucket not in _NON_PRIMARY_BUCKET_VALUES:
         inferences.append(
-            f"The widest-configuration evidence is more consistent with {primary_bucket} dominating the observable hold-resolution path than with purely downstream execution or reporting artifacts."
+            f"The widest-configuration evidence is more consistent with {primary_bucket} dominating the structured hold-resolution path than with purely downstream execution or reporting artifacts."
         )
     if explicit_rate >= _PRIMARY_FACTOR_THRESHOLD:
         inferences.append(
-            "A majority of target rows carrying explicit observable conditions suggests the persisted decision-layer data is materially informative, even though it is still incomplete."
+            "A majority of target rows still carrying structured-state-backed evidence suggests the dominant bucket is not just a byproduct of reason-text templating."
+        )
+    if reason_text_only_rows > 0:
+        inferences.append(
+            "Reason-text-only rows remain in insufficient_persisted_explanation, which keeps the report from overclaiming complete observability."
+        )
+    if _strategy_level_consistency(strategy_bucket_map) == "split":
+        inferences.append(
+            "Strategy-level supported slices split across buckets, so the overall dominant bucket should be read as a leading pattern rather than a universal single cause."
         )
     return inferences
 
@@ -1522,7 +1695,7 @@ def _build_final_unresolved_uncertainties(
     ]
     if insufficient_rows > 0:
         uncertainties.append(
-            f"{insufficient_rows} of {target_rows} target rows still lack enough persisted explanation for a bucket stronger than insufficient_persisted_explanation."
+            f"{insufficient_rows} of {target_rows} target rows still lack enough structured-state evidence for a bucket stronger than insufficient_persisted_explanation."
         )
     if int(inventory.get("rows_with_rule_reason_text", 0) or 0) == 0:
         uncertainties.append(
@@ -1535,6 +1708,7 @@ def _build_overall_conclusion(
     *,
     widest: dict[str, Any],
     reason_summary: dict[str, Any],
+    strategy_bucket_map: dict[str, str],
 ) -> str:
     configuration = _safe_dict(widest.get("configuration"))
     primary_bucket = str(reason_summary.get("primary_condition_bucket") or "no_target_rows")
@@ -1542,6 +1716,7 @@ def _build_overall_conclusion(
     insufficient_rows = int(
         reason_summary.get("insufficient_persisted_explanation_rows", 0) or 0
     )
+    strategy_consistency = _strategy_level_consistency(strategy_bucket_map)
 
     if target_rows <= 0:
         return (
@@ -1552,15 +1727,27 @@ def _build_overall_conclusion(
     if primary_bucket in _NON_PRIMARY_BUCKET_VALUES:
         return (
             f"At the widest configuration {configuration.get('display_name', _MISSING_LABEL)}, "
-            "the persisted evidence for actionable selected-strategy -> hold collapses remained "
-            f"{primary_bucket}, and {insufficient_rows} rows still lacked enough persisted explanation."
+            "the structured persisted evidence for actionable selected-strategy -> hold collapses remained "
+            f"{primary_bucket}, and {insufficient_rows} rows still lacked enough structured-state explanation."
+        )
+
+    if strategy_consistency == "split" and strategy_bucket_map:
+        rendered = ", ".join(
+            f"{strategy}={bucket}" for strategy, bucket in sorted(strategy_bucket_map.items())
+        )
+        return (
+            f"At the widest configuration {configuration.get('display_name', _MISSING_LABEL)}, "
+            "actionable selected-strategy -> rule_signal=hold collapses were most consistently "
+            f"associated with {primary_bucket} overall, but supported strategy slices remained split "
+            f"({rendered}), while {insufficient_rows} rows still lacked enough structured-state explanation "
+            "to prove a single universal internal mechanism."
         )
 
     return (
         f"At the widest configuration {configuration.get('display_name', _MISSING_LABEL)}, "
         "actionable selected-strategy -> rule_signal=hold collapses were most consistently "
-        f"associated with {primary_bucket} on persisted decision-layer fields, while "
-        f"{insufficient_rows} rows still lacked enough explanation to prove a single exact internal mechanism."
+        f"associated with {primary_bucket} on structured persisted decision-layer fields, while "
+        f"{insufficient_rows} rows still lacked enough structured-state explanation to prove a single exact internal mechanism."
     )
 
 
@@ -1620,6 +1807,31 @@ def _supported_strategy_primary_condition_buckets(rows: Any) -> dict[str, str]:
 
         result[strategy] = primary_bucket
     return result
+
+
+def _supported_strategy_condition_buckets(rows: Any) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for row in _safe_list(rows):
+        row_dict = _safe_dict(row)
+        strategy = _normalize_strategy(row_dict.get("strategy"))
+        if strategy is None:
+            continue
+        if row_dict.get("support_status") != "supported":
+            continue
+        bucket = str(row_dict.get("primary_condition_bucket") or "").strip()
+        if not bucket:
+            continue
+        result[strategy] = bucket
+    return result
+
+
+def _strategy_level_consistency(strategy_bucket_map: dict[str, str]) -> str:
+    if not strategy_bucket_map:
+        return "unknown"
+    unique_buckets = {value for value in strategy_bucket_map.values() if value}
+    if len(unique_buckets) <= 1:
+        return "aligned"
+    return "split"
 
 
 def _group_value(row: dict[str, Any], field: str) -> str | None:
@@ -1742,6 +1954,20 @@ def _classify_reason_text(text: str) -> set[str]:
     return categories
 
 
+def _hold_resolution_evidence_source(
+    *,
+    has_structured: bool,
+    has_reason: bool,
+) -> str:
+    if has_structured and has_reason:
+        return "structured_state_and_reason_text"
+    if has_structured:
+        return "structured_state_only"
+    if has_reason:
+        return "reason_text_only"
+    return "no_classified_observable_evidence"
+
+
 def _text_contains_any(text: str | None, markers: Sequence[str]) -> bool:
     if text is None:
         return False
@@ -1779,6 +2005,22 @@ def _collect_field_presence(
 
     if _has_meaningful_value(value):
         field_counter[prefix] += 1
+
+
+def _filter_inventory_counter(
+    counter: Counter[str],
+    *,
+    allowed_prefixes: Sequence[str],
+) -> Counter[str]:
+    filtered: Counter[str] = Counter()
+    for key, value in counter.items():
+        key_text = str(key)
+        if any(
+            key_text == prefix or key_text.startswith(f"{prefix}.")
+            for prefix in allowed_prefixes
+        ):
+            filtered[key_text] = value
+    return filtered
 
 
 def _has_meaningful_value(value: Any) -> bool:

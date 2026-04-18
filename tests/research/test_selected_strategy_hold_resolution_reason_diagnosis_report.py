@@ -78,6 +78,9 @@ def _raw_record(
         rule_engine["signal"] = rule_signal
     if rule_reason is not None:
         rule_engine["reason"] = rule_reason
+    rule_engine["confidence"] = 0.61
+    if strategy is not None:
+        rule_engine["strategy"] = strategy
 
     execution: dict[str, object] = {}
     if execution_action is not None:
@@ -335,35 +338,30 @@ def test_rule_signal_uses_raw_rule_engine_signal_even_when_normalized_rule_signa
     assert targeting["actionable_selected_strategy_rule_non_hold_rows"] == 1
 
 
-def test_observable_field_inventory_includes_only_fields_actually_present(
+def test_observable_field_inventory_is_narrowed_to_decision_adjacent_layers(
     tmp_path: Path,
 ) -> None:
     input_path = tmp_path / "trade_analysis.jsonl"
-    _write_jsonl(
-        input_path,
-        [
-            _raw_record(
-                logged_at="2026-04-14T00:00:00+00:00",
-                symbol="BTCUSDT",
-                strategy="intraday",
-                bias="bullish",
-                selected_strategy_signal="long",
-                rule_signal="hold",
-                rule_reason="Higher timeframes are conflicted, so the engine blocks directional trades until broader structure improves.",
-                context_state="conflicted",
-                context_bias="neutral",
-                setup_state="long",
-            ),
-            _raw_record(
-                logged_at="2026-04-14T00:01:00+00:00",
-                symbol="ETHUSDT",
-                strategy="swing",
-                bias="bearish",
-                selected_strategy_signal="short",
-                rule_signal="hold",
-            ),
-        ],
+    row = _raw_record(
+        logged_at="2026-04-14T00:00:00+00:00",
+        symbol="BTCUSDT",
+        strategy="intraday",
+        bias="bullish",
+        selected_strategy_signal="long",
+        rule_signal="hold",
+        rule_reason="Higher timeframes are conflicted, so the engine blocks directional trades until broader structure improves.",
+        context_state="conflicted",
+        context_bias="neutral",
+        setup_state="long",
     )
+    row.setdefault("timeframe_summary", {})
+    row["timeframe_summary"]["15m"] = {
+        "close": 100.0,
+        "ema_20": 99.5,
+        "rsi_14": 56.2,
+        "score": 1.2,
+    }
+    _write_jsonl(input_path, [row])
 
     report = report_module.build_report(
         input_path=input_path,
@@ -382,7 +380,8 @@ def test_observable_field_inventory_includes_only_fields_actually_present(
     assert "rule_engine.reason" in field_paths
     assert "timeframe_summary.context_layer.context" in field_paths
     assert "timeframe_summary.setup_layer.setup" in field_paths
-    assert "timeframe_summary.trigger_layer.trigger" not in field_paths
+    assert "timeframe_summary.15m.close" not in field_paths
+    assert "timeframe_summary.15m.ema_20" not in field_paths
     assert "execution.action" not in field_paths
 
 
@@ -428,7 +427,7 @@ def test_explicit_observable_condition_rows_stay_separate_from_insufficient_expl
     assert summary["condition_bucket_counts"]["insufficient_persisted_explanation"] == 1
 
 
-def test_root_reason_text_is_not_hidden_when_rule_reason_text_is_unclassified(
+def test_root_reason_text_is_not_hidden_but_reason_text_only_rows_remain_insufficient(
     tmp_path: Path,
 ) -> None:
     input_path = tmp_path / "trade_analysis.jsonl"
@@ -443,7 +442,7 @@ def test_root_reason_text_is_not_hidden_when_rule_reason_text_is_unclassified(
                 selected_strategy_signal="long",
                 rule_signal="hold",
                 rule_reason="engine keeps the position on hold here",
-                root_reason="Broader structure remains neutral, so stand aside until the regime changes.",
+                root_reason="Bullish context exists, but setup and trigger are not both confirmed enough for execution.",
             )
         ],
     )
@@ -454,9 +453,21 @@ def test_root_reason_text_is_not_hidden_when_rule_reason_text_is_unclassified(
         configurations=[report_module.DiagnosisConfiguration(36, 2500)],
     )
     summary = report["configuration_summaries"][0]["hold_resolution_reason_summary"]
+    categories = {
+        row["reason_text_category"]: row["count"]
+        for row in summary["reason_text_category_count_rows"]
+    }
+    evidence_sources = {
+        row["evidence_source"]: row["count"]
+        for row in summary["evidence_source_count_rows"]
+    }
 
-    assert summary["explicit_observable_condition_rows"] == 1
-    assert summary["condition_bucket_counts"]["explicit_context_neutrality"] == 1
+    assert summary["explicit_observable_condition_rows"] == 0
+    assert summary["reason_text_only_classified_rows"] == 1
+    assert summary["insufficient_persisted_explanation_rows"] == 1
+    assert summary["condition_bucket_counts"]["insufficient_persisted_explanation"] == 1
+    assert categories["confirmation_gap"] == 1
+    assert evidence_sources["reason_text_only"] == 1
 
 
 def test_unclassified_reason_text_does_not_create_explicit_bucket(tmp_path: Path) -> None:
@@ -564,7 +575,7 @@ def test_bias_sign_breakdown_uses_raw_persisted_bias_fields_not_normalized_bias(
     assert row["bias_sign"] == "bullish"
 
 
-def test_mixed_or_inconclusive_bucket_is_conservative_when_multiple_categories_coexist(
+def test_mixed_or_inconclusive_bucket_is_conservative_when_multiple_structured_categories_coexist(
     tmp_path: Path,
 ) -> None:
     input_path = tmp_path / "trade_analysis.jsonl"
