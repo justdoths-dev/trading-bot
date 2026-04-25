@@ -141,7 +141,10 @@ def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "logged_at": logged_at,
         "symbol": _to_str(record.get("symbol")),
-        "selected_strategy": _to_str(record.get("selected_strategy")),
+        "selected_strategy": _first_text(
+            record.get("selected_strategy"),
+            rule_engine.get("strategy"),
+        ),
         "bias": _to_str(record.get("bias") or rule_engine.get("bias")),
         "rule_signal": _to_str(rule_engine.get("signal")),
         "execution_signal": _to_str(execution.get("signal")),
@@ -289,6 +292,14 @@ def _to_str(v: Any) -> str | None:
         return None
     text = str(v).strip()
     return text if text else None
+
+
+def _first_text(*values: Any) -> str | None:
+    for value in values:
+        text = _to_str(value)
+        if text is not None:
+            return text
+    return None
 
 
 def _to_float(v: Any) -> float | None:
