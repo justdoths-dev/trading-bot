@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -686,10 +687,28 @@ def _configuration_sort_key(configuration: dict[str, Any]) -> tuple[int, int, st
 
 def _clean_configuration(configuration: Any) -> dict[str, Any]:
     item = _safe_dict(configuration)
+    parsed = _parse_configuration_display_name(item.get("display_name"))
+    window_hours = item.get("window_hours")
+    max_rows = item.get("max_rows")
+    if window_hours is None:
+        window_hours = parsed.get("window_hours")
+    if max_rows is None:
+        max_rows = parsed.get("max_rows")
     return {
-        "window_hours": item.get("window_hours"),
-        "max_rows": item.get("max_rows"),
+        "window_hours": window_hours,
+        "max_rows": max_rows,
         "display_name": item.get("display_name"),
+    }
+
+
+def _parse_configuration_display_name(display_name: Any) -> dict[str, int | None]:
+    clean = _clean_text(display_name)
+    match = re.fullmatch(r"(\d+)\s*h\s*(?:/|_)\s*(\d+)", clean)
+    if not match:
+        return {"window_hours": None, "max_rows": None}
+    return {
+        "window_hours": int(match.group(1)),
+        "max_rows": int(match.group(2)),
     }
 
 

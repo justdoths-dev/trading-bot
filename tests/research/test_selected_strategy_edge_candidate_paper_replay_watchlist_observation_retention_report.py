@@ -114,6 +114,84 @@ def _standard_row(**overrides: Any) -> dict[str, Any]:
     )
 
 
+def test_clean_configuration_preserves_explicit_window_hours_and_max_rows() -> None:
+    configuration = report_module._clean_configuration(
+        {
+            "display_name": "144h/5000",
+            "window_hours": 168,
+            "max_rows": 6000,
+        }
+    )
+
+    assert configuration == {
+        "display_name": "144h/5000",
+        "window_hours": 168,
+        "max_rows": 6000,
+    }
+
+
+def test_clean_configuration_derives_numeric_fields_from_slash_display_name() -> None:
+    configuration = report_module._clean_configuration(
+        {
+            "display_name": "144h/5000",
+            "window_hours": None,
+            "max_rows": None,
+        }
+    )
+
+    assert configuration == {
+        "display_name": "144h/5000",
+        "window_hours": 144,
+        "max_rows": 5000,
+    }
+
+
+def test_clean_configuration_derives_numeric_fields_from_underscore_display_name() -> None:
+    configuration = report_module._clean_configuration(
+        {
+            "display_name": "336h_10000",
+            "window_hours": None,
+            "max_rows": None,
+        }
+    )
+
+    assert configuration == {
+        "display_name": "336h_10000",
+        "window_hours": 336,
+        "max_rows": 10000,
+    }
+
+
+def test_build_retention_rows_derives_observed_configuration_numbers_from_display_name_only() -> None:
+    summaries = [
+        {
+            "configuration": {
+                "display_name": "144h / 5000",
+                "window_hours": None,
+                "max_rows": None,
+            },
+            "watchlist_row_count": 1,
+            "promising_watchlist_count": 1,
+            "standard_watchlist_count": 0,
+            "paper_replay_candidate_count": 1,
+            "production_candidate_count": 0,
+            "watchlist_rows": [_watchlist_row()],
+        }
+    ]
+
+    rows = report_module.build_retention_rows(
+        source_watchlist_configuration_summaries=summaries
+    )
+
+    assert rows[0]["observed_configurations"] == [
+        {
+            "display_name": "144h / 5000",
+            "window_hours": 144,
+            "max_rows": 5000,
+        }
+    ]
+
+
 def test_two_rows_same_observation_across_configurations_become_one_retained_row() -> None:
     summaries = [
         _summary(
